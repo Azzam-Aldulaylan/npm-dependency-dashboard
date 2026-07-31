@@ -10,22 +10,22 @@ Early planning stage. See [`docs/npm-dashboard-extension-spec.md`](docs/npm-dash
 ## Highlights
 - Table view: package name, current version, available version, vulnerability tag, upgrade button
 - Manual + automatic refresh (on open, and periodically while the panel is active)
-- Monorepo support (multiple `package.json` files)
+- Monorepo support (multiple `package.json` files, npm only for MVP)
 - Built to stay slim, fast, and low on resources
 
 ## Planned Stack
 - TypeScript, VS Code Extension API
 - React-based Webview UI
-- npm registry API + `npm audit` for vulnerability data
+- npm registry API for versions, `npm audit` for vulnerability data
 
 ## Roadmap
-1. **MVP** — core table, refresh, monorepo detection, error handling, caching
+1. **MVP** — core table, refresh, monorepo detection, error handling, caching (npm only)
 2. **v1.x** — priority filter, search, dev dependency toggle
 3. **v2** — dependency tree visualization, changelog viewer
-4. **v3** — private registry auth, telemetry, versioning strategy
+4. **v3** — pnpm/yarn support, private registry auth, telemetry, versioning strategy
 
 ## License
-Open source — license to be finalized.
+Open source. LICENSE file is an MVP blocker (required for Marketplace publishing) — specific license to be chosen before v1 ships.
 
 ## Contributing
 Not yet open for contributions while the spec and initial implementation are being worked out. Issues and discussion are welcome.

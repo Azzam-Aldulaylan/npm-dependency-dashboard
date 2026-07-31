@@ -25,23 +25,27 @@ A panel (VS Code Webview) rendering a table with the following columns:
 | Column | Description |
 |---|---|
 | Package Name | Name of the installed dependency |
-| Current Version | Version currently installed (from `package.json` / lockfile) |
+| Current Version | Version currently installed (lockfile-resolved) |
 | Available Version | Latest version available on the npm registry |
 | Vulnerability Status | Colorized tag (e.g., green = none, yellow = low/moderate, red = high/critical) |
 | Action | "Upgrade" button to bump the package |
 
 ### Data Sources
-- **Package list & current versions:** parsed from `package.json` (and lockfile for resolved versions)
-- **Available updates:** npm registry API (per-package, abbreviated packument — see Technical Architecture)
-- **Vulnerabilities:** npm's bulk advisories endpoint (`POST /-/npm/v1/security/advisories/bulk`), not a spawned `npm audit` process
+- **Package list & current versions:** parsed from `package.json` and the lockfile. "Current Version" is defined as the **lockfile-resolved version** (what's actually installed), not the `package.json` range — if no lockfile exists, fall back to showing the range with an "unresolved" indicator.
+- **Available updates:** npm registry API, abbreviated packument only (see Technical Architecture — the `/<pkg>/latest` shortcut was considered and dropped, see below).
+- **Vulnerabilities:** `npm audit --json` is the **primary** source (see Vulnerability Scope below for why). The bulk advisories endpoint (`POST /-/npm/v1/security/advisories/bulk`) is a **fallback** for when no lockfile is present or the npm CLI isn't reachable.
 
 ### Vulnerability Scope: Direct vs Transitive Dependencies
 Most real-world vulnerabilities live in transitive dependencies, not the packages listed directly in `package.json`. Decision for MVP:
 
 - The table's primary rows are **direct dependencies**.
-- A direct dependency's vulnerability tag **aggregates** any advisory found anywhere in its subtree (advisories map to dependency paths, so this is derivable from the audit data without extra calls).
+- A direct dependency's vulnerability tag **aggregates** any advisory found anywhere in its subtree.
 - Each row is expandable to show which nested package is actually flagged and the path to it.
-- The **"Upgrade" button only appears if a fix exists at the direct-dependency level** (i.e. bumping the direct package resolves the transitive advisory). If no such fix exists, the tag links to advisory details instead of showing a non-functional upgrade action.
+- The **"Upgrade" button only appears if a fix exists at the direct-dependency level** (i.e. bumping the direct package resolves the transitive advisory).
+
+**Why `npm audit --json` is the primary source, not the bulk endpoint:** the bulk advisories endpoint takes a package-name → version map and returns advisories keyed by package name — it returns **no dependency paths and no fix information**. Both of the features above (expandable path, fix-gated upgrade button) depend on data the bulk endpoint doesn't have. `npm audit --json` returns both: an `effects` field with the path chain, and `fixAvailable: { name, version, isSemVerMajor }` — exactly the "is this fixable at the direct level, and does it break semver" signal the rules above need.
+- When only the bulk-endpoint fallback is available (no lockfile / CLI unreachable), these two features degrade gracefully: the tag still shows "vulnerable," but without path drilldown or the fix-gated upgrade button.
+- Advisory requests (via either source) target npm's own advisory infrastructure regardless of the resolved `.npmrc` registry — see Registry Resolution below.
 
 ### Refresh Behavior
 - Auto-runs the full check cycle (read `package.json` → fetch versions → fetch vulnerabilities) every time the panel is opened
@@ -65,10 +69,14 @@ Most real-world vulnerabilities live in transitive dependencies, not the package
 
 - **Extension host:** TypeScript, using the VS Code Extension API
 - **UI layer:** Webview panel, built with React (keeps it consistent with the rest of the stack and snappy to render)
-- **Data layer:** reads local `package.json` (and lockfile where relevant); all version and vulnerability data comes from the registry, sourced as detailed below.
-- **Version fetching:** the npm registry has no batch endpoint for version data. Use concurrency-limited per-package requests against the abbreviated packument (`Accept: application/vnd.npm.install-v1+json`, or `/<pkg>/latest`) — the full packument for a package like `typescript` can be megabytes.
-- **Vulnerability fetching:** use the real bulk endpoint (`POST /-/npm/v1/security/advisories/bulk`) instead of spawning `npm audit` as a child process.
-- **Registry resolution:** read the configured registry from `.npmrc` (project-level, then user-level, then default `registry.npmjs.org`) before making requests. This does **not** include authentication (still deferred to v2/v3) — it's purely resolving the correct URL so users behind a proxy or Artifactory mirror don't get an error table on first run.
+- **Data layer:** reads local `package.json` and lockfile (npm only, see Package Manager scope below); version data comes from the npm registry, vulnerability data comes from the local `npm audit` CLI or the bulk advisories endpoint as fallback.
+- **Version fetching:** the npm registry has no batch endpoint for version data. Use concurrency-limited per-package requests against the abbreviated packument (`Accept: application/vnd.npm.install-v1+json`) — the full packument for a package like `typescript` can be megabytes. (`/<pkg>/latest` was considered as a lighter alternative but only returns the `latest` dist-tag, not enough to detect "newer version within range" — dropped.)
+- **Pre-release handling:** "Available Version" is the highest published version greater than the installed version by semver — not just the `latest` dist-tag. This matters for projects sitting on a pre-release: comparing only against `latest` would falsely flag them as outdated relative to an older stable release.
+- **Vulnerability fetching:** `npm audit --json` (primary) or the bulk advisories endpoint (fallback) — see Vulnerability Scope above.
+- **Registry resolution (split rule):**
+  - **Version data** follows the resolved `.npmrc` registry (project-level → user-level → default `registry.npmjs.org`), so proxy/Artifactory users don't get an error table on first run. No authentication support yet (deferred to v2/v3).
+  - **Advisory data** (via `npm audit` or the bulk fallback) always targets npm's own advisory infrastructure, regardless of the resolved registry — private mirrors generally don't implement the advisory endpoint.
+- **Package manager scope (MVP):** **npm only.** `package-lock.json` is the only lockfile parsed for resolved versions and audit data. pnpm/yarn support — including `workspace:*` protocol handling and per-PM lockfile parsing — is deferred to whenever multi-PM support is added (not MVP).
 
 ### Caching
 - **Storage:** `workspaceState` (results are project-scoped, not global).
@@ -79,7 +87,7 @@ Most real-world vulnerabilities live in transitive dependencies, not the package
 ### Monorepo Handling
 - Detect all `package.json` files in the workspace using VS Code's workspace search API (respects `.gitignore`), with explicit exclusions for `node_modules`, `.git`, and common build directories — avoid a raw recursive filesystem scan on large repos.
 - If more than one `package.json` is found, let the user pick which one to view, or show each in its own tab.
-- `workspace:*` protocol dependencies (pnpm/yarn workspaces) have no registry version to resolve — tag these as "workspace" and skip the version/vulnerability lookup rather than erroring.
+- MVP is npm-only (see Technical Architecture), so `workspace:*` protocol handling (pnpm/yarn) is deferred along with the rest of multi-PM support — not required for MVP monorepo detection.
 - No forced single-project assumption.
 
 ### Error Handling
@@ -96,6 +104,7 @@ Most real-world vulnerabilities live in transitive dependencies, not the package
 ## Explicitly Out of Scope for v1
 
 - **Authentication / private npm registries** — deferred to v2/v3. No token handling for private packages in MVP.
+- **pnpm/yarn support** — MVP is npm-only (`package-lock.json` only). Includes `workspace:*` protocol handling and any per-PM lockfile parsing.
 - **Telemetry** — worth adding later to understand feature usage, not required for MVP.
 - **Versioning/compatibility strategy for npm API changes** — to be handled as a maintenance concern post-launch, not a launch blocker.
 
@@ -133,11 +142,11 @@ These aren't user-facing features but are required before a Marketplace listing 
 | MVP (v1) | Core table (name, current version, available version, vulnerability tag, upgrade button), manual + auto refresh, monorepo detection, basic error handling, caching, concurrency-limited fetching |
 | v1.x | Priority filter, search, dev dependency toggle |
 | v2 | Dependency tree visualization, changelog viewer |
-| v3 | Authentication for private registries, telemetry, versioning strategy for registry API changes |
+| v3 | pnpm/yarn support (workspace:* handling, per-PM lockfile parsing), authentication for private registries, telemetry, versioning strategy for registry API changes |
 
 ---
 
-## Open Questions for Later
-- Exact visual design of the vulnerability tags (color scale, thresholds)
-- Whether "Upgrade" applies the change directly via `npm install <pkg>@latest` or opens a confirmation step first
-- Marketplace listing details (icon, extension name, description) once naming is finalized
+## Resolved Decisions (previously open questions)
+- **What "Upgrade" does:** confirm, then run in a **visible VS Code task** (e.g. `npm install <pkg>@<version>`), not a silent `child_process`. Failures need to surface, since this rewrites both `package.json` and the lockfile.
+- **Vulnerability tag color scale/thresholds:** still to be finalized visually, but the underlying severity levels (critical/high/moderate/low/none) are already defined by the audit/advisory data itself.
+- **Marketplace listing details** (icon, display name, description): deferred until naming is finalized — see Naming Note above.

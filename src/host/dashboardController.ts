@@ -14,11 +14,15 @@
  */
 
 import type { AuditRunner } from '../core/audit/npmAudit.js';
+import type { DeclaredDependency } from '../core/manifest/parse.js';
+import { parseManifest } from '../core/manifest/parse.js';
 import type { BuildPackageRowsOptions, BuildPackageRowsResult } from '../core/pipeline.js';
 import { buildPackageRows } from '../core/pipeline.js';
 import type { HttpClient } from '../core/registry/http.js';
 import { FetchError } from '../core/registry/http.js';
 import type { EtagStore } from '../core/registry/versions.js';
+import type { UpgradeEligibility, UpgradeRequestInput } from '../core/upgrade/validate.js';
+import { validateUpgradeRequest } from '../core/upgrade/validate.js';
 import { toHostToWebviewMessage } from './dashboardData.js';
 import type { HostToWebviewMessage, ProtocolError } from './webviewProtocol.js';
 
@@ -49,14 +53,74 @@ function toProtocolError(cause: unknown): ProtocolError {
   return { code: 'UNKNOWN', message: String(cause) };
 }
 
+/** The project-specific slice of options that a reload replaces — everything but the fetch machinery. */
+export type ProjectSnapshot = Pick<
+  DashboardControllerOptions,
+  'root' | 'manifestText' | 'lockfileText' | 'registry'
+>;
+
 export class DashboardController {
-  private readonly options: DashboardControllerOptions;
+  private options: DashboardControllerOptions;
   private lastResult: BuildPackageRowsResult | undefined;
   private lastGeneratedAt: string | undefined;
   private inFlight: AbortController | undefined;
+  /**
+   * Derived from `options.manifestText` — recomputed by `updateProjectSnapshot`
+   * whenever the snapshot changes, so it always reflects the manifest the most
+   * recent (or in-flight) scan actually read. This is the host-owned source of
+   * dependencies/devDependencies/optionalDependencies classification for the
+   * Upgrade action's npm save flag; the webview never supplies or sees it.
+   *
+   * Wrapped in try/catch rather than left to throw: an invalid manifestText
+   * already surfaces as a fatal-error from run() (see the existing "an
+   * unreadable manifest is a fatal error" test) — that failure path must not
+   * change to throwing out of the constructor instead, before a sink even
+   * exists to report it to.
+   */
+  private declaredDependencies: DeclaredDependency[];
 
   constructor(options: DashboardControllerOptions) {
     this.options = options;
+    this.declaredDependencies = DashboardController.parseDeclaredDependencies(options.manifestText);
+  }
+
+  private static parseDeclaredDependencies(manifestText: string): DeclaredDependency[] {
+    try {
+      return parseManifest(manifestText).dependencies;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Absolute path to the directory holding package.json — the Upgrade task's cwd. */
+  get root(): string {
+    return this.options.root;
+  }
+
+  /**
+   * Replaces the controller's project snapshot in place — root, manifestText,
+   * lockfileText, registry — and re-derives `declaredDependencies` from the
+   * new manifestText. Called by DashboardPanel after re-resolving the project
+   * (a fresh `resolveProject()` read from disk), so that a subsequent
+   * `handleRefresh` scans against what package.json/the lockfile actually
+   * contain now — including a package.json/lockfile an upgrade task itself
+   * just rewrote — rather than whatever was read when the panel first opened.
+   * The fetch machinery (httpClient/etagStore/auditRunner) is untouched, so
+   * ETag caching keeps working across reloads.
+   */
+  updateProjectSnapshot(snapshot: ProjectSnapshot): void {
+    this.options = { ...this.options, ...snapshot };
+    this.declaredDependencies = DashboardController.parseDeclaredDependencies(snapshot.manifestText);
+  }
+
+  /**
+   * The actual security boundary for the Upgrade action: `request` is
+   * whatever the webview sent, trusted only as far as it matches `lastResult`
+   * and `declaredDependencies` — both derived from the host's own last scan,
+   * never from the webview. See src/core/upgrade/validate.ts.
+   */
+  validateUpgradeRequest(request: UpgradeRequestInput): UpgradeEligibility {
+    return validateUpgradeRequest(this.lastResult?.rows, this.declaredDependencies, request);
   }
 
   /**

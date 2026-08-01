@@ -8,8 +8,10 @@
  * this import by source path regardless of which directory it lives in, so
  * bundling is unaffected.
  *
- * No click handler and no webview-protocol message here — S5 wires the
- * actual upgrade action. This only decides what the cell shows.
+ * This only decides the label/tooltip text; the click handler, the "running"
+ * state, and the actual postMessage live in PackageTable.tsx (S5). What
+ * happens after the click — host-side validation, confirmation, task
+ * execution — is in src/core/upgrade/* and src/host/upgradeRunner.ts.
  */
 
 export interface UpgradeActionDisplay {
@@ -17,18 +19,18 @@ export interface UpgradeActionDisplay {
   tooltip: string;
 }
 
-export const UPGRADE_UNAVAILABLE_TOOLTIP =
-  'Running the upgrade is not available yet — it arrives in a future release.';
+export const UPGRADE_TOOLTIP =
+  'Runs npm install as a visible VS Code task, after a confirmation step.';
 
 /**
  * `null` means: render an em dash, no button at all — there is nothing to
- * upgrade to. A non-null `upgradeTo` always renders a disabled button naming
- * the target version, never a live action.
+ * upgrade to. A non-null `upgradeTo` always renders a button naming the
+ * target version.
  */
 export function upgradeActionDisplay(upgradeTo: string | null): UpgradeActionDisplay | null {
   if (upgradeTo === null) return null;
   return {
     label: `Upgrade to ${upgradeTo}`,
-    tooltip: UPGRADE_UNAVAILABLE_TOOLTIP,
+    tooltip: UPGRADE_TOOLTIP,
   };
 }

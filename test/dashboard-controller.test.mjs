@@ -280,7 +280,203 @@ test('a fatal error leaves nothing cached, so a retry starts clean', async () =>
   assert.deepEqual(sink.statuses, ['loading', 'fatal-error'], 'no stale replay of a run that failed');
 });
 
-// ------------------------------------------------------------- audit
+// -------------------------------------------------------------- reload
+
+test('updateProjectSnapshot then handleRefresh scans the new lockfile content, not the original', async () => {
+  const controller = makeController(staticClient('2.0.0'));
+  const first = recordingSink();
+  await controller.handleReady(first);
+  assert.equal(first.posted[1].data.rows[0].current, '1.0.0', 'sanity check on the original snapshot');
+
+  const updatedLockfile = JSON.stringify({
+    name: 'app',
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'app', version: '1.0.0', dependencies: { 'clean-pkg': '^1.0.0' } },
+      // Simulates an upgrade task having rewritten the lockfile on disk.
+      'node_modules/clean-pkg': { version: '1.5.0' },
+    },
+  });
+  controller.updateProjectSnapshot({
+    root: ROOT,
+    manifestText: MANIFEST,
+    lockfileText: updatedLockfile,
+    registry: REGISTRY,
+  });
+
+  const sink = recordingSink();
+  await controller.handleRefresh(sink);
+
+  assert.equal(
+    sink.posted[1].data.rows[0].current,
+    '1.5.0',
+    'the second scan must reflect the updated lockfile, not the string captured at construction'
+  );
+});
+
+test('updateProjectSnapshot then handleRefresh scans the new manifest content, not the original', async () => {
+  const controller = makeController(staticClient('1.0.1'));
+  const first = recordingSink();
+  await controller.handleReady(first);
+  assert.deepEqual(
+    first.posted[1].data.rows.map((r) => r.name),
+    ['clean-pkg'],
+    'sanity check on the original snapshot'
+  );
+
+  const updatedManifest = JSON.stringify({
+    name: 'app',
+    version: '1.0.0',
+    dependencies: { 'clean-pkg': '^1.0.0', 'new-pkg': '^1.0.0' },
+  });
+  const updatedLockfile = JSON.stringify({
+    name: 'app',
+    lockfileVersion: 3,
+    packages: {
+      '': {
+        name: 'app',
+        version: '1.0.0',
+        dependencies: { 'clean-pkg': '^1.0.0', 'new-pkg': '^1.0.0' },
+      },
+      'node_modules/clean-pkg': { version: '1.0.0' },
+      'node_modules/new-pkg': { version: '1.0.0' },
+    },
+  });
+  controller.updateProjectSnapshot({
+    root: ROOT,
+    manifestText: updatedManifest,
+    lockfileText: updatedLockfile,
+    registry: REGISTRY,
+  });
+
+  const sink = recordingSink();
+  await controller.handleRefresh(sink);
+
+  assert.deepEqual(
+    sink.posted[1].data.rows.map((r) => r.name).sort(),
+    ['clean-pkg', 'new-pkg'],
+    'the second scan must reflect the updated manifest’s dependency set, not the string captured at construction'
+  );
+});
+
+test('updateProjectSnapshot changes root, read via the root getter', () => {
+  const controller = makeController(staticClient('1.0.1'));
+  assert.equal(controller.root, ROOT);
+
+  controller.updateProjectSnapshot({
+    root: '/tmp/other-project',
+    manifestText: MANIFEST,
+    lockfileText: LOCKFILE,
+    registry: REGISTRY,
+  });
+
+  assert.equal(controller.root, '/tmp/other-project');
+});
+
+test('updateProjectSnapshot changes declaredDependencies, reflected in upgrade classification', async () => {
+  const controller = makeController(staticClient('1.0.1'));
+  await controller.handleReady(recordingSink());
+
+  // Originally a prod dependency — reclassify it as dev via a fresh manifest.
+  const reclassifiedManifest = JSON.stringify({
+    name: 'app',
+    version: '1.0.0',
+    devDependencies: { 'clean-pkg': '^1.0.0' },
+  });
+  const reclassifiedLockfile = JSON.stringify({
+    name: 'app',
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'app', version: '1.0.0', devDependencies: { 'clean-pkg': '^1.0.0' } },
+      'node_modules/clean-pkg': { version: '1.0.0', dev: true },
+    },
+  });
+  controller.updateProjectSnapshot({
+    root: ROOT,
+    manifestText: reclassifiedManifest,
+    lockfileText: reclassifiedLockfile,
+    registry: REGISTRY,
+  });
+  await controller.handleRefresh(recordingSink());
+
+  // clean-pkg has no advisories, so there is still no eligible upgrade — this
+  // only proves the reclassification took effect, via `not-declared` staying
+  // unset (the row + declared dependency now agree it's a real, dev entry).
+  const result = controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' });
+  assert.equal(result.ok, false);
+  assert.notEqual(result.reason, 'not-declared');
+});
+
+// ------------------------------------------------------------ upgrade eligibility
+
+test('root exposes the project directory the controller was constructed with', () => {
+  const controller = makeController(staticClient('1.0.1'));
+  assert.equal(controller.root, ROOT);
+});
+
+test('before any scan completes, an upgrade request is rejected with no-scan-result', () => {
+  const controller = makeController(staticClient('1.0.1'));
+  const result = controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' });
+  assert.deepEqual(result, { ok: false, reason: 'no-scan-result' });
+});
+
+test('an unknown package is rejected even after a successful scan', async () => {
+  const controller = makeController(staticClient('1.0.1'));
+  await controller.handleReady(recordingSink());
+
+  const result = controller.validateUpgradeRequest({ package: 'never-heard-of-it', target: '9.9.9' });
+  assert.deepEqual(result, { ok: false, reason: 'unknown-package' });
+});
+
+test('a package with no eligible upgrade is rejected, and a stale/forged target too', async () => {
+  const controller = makeController(staticClient('1.0.1'));
+  await controller.handleReady(recordingSink());
+
+  // clean-pkg has no advisories, so resolveUpgradeTarget leaves upgradeTo
+  // null — no matter what target a (forged or stale) request names.
+  const noUpgrade = controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' });
+  assert.deepEqual(noUpgrade, { ok: false, reason: 'no-eligible-upgrade' });
+
+  const forged = controller.validateUpgradeRequest({ package: 'clean-pkg', target: '99.0.0' });
+  assert.equal(forged.ok, false);
+});
+
+test('classification is derived from the manifest, never trusted from the request', async () => {
+  const manifestWithDevAndOptional = JSON.stringify({
+    name: 'app',
+    version: '1.0.0',
+    dependencies: { 'clean-pkg': '^1.0.0' },
+    devDependencies: { 'dev-pkg': '^1.0.0' },
+  });
+  const lockfileWithDev = JSON.stringify({
+    name: 'app',
+    lockfileVersion: 3,
+    packages: {
+      '': {
+        name: 'app',
+        version: '1.0.0',
+        dependencies: { 'clean-pkg': '^1.0.0' },
+        devDependencies: { 'dev-pkg': '^1.0.0' },
+      },
+      'node_modules/clean-pkg': { version: '1.0.0' },
+      'node_modules/dev-pkg': { version: '1.0.0', dev: true },
+    },
+  });
+
+  const controller = makeController(staticClient('1.0.1'), {
+    manifestText: manifestWithDevAndOptional,
+    lockfileText: lockfileWithDev,
+  });
+  await controller.handleReady(recordingSink());
+
+  // Both rows are clean (no advisories fetched for dev-pkg — the fake client
+  // only answers clean-pkg's /latest), so neither has an eligible upgrade;
+  // this exercises that a request naming a package never trusts anything
+  // about its classification — only manifestText decides dev vs prod.
+  const result = controller.validateUpgradeRequest({ package: 'dev-pkg', target: '1.0.1' });
+  assert.equal(result.ok, false);
+  assert.notEqual(result.reason, 'not-declared', 'dev-pkg is a real declared dependency');
+});
 
 test('a working audit runner produces a plain ready status', async () => {
   const auditRunner = {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import { dependencyCountLabel } from '../../src/host/dependencySummary.js';
+import { upgradeErrorClearsActiveState, upgradeErrorIsUserVisible } from '../../src/host/upgradeUiState.js';
 import type { DashboardData, HostToWebviewMessage } from '../../src/host/webviewProtocol.js';
 import { isHostToWebviewMessage } from '../../src/host/webviewProtocol.js';
 import { PackageTable } from './components/PackageTable.js';
@@ -24,8 +25,20 @@ function partialErrorText(data: DashboardData): string | null {
   return reasons.length === 0 ? null : reasons.join('; ');
 }
 
+interface UpgradeErrorState {
+  package: string;
+  code: string;
+  message: string;
+}
+
 export function App(): ReactElement {
   const [message, setMessage] = useState<HostToWebviewMessage | undefined>(undefined);
+  // The one package this webview itself most recently asked to upgrade, or
+  // null. The host allows only one upgrade at a time for the whole panel —
+  // see UpgradeLock — so this mirrors that as a single value, not a set, and
+  // disables every Upgrade button (not just the one clicked) while set.
+  const [activeUpgrade, setActiveUpgrade] = useState<string | null>(null);
+  const [upgradeError, setUpgradeError] = useState<UpgradeErrorState | null>(null);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent): void => {
@@ -36,7 +49,25 @@ export function App(): ReactElement {
         console.warn('Dependency Dashboard: dropped a message that failed validation');
         return;
       }
-      setMessage(event.data);
+      const incoming = event.data;
+
+      if (incoming.status === 'upgrade-error') {
+        // Never touches `message` — the rendered table/banners are exactly
+        // what they were before this arrived.
+        if (upgradeErrorClearsActiveState(incoming.error.code)) {
+          setActiveUpgrade(null);
+        }
+        if (upgradeErrorIsUserVisible(incoming.error.code)) {
+          setUpgradeError({ package: incoming.package, code: incoming.error.code, message: incoming.error.message });
+        }
+        return;
+      }
+
+      // Any other message is a fresh snapshot that supersedes whatever
+      // optimistic upgrade state was showing.
+      setActiveUpgrade(null);
+      setUpgradeError(null);
+      setMessage(incoming);
     };
 
     // Listen before announcing readiness, so the host's reply cannot be missed.
@@ -51,14 +82,24 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'refresh' });
   }, []);
 
+  const requestUpgrade = useCallback((packageName: string, target: string) => {
+    setActiveUpgrade(packageName);
+    vscode.postMessage({ type: 'upgrade', package: packageName, target });
+  }, []);
+
   // No message yet is the same user-visible state as an explicit loading one.
   const loading = message === undefined || message.status === 'loading';
+  // Disabled while an upgrade is active — a manual refresh mid-upgrade would
+  // race the scan against a package.json/lockfile the task is still writing
+  // to; the host rejects it too (see DashboardPanel.handle), this just keeps
+  // the button from inviting a click that can't do anything anyway.
+  const refreshDisabled = loading || activeUpgrade !== null;
 
   return (
     <main className="dashboard">
       <header className="dashboard__header">
         <h1 className="dashboard__title">Dependencies</h1>
-        <RefreshButton onRefresh={refresh} disabled={loading} />
+        <RefreshButton onRefresh={refresh} disabled={refreshDisabled} />
       </header>
 
       {loading ? <p className="notice">Checking dependencies…</p> : null}
@@ -72,8 +113,24 @@ export function App(): ReactElement {
         </div>
       ) : null}
 
+      {/* upgradeError is only ever set for a user-visible code (see
+          upgradeErrorIsUserVisible) — CANCELLED and UPGRADE_IN_PROGRESS never
+          reach this state at all, so there is nothing to filter here. */}
+      {upgradeError !== null ? (
+        <div className="banner banner--error" role="alert">
+          <p className="banner__text">
+            Couldn't upgrade {upgradeError.package}: {upgradeError.message}
+          </p>
+        </div>
+      ) : null}
+
       {message !== undefined && 'data' in message ? (
-        <Dashboard status={message.status} data={message.data} />
+        <Dashboard
+          status={message.status}
+          data={message.data}
+          activeUpgrade={activeUpgrade}
+          onUpgrade={requestUpgrade}
+        />
       ) : null}
     </main>
   );
@@ -82,9 +139,13 @@ export function App(): ReactElement {
 function Dashboard({
   status,
   data,
+  activeUpgrade,
+  onUpgrade,
 }: {
   status: 'empty' | 'ready' | 'stale' | 'partial-error';
   data: DashboardData;
+  activeUpgrade: string | null;
+  onUpgrade: (packageName: string, target: string) => void;
 }): ReactElement {
   const degraded = status === 'partial-error' ? partialErrorText(data) : null;
 
@@ -106,7 +167,7 @@ function Dashboard({
       {status === 'empty' ? (
         <p className="notice">No dependencies found.</p>
       ) : (
-        <PackageTable rows={data.rows} />
+        <PackageTable rows={data.rows} activeUpgrade={activeUpgrade} onUpgrade={onUpgrade} />
       )}
 
       <p className="dashboard__footer">

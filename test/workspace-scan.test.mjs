@@ -13,12 +13,15 @@ import {
   toProjectCandidates,
   chooseLockfile,
   nearestLockfileDir,
+  lockfileWatchPaths,
+  lockfileWatchDirs,
   isExcluded,
   dirOf,
   SHRINKWRAP,
   PACKAGE_LOCK,
   discoverProjectCandidates,
   deriveProjectId,
+  isSameProjectReload,
   projectCandidateLabel,
 } from '../out/core/workspace/scan.js';
 
@@ -90,6 +93,72 @@ test('a workspace member finds the root lockfile by walking up', () => {
 
 test('a lockfile beside the manifest wins over one further up', () => {
   assert.equal(nearestLockfileDir('packages/app', ['', 'packages/app']), 'packages/app');
+});
+
+// ------------------------------------------------ S7: lockfile topology
+
+test('lockfileWatchPaths covers both filenames in every ancestor directory up to the workspace root', () => {
+  assert.deepEqual(lockfileWatchPaths('packages/app'), [
+    'packages/app/package-lock.json',
+    'packages/app/npm-shrinkwrap.json',
+    'packages/package-lock.json',
+    'packages/npm-shrinkwrap.json',
+    'package-lock.json',
+    'npm-shrinkwrap.json',
+  ]);
+});
+
+test('lockfileWatchPaths at the workspace root itself is just the two root-level filenames', () => {
+  assert.deepEqual(lockfileWatchPaths(''), ['package-lock.json', 'npm-shrinkwrap.json']);
+});
+
+test('lockfileWatchPaths exactly matches every directory nearestLockfileDir would check — a lockfile appearing at any watched path is one nearestLockfileDir would find', () => {
+  const dir = 'packages/app/nested';
+  const watched = lockfileWatchPaths(dir);
+  const watchedDirs = new Set(watched.map((p) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '')));
+
+  for (const candidateLockfileDir of ['packages/app/nested', 'packages/app', 'packages', '']) {
+    assert.equal(nearestLockfileDir(dir, [candidateLockfileDir]), candidateLockfileDir);
+    assert.equal(
+      watchedDirs.has(candidateLockfileDir),
+      true,
+      `a lockfile appearing at ${candidateLockfileDir || '(root)'} would be resolved, so it must be watched`
+    );
+  }
+});
+
+test('lockfileWatchPaths includes npm-shrinkwrap.json alongside package-lock.json in the same directory, covering the precedence-flip case', () => {
+  const paths = lockfileWatchPaths('packages/app');
+  assert.equal(paths.includes('packages/app/package-lock.json'), true);
+  assert.equal(paths.includes('packages/app/npm-shrinkwrap.json'), true);
+});
+
+test('lockfileWatchDirs returns every ancestor directory up to the workspace root, matching lockfileWatchPaths\' own directory set', () => {
+  assert.deepEqual(lockfileWatchDirs('packages/app'), ['packages/app', 'packages', '']);
+  assert.deepEqual(lockfileWatchDirs(''), ['']);
+});
+
+test('lockfileWatchDirs returns directory names completely unescaped and untransformed — a caller must treat each one as a literal URI path segment, never interpolate it into a glob', () => {
+  // A directory containing glob metacharacters is entirely legal on every
+  // major filesystem — `*`, `?`, `[`, `]`, `{`, `}`, and `,` are not
+  // reserved in POSIX or NTFS path segments. If a caller built a single
+  // glob pattern by joining these strings with commas (the bug this
+  // function's design avoids — see its own doc comment), a directory named
+  // `pkg{a,b}` would corrupt that glob's brace-group syntax, or a directory
+  // named `pkg[1]` would be reinterpreted as a character class. Returning
+  // the raw segments here, with no escaping applied, is deliberate: safety
+  // comes from the *caller* using each one as a literal path base (as
+  // `vscode.RelativePattern`'s first argument already is), not from this
+  // function trying to sanitize a value it cannot safely round-trip through
+  // glob syntax anyway.
+  const weird = 'packages/pkg{a,b}[1]*?';
+  assert.deepEqual(lockfileWatchDirs(weird), [weird, 'packages', '']);
+
+  const withComma = 'pkg,other';
+  assert.deepEqual(lockfileWatchDirs(withComma), [withComma, '']);
+
+  const withBraces = 'a{b,c}/nested';
+  assert.deepEqual(lockfileWatchDirs(withBraces), [withBraces, 'a{b,c}', '']);
 });
 
 // ------------------------------------------ S6: multi-root project discovery
@@ -175,6 +244,19 @@ test('deriveProjectId does not collide when a delimiter-joined encoding would', 
     deriveProjectId('file:///a::b', 'package.json'),
     deriveProjectId('file:///a', 'b::package.json')
   );
+});
+
+test('isSameProjectReload is true only when a previously selected id matches the candidate being reloaded', () => {
+  const idA = deriveProjectId('file:///workspace/frontend', 'package.json');
+  const idB = deriveProjectId('file:///workspace/backend', 'package.json');
+
+  assert.equal(isSameProjectReload(idA, idA), true, 'the same id is the same project');
+  assert.equal(isSameProjectReload(idA, idB), false, 'a genuinely different id is a switch');
+});
+
+test('isSameProjectReload is false when nothing was previously selected — a first-ever load is never "the same project" as anything', () => {
+  const idA = deriveProjectId('file:///workspace/frontend', 'package.json');
+  assert.equal(isSameProjectReload(undefined, idA), false);
 });
 
 test('discoverProjectCandidates ids match deriveProjectId directly', () => {

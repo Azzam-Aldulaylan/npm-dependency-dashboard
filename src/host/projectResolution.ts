@@ -54,6 +54,8 @@ export interface ResolvedProject {
   root: string;
   manifestText: string;
   lockfileText: string | null;
+  /** Absolute path to the resolved lockfile, or null if none — S7 file-watcher wiring; may live outside `root` for an npm workspace member. */
+  lockfilePath: string | null;
   registry: string;
 }
 
@@ -188,10 +190,8 @@ export async function loadProject(candidate: DiscoveredProject): Promise<Resolve
   const manifestText = await readFile(path.join(base, candidate.manifestPath), 'utf8');
 
   const lockfile = await findLockfile(candidate.folder, candidate.dir);
-  const lockfileText =
-    lockfile === null
-      ? null
-      : ((await readIfExists(path.join(base, lockfile.dir, lockfile.name))) ?? null);
+  const lockfilePath = lockfile === null ? null : path.join(base, lockfile.dir, lockfile.name);
+  const lockfileText = lockfilePath === null ? null : ((await readIfExists(lockfilePath)) ?? null);
 
-  return { root, manifestText, lockfileText, registry: await resolveRegistryUrl(root) };
+  return { root, manifestText, lockfileText, lockfilePath, registry: await resolveRegistryUrl(root) };
 }

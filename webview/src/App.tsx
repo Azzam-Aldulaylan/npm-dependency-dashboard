@@ -169,6 +169,17 @@ function Dashboard({
   onUpgrade: (packageName: string, target: string) => void;
 }): ReactElement {
   const degraded = status === 'partial-error' ? partialErrorText(data) : null;
+  // A UX nicety only — the host independently rejects any upgrade request
+  // against stale/revalidating data regardless of what this webview shows
+  // (DashboardController.isEligible/beginRevalidation); this just keeps a
+  // button from inviting a click the host is about to refuse anyway.
+  // `run()` announces every revalidation attempt — manual-refresh-follow-up,
+  // file-change-triggered, and plain background-timer ticks alike — as a
+  // `stale` message carrying whatever was already on screen before it does
+  // anything else, so this single check covers all of them: `stale` is up
+  // for the entire duration a revalidation is in flight, and a failed one
+  // (which posts nothing further) leaves it up until the next attempt.
+  const upgradesDisabled = status === 'stale';
 
   return (
     <>
@@ -188,7 +199,12 @@ function Dashboard({
       {status === 'empty' ? (
         <p className="notice">No dependencies found.</p>
       ) : (
-        <PackageTable rows={data.rows} activeUpgrade={activeUpgrade} onUpgrade={onUpgrade} />
+        <PackageTable
+          rows={data.rows}
+          activeUpgrade={activeUpgrade}
+          onUpgrade={onUpgrade}
+          upgradesDisabled={upgradesDisabled}
+        />
       )}
 
       <p className="dashboard__footer">

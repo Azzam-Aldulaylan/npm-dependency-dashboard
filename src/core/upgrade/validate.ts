@@ -18,6 +18,7 @@ import { isSafeNpmPackageName, isSafeSemverVersion } from './plan.js';
 
 export type UpgradeRejectionReason =
   | 'no-scan-result'
+  | 'revalidating'
   | 'unknown-package'
   | 'no-eligible-upgrade'
   | 'stale-target'
@@ -101,6 +102,11 @@ export function describeRejection(reason: UpgradeRejectionReason): RejectionDesc
   switch (reason) {
     case 'no-scan-result':
       return { code: 'NO_SCAN_RESULT', message: 'Run a scan before requesting an upgrade.' };
+    case 'revalidating':
+      return {
+        code: 'REVALIDATING',
+        message: 'Dependency data is being refreshed. Wait for it to finish and try again.',
+      };
     case 'unknown-package':
       return { code: 'UNKNOWN_PACKAGE', message: 'This package is not part of the current scan.' };
     case 'no-eligible-upgrade':

@@ -103,6 +103,52 @@ export function chooseLockfile(filenames: readonly string[]): string | null {
 }
 
 /**
+ * Every ancestor directory a lockfile topology change could affect this
+ * project's resolved lockfile from: `dir` itself and every directory above
+ * it, up to the workspace folder root (`''`) — exactly the directories
+ * `nearestLockfileDir` would ever check for `dir`.
+ *
+ * Deliberately returns directories only, not filenames or a glob string — a
+ * directory name is real filesystem content (attacker- or at least
+ * environment-controlled: it comes from whatever the workspace actually
+ * contains) and must never be interpolated into a glob pattern, where a
+ * literal `*`, `?`, `[`, `]`, `{`, `}`, or `,` in the name would be
+ * reinterpreted as glob syntax instead of matched literally. Callers building
+ * a watcher must use each directory as a literal URI/path base (as
+ * `vscode.RelativePattern`'s first argument already is, never as part of its
+ * glob `pattern` argument) and combine it only with `PACKAGE_LOCK`/
+ * `SHRINKWRAP` — both fixed, developer-controlled constants — for the actual
+ * glob, e.g. `{package-lock.json,npm-shrinkwrap.json}`.
+ */
+export function lockfileWatchDirs(dir: string): string[] {
+  const dirs: string[] = [];
+  let current = dir.replace(/\\/g, '/');
+  for (;;) {
+    dirs.push(current);
+    if (current === '') break;
+    const idx = current.lastIndexOf('/');
+    current = idx === -1 ? '' : current.slice(0, idx);
+  }
+  return dirs;
+}
+
+/**
+ * Every workspace-folder-relative path a lockfile topology change could
+ * affect this project's resolved lockfile from — `lockfileWatchDirs(dir)`
+ * crossed with both lockfile filenames. Useful for tests and for any caller
+ * that just wants the full path list as data (never as a glob to build a
+ * watcher from directly — see `lockfileWatchDirs`'s own doc for why).
+ */
+export function lockfileWatchPaths(dir: string): string[] {
+  const paths: string[] = [];
+  for (const candidateDir of lockfileWatchDirs(dir)) {
+    const prefix = candidateDir === '' ? '' : `${candidateDir}/`;
+    paths.push(`${prefix}${PACKAGE_LOCK}`, `${prefix}${SHRINKWRAP}`);
+  }
+  return paths;
+}
+
+/**
  * Find the nearest directory at or above `dir` that holds a lockfile.
  *
  * npm workspaces keep one lockfile at the repo root covering every member, so
@@ -173,6 +219,26 @@ export interface DiscoveredProjectCandidate {
  */
 export function deriveProjectId(folderId: string, manifestPath: string): string {
   return JSON.stringify([folderId, manifestPath]);
+}
+
+/**
+ * Whether a reload targeting `candidateId` is for the *same* project as
+ * `previousSelectedId` — the deciding factor for whether a watcher event
+ * queued during that reload's own disk read belongs to the project it just
+ * finished reloading (drain it) or to whatever was selected *before* this
+ * reload started (discard it, since it was never about the newly selected
+ * project). `previousSelectedId` is `undefined` before any project has ever
+ * been selected (a first-ever load), which is never "the same project" as
+ * anything, by construction — there is nothing yet for a queued event to be
+ * relevant to.
+ *
+ * Pulled out as its own pure function specifically so this one comparison —
+ * the crux of dashboardPanel.ts's reloadAndScan() drain-vs-discard decision
+ * — is unit-testable without a vscode host, the same way every other S6/S7
+ * project-identity decision in this file already is.
+ */
+export function isSameProjectReload(previousSelectedId: string | undefined, candidateId: string): boolean {
+  return previousSelectedId !== undefined && previousSelectedId === candidateId;
 }
 
 /**

@@ -67,23 +67,33 @@ function UpgradeAction({
   row,
   activeUpgrade,
   onUpgrade,
+  upgradesDisabled,
 }: {
   row: PackageRow;
   /** The one package this webview asked to upgrade, or null. The host allows only one upgrade at a time for the whole panel, so every button is disabled while this is set — not just the row it names. */
   activeUpgrade: string | null;
   onUpgrade: (packageName: string, target: string) => void;
+  /** UX only — the host rejects the request either way (see PackageTable's own doc). */
+  upgradesDisabled: boolean;
 }): ReactElement {
   const { upgradeTo } = row;
   if (upgradeTo === null) return <span aria-hidden="true">—</span>;
   const action = upgradeActionDisplay(upgradeTo);
   if (action === null) return <span aria-hidden="true">—</span>;
   const isThisRowUpgrading = activeUpgrade === row.name;
+  const disabled = activeUpgrade !== null || upgradesDisabled;
   return (
     <button
       className="button"
       type="button"
-      disabled={activeUpgrade !== null}
-      title={isThisRowUpgrading ? 'Upgrade in progress…' : action.tooltip}
+      disabled={disabled}
+      title={
+        isThisRowUpgrading
+          ? 'Upgrade in progress…'
+          : upgradesDisabled
+            ? 'Dependency data is being refreshed — try again once it finishes.'
+            : action.tooltip
+      }
       onClick={() => {
         onUpgrade(row.name, upgradeTo);
       }}
@@ -97,10 +107,18 @@ export function PackageTable({
   rows,
   activeUpgrade,
   onUpgrade,
+  upgradesDisabled,
 }: {
   rows: readonly PackageRow[];
   activeUpgrade: string | null;
   onUpgrade: (packageName: string, target: string) => void;
+  /**
+   * True whenever the host is displaying stale/revalidating data — a UX
+   * nicety, not the security boundary: `DashboardController.isEligible`
+   * independently rejects any Upgrade request the host itself considers
+   * stale, regardless of what this prop says.
+   */
+  upgradesDisabled: boolean;
 }): ReactElement {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -170,7 +188,12 @@ export function PackageTable({
                   <SeverityBadge severity={row.worstSeverity} />
                 </td>
                 <td>
-                  <UpgradeAction row={row} activeUpgrade={activeUpgrade} onUpgrade={onUpgrade} />
+                  <UpgradeAction
+                    row={row}
+                    activeUpgrade={activeUpgrade}
+                    onUpgrade={onUpgrade}
+                    upgradesDisabled={upgradesDisabled}
+                  />
                 </td>
               </tr>
               {isOpen ? (

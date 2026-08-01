@@ -51,7 +51,8 @@
         "dependencyDashboard.cacheTtlMinutes": {
           "type": "number",
           "default": 30,
-          "description": "How long fetched registry data stays fresh before it's checked again."
+          "minimum": 0,
+          "description": "How long cached dependency data stays fresh before it's rescanned, in minutes. 0 means always revalidate."
         }
       }
     }

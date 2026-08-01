@@ -1,14 +1,19 @@
 /**
- * BuildPackageRowsResult -> the wire shape the webview renders.
+ * ScanSnapshot -> the wire shape the webview renders.
  *
- * Pure, no vscode. The one thing worth care here is `advisoriesError`: the
- * pipeline hands back a live `FetchError`, which does not survive
- * structured-cloning across postMessage with its prototype intact. Flattening
- * it to `{ code, message }` happens exactly once, here, so no caller can
- * accidentally post an Error instance.
+ * Pure, no vscode. Takes `ScanSnapshot` (src/core/cache/schema.ts) rather
+ * than `BuildPackageRowsResult` (src/core/pipeline.ts) directly — the two
+ * are structurally compatible (a `BuildPackageRowsResult`'s live
+ * `FetchError` satisfies `ScanSnapshot`'s plain `{code,message}` shape, so
+ * every existing caller passing a real pipeline result keeps working
+ * unchanged), but `DashboardController` also needs to build the *same*
+ * outgoing message from a `ScanSnapshot` hydrated straight out of the
+ * persisted cache, where there never was a live `FetchError` to begin with.
+ * Flattening `advisoriesError` to `{ code, message }` still happens exactly
+ * once, here, so no caller can accidentally post a class instance.
  */
 
-import type { BuildPackageRowsResult } from '../core/pipeline.js';
+import type { ScanSnapshot } from '../core/cache/schema.js';
 import type { DashboardData, HostToWebviewMessage, SelectedProjectInfo } from './webviewProtocol.js';
 
 /**
@@ -21,7 +26,7 @@ import type { DashboardData, HostToWebviewMessage, SelectedProjectInfo } from '.
  * DashboardController, via its own options) always has both on hand.
  */
 export function toDashboardData(
-  result: BuildPackageRowsResult,
+  result: ScanSnapshot,
   project: SelectedProjectInfo,
   canChangeProject: boolean,
   generatedAt: string = new Date().toISOString()
@@ -48,7 +53,7 @@ export function toDashboardData(
  * completed run, so there is no result to map.
  */
 export function toHostToWebviewMessage(
-  result: BuildPackageRowsResult,
+  result: ScanSnapshot,
   options: { isEmpty: boolean; isStale: boolean },
   project: SelectedProjectInfo,
   canChangeProject: boolean,

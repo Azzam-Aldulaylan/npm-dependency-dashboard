@@ -19,13 +19,21 @@
  * not necessarily one we sent.
  */
 
-import type { AttributedAdvisory, Advisory, PackageRow, Severity, UnresolvableReason } from '../core/types.js';
+import type { PackageRow } from '../core/types.js';
+import {
+  isAbsentOr,
+  isPackageRow,
+  isProtocolError,
+  isRecord,
+} from '../core/validation.js';
+import type { ProtocolError } from '../core/validation.js';
 
-/** A failure flattened for transport. Never a live Error instance. */
-export interface ProtocolError {
-  code: string;
-  message: string;
-}
+// Re-exported for every existing import site (dashboardController.ts,
+// dashboardPanel.ts, upgradeRunner.ts, etc.) that imports `ProtocolError`
+// from here rather than its new home in src/core/validation.ts — the wire
+// protocol's error shape and the persisted-cache error shape are the same
+// type, defined once in core so both boundaries share it.
+export type { ProtocolError };
 
 /**
  * S6 — the currently selected project. Only ever a display `label` plus a
@@ -86,92 +94,7 @@ export type WebviewToHostMessage =
   | { type: 'change-project' }
   | { type: 'upgrade'; package: string; target: string };
 
-const SEVERITIES: ReadonlySet<string> = new Set<Severity>([
-  'critical',
-  'high',
-  'moderate',
-  'low',
-  'info',
-]);
-
-const UNRESOLVABLE_REASONS: ReadonlySet<string> = new Set<UnresolvableReason>([
-  'workspace-link',
-  'file',
-  'git',
-  'alias',
-  'tarball',
-  'no-lockfile',
-]);
-
 const DATA_STATUSES: ReadonlySet<string> = new Set(['empty', 'ready', 'stale', 'partial-error']);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isStringOrNull(value: unknown): value is string | null {
-  return value === null || typeof value === 'string';
-}
-
-/**
- * An absent optional field is valid; a present one must have the right type.
- * `null` is rejected rather than treated as absent — the sender never writes
- * it, so its presence means the payload did not come from us.
- */
-function isAbsentOr(value: unknown, check: (v: unknown) => boolean): boolean {
-  return value === undefined || check(value);
-}
-
-function isProtocolError(value: unknown): value is ProtocolError {
-  return isRecord(value) && typeof value['code'] === 'string' && typeof value['message'] === 'string';
-}
-
-function isAdvisory(value: unknown): value is Advisory {
-  if (!isRecord(value)) return false;
-  const id = value['id'];
-  return (
-    (typeof id === 'number' || typeof id === 'string') &&
-    typeof value['severity'] === 'string' &&
-    SEVERITIES.has(value['severity']) &&
-    typeof value['title'] === 'string' &&
-    typeof value['url'] === 'string' &&
-    typeof value['vulnerableVersions'] === 'string'
-  );
-}
-
-function isAttributedAdvisory(value: unknown): value is AttributedAdvisory {
-  if (!isRecord(value)) return false;
-  const path = value['path'];
-  return (
-    isAdvisory(value['advisory']) &&
-    typeof value['flaggedPackage'] === 'string' &&
-    Array.isArray(path) &&
-    path.every((segment) => typeof segment === 'string')
-  );
-}
-
-function isPackageRow(value: unknown): value is PackageRow {
-  if (!isRecord(value)) return false;
-  const advisories = value['advisories'];
-  const worstSeverity = value['worstSeverity'];
-  return (
-    typeof value['name'] === 'string' &&
-    isStringOrNull(value['current']) &&
-    isStringOrNull(value['wanted']) &&
-    isStringOrNull(value['latest']) &&
-    typeof value['dev'] === 'boolean' &&
-    isStringOrNull(value['upgradeTo']) &&
-    (worstSeverity === null ||
-      (typeof worstSeverity === 'string' && SEVERITIES.has(worstSeverity))) &&
-    Array.isArray(advisories) &&
-    advisories.every(isAttributedAdvisory) &&
-    isAbsentOr(value['deprecated'], (v) => typeof v === 'string') &&
-    isAbsentOr(
-      value['unresolvable'],
-      (v) => typeof v === 'string' && UNRESOLVABLE_REASONS.has(v)
-    )
-  );
-}
 
 function isSelectedProjectInfo(value: unknown): value is SelectedProjectInfo {
   return (

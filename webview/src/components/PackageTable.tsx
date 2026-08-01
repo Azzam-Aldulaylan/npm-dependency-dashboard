@@ -16,6 +16,14 @@ const UNRESOLVABLE_LABELS: Record<UnresolvableReason, string> = {
   'no-lockfile': 'unresolved',
 };
 
+/**
+ * Same terminology `npm outdated` uses for its own Current/Wanted/Latest
+ * columns, so the meanings carry over for anyone already familiar with it.
+ */
+const CURRENT_EXPLANATION = 'Version installed according to the lockfile.';
+const WANTED_EXPLANATION = 'Newest version allowed by the range in package.json.';
+const LATEST_EXPLANATION = 'Newest stable version published to npm.';
+
 function AvailableVersion({ row }: { row: PackageRow }): ReactElement {
   const display = versionDisplay(row.wanted, row.latest);
   if (display.kind === 'dash') return <span aria-hidden="true">—</span>;
@@ -23,11 +31,23 @@ function AvailableVersion({ row }: { row: PackageRow }): ReactElement {
   return (
     <span className="version-lines">
       <span className="version-line">
-        <span className="version-label">Wanted</span>
+        <span
+          className="version-label"
+          title={WANTED_EXPLANATION}
+          aria-label={`Wanted: ${WANTED_EXPLANATION}`}
+        >
+          Wanted
+        </span>
         <span className="version-value">{display.wanted}</span>
       </span>
       <span className="version-line">
-        <span className="version-label">Latest</span>
+        <span
+          className="version-label"
+          title={LATEST_EXPLANATION}
+          aria-label={`Latest: ${LATEST_EXPLANATION}`}
+        >
+          Latest
+        </span>
         <span className="version-value">{display.latest}</span>
       </span>
     </span>
@@ -79,7 +99,9 @@ export function PackageTable({ rows }: { rows: readonly PackageRow[] }): ReactEl
           <tr>
             <th scope="col" className="packages__disclosure" />
             <th scope="col">Package</th>
-            <th scope="col">Current</th>
+            <th scope="col" title={CURRENT_EXPLANATION} aria-label={`Current: ${CURRENT_EXPLANATION}`}>
+              Current
+            </th>
             <th scope="col">Available</th>
             <th scope="col">Vulnerabilities</th>
             <th scope="col">Action</th>

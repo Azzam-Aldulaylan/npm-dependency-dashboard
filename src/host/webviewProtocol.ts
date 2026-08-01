@@ -44,9 +44,25 @@ export type HostToWebviewMessage =
   | { status: 'ready'; data: DashboardData }
   | { status: 'stale'; data: DashboardData }
   | { status: 'partial-error'; data: DashboardData }
-  | { status: 'fatal-error'; error: ProtocolError };
+  | { status: 'fatal-error'; error: ProtocolError }
+  /**
+   * A specific package's upgrade could not run — rejected by host-side
+   * validation, cancelled at the confirmation step, or the task itself
+   * failed. Deliberately does not carry `data`: the existing table is never
+   * touched by this message, only the requesting row's own "running" state.
+   */
+  | { status: 'upgrade-error'; package: string; error: ProtocolError };
 
-export type WebviewToHostMessage = { type: 'ready' } | { type: 'refresh' };
+/**
+ * `package` and `target` are the smallest request that lets the host verify
+ * the click against its own last-known state — see
+ * src/core/upgrade/validate.ts. Neither value is trusted directly; both are
+ * used only as lookup keys against the controller's most recent result.
+ */
+export type WebviewToHostMessage =
+  | { type: 'ready' }
+  | { type: 'refresh' }
+  | { type: 'upgrade'; package: string; target: string };
 
 const SEVERITIES: ReadonlySet<string> = new Set<Severity>([
   'critical',
@@ -158,10 +174,23 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[])
   return Object.keys(value).every((key) => allowed.includes(key));
 }
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
 export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMessage {
   if (!isRecord(value)) return false;
-  if (!hasOnlyKeys(value, ['type'])) return false;
-  return value['type'] === 'ready' || value['type'] === 'refresh';
+
+  const type = value['type'];
+  if (type === 'ready' || type === 'refresh') return hasOnlyKeys(value, ['type']);
+  if (type === 'upgrade') {
+    return (
+      hasOnlyKeys(value, ['type', 'package', 'target']) &&
+      isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['target'])
+    );
+  }
+  return false;
 }
 
 export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMessage {
@@ -173,6 +202,13 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   if (status === 'loading') return hasOnlyKeys(value, ['status']);
   if (status === 'fatal-error') {
     return hasOnlyKeys(value, ['status', 'error']) && isProtocolError(value['error']);
+  }
+  if (status === 'upgrade-error') {
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'error']) &&
+      isNonEmptyString(value['package']) &&
+      isProtocolError(value['error'])
+    );
   }
   if (DATA_STATUSES.has(status)) {
     return hasOnlyKeys(value, ['status', 'data']) && isDashboardData(value['data']);

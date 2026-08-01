@@ -84,6 +84,42 @@ test('extra keys on the envelope are rejected, not ignored', () => {
   assert.equal(isWebviewToHostMessage({ type: 'ready', __proto__: {} }), true);
 });
 
+// ------------------------------------------------- upgrade requests
+
+test('a well-formed upgrade request is accepted', () => {
+  assert.equal(isWebviewToHostMessage({ type: 'upgrade', package: 'left-pad', target: '2.0.0' }), true);
+});
+
+test('an upgrade request missing package or target is rejected', () => {
+  assert.equal(isWebviewToHostMessage({ type: 'upgrade' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'upgrade', package: 'left-pad' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'upgrade', target: '2.0.0' }), false);
+});
+
+test('an upgrade request with extra keys is rejected, not partially trusted', () => {
+  assert.equal(
+    isWebviewToHostMessage({
+      type: 'upgrade',
+      package: 'left-pad',
+      target: '2.0.0',
+      dev: false, // a webview-supplied classification must never be accepted
+    }),
+    false
+  );
+});
+
+test('an upgrade request with the wrong value types is rejected', () => {
+  for (const value of [
+    { type: 'upgrade', package: 42, target: '2.0.0' },
+    { type: 'upgrade', package: 'left-pad', target: null },
+    { type: 'upgrade', package: '', target: '2.0.0' },
+    { type: 'upgrade', package: 'left-pad', target: '' },
+    { type: 'upgrade', package: ['left-pad'], target: '2.0.0' },
+  ]) {
+    assert.equal(isWebviewToHostMessage(value), false, `${JSON.stringify(value)} accepted`);
+  }
+});
+
 // ------------------------------------------------- host -> webview
 
 test('every host-to-webview variant is accepted', () => {
@@ -96,6 +132,42 @@ test('every host-to-webview variant is accepted', () => {
     isHostToWebviewMessage({ status: 'fatal-error', error: { code: 'ENOENT', message: 'nope' } }),
     true
   );
+});
+
+test('an upgrade-error message is accepted, and never carries the table data', () => {
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-error',
+      package: 'left-pad',
+      error: { code: 'STALE_TARGET', message: 'The available upgrade changed.' },
+    }),
+    true
+  );
+  // Deliberately does not carry `data` — the point of this message is that
+  // the existing table is untouched.
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-error',
+      package: 'left-pad',
+      error: { code: 'X', message: 'Y' },
+      data: DATA,
+    }),
+    false
+  );
+});
+
+test('a malformed upgrade-error message is rejected', () => {
+  const bad = [
+    { status: 'upgrade-error' },
+    { status: 'upgrade-error', package: 'left-pad' },
+    { status: 'upgrade-error', error: { code: 'X', message: 'Y' } },
+    { status: 'upgrade-error', package: '', error: { code: 'X', message: 'Y' } },
+    { status: 'upgrade-error', package: 1, error: { code: 'X', message: 'Y' } },
+    { status: 'upgrade-error', package: 'left-pad', error: 'boom' },
+  ];
+  for (const value of bad) {
+    assert.equal(isHostToWebviewMessage(value), false, `${JSON.stringify(value)} accepted`);
+  }
 });
 
 test('the optional data fields are accepted when present and correct', () => {

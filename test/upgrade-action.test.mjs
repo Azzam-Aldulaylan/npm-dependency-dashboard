@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 
 import {
   upgradeActionDisplay,
-  UPGRADE_UNAVAILABLE_TOOLTIP,
+  UPGRADE_TOOLTIP,
 } from '../out/host/upgradeAction.js';
 
 test('a null upgradeTo means no button at all', () => {
@@ -21,12 +21,12 @@ test('a non-null upgradeTo names the target version in the label', () => {
   const action = upgradeActionDisplay('3.1.5');
   assert.deepEqual(action, {
     label: 'Upgrade to 3.1.5',
-    tooltip: UPGRADE_UNAVAILABLE_TOOLTIP,
+    tooltip: UPGRADE_TOOLTIP,
   });
 });
 
-test('the tooltip explains the button is inert, not broken', () => {
+test('the tooltip explains what clicking the button does', () => {
   const action = upgradeActionDisplay('2.0.0');
   assert.ok(action !== null);
-  assert.match(action.tooltip, /future release/i);
+  assert.match(action.tooltip, /VS Code task/i);
 });

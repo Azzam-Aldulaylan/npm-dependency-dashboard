@@ -63,17 +63,45 @@ function CurrentVersion({ row }: { row: PackageRow }): ReactElement {
   );
 }
 
-function UpgradeAction({ row }: { row: PackageRow }): ReactElement {
-  const action = upgradeActionDisplay(row.upgradeTo);
+function UpgradeAction({
+  row,
+  activeUpgrade,
+  onUpgrade,
+}: {
+  row: PackageRow;
+  /** The one package this webview asked to upgrade, or null. The host allows only one upgrade at a time for the whole panel, so every button is disabled while this is set — not just the row it names. */
+  activeUpgrade: string | null;
+  onUpgrade: (packageName: string, target: string) => void;
+}): ReactElement {
+  const { upgradeTo } = row;
+  if (upgradeTo === null) return <span aria-hidden="true">—</span>;
+  const action = upgradeActionDisplay(upgradeTo);
   if (action === null) return <span aria-hidden="true">—</span>;
+  const isThisRowUpgrading = activeUpgrade === row.name;
   return (
-    <button className="button" type="button" disabled title={action.tooltip}>
-      {action.label}
+    <button
+      className="button"
+      type="button"
+      disabled={activeUpgrade !== null}
+      title={isThisRowUpgrading ? 'Upgrade in progress…' : action.tooltip}
+      onClick={() => {
+        onUpgrade(row.name, upgradeTo);
+      }}
+    >
+      {isThisRowUpgrading ? 'Upgrading…' : action.label}
     </button>
   );
 }
 
-export function PackageTable({ rows }: { rows: readonly PackageRow[] }): ReactElement {
+export function PackageTable({
+  rows,
+  activeUpgrade,
+  onUpgrade,
+}: {
+  rows: readonly PackageRow[];
+  activeUpgrade: string | null;
+  onUpgrade: (packageName: string, target: string) => void;
+}): ReactElement {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
 
   const toggle = (name: string): void => {
@@ -142,8 +170,7 @@ export function PackageTable({ rows }: { rows: readonly PackageRow[] }): ReactEl
                   <SeverityBadge severity={row.worstSeverity} />
                 </td>
                 <td>
-                  {/* Inert by design: the Upgrade action runs npm install and lands in a later slice. */}
-                  <UpgradeAction row={row} />
+                  <UpgradeAction row={row} activeUpgrade={activeUpgrade} onUpgrade={onUpgrade} />
                 </td>
               </tr>
               {isOpen ? (

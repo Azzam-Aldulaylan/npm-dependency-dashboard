@@ -62,14 +62,14 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/core/tsconfig.json",
     "pretest": "npm run build:core",
-    "test": "node --test test/",
+    "test": "node --test",
     "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/semver": "^7.5.0",
     "@types/vscode": "^1.90.0",
-    "esbuild": "^0.21.0",
+    "esbuild": "^0.28.0",
     "typescript": "^5.4.0"
   },
   "dependencies": {

@@ -26,6 +26,8 @@ esbuild.mjs
 .swarm/**
 AGENTS.md
 CLAUDE.md
+agentdb.rvf
+agentdb.rvf.lock
 ruvector.db
 **/*.db-shm
 **/*.db-wal

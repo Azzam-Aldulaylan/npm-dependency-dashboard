@@ -49,6 +49,8 @@ export interface VersionInfo {
   /** Highest stable version. Prereleases only when installed is a prerelease. */
   latest: string | null;
   deprecated?: string;
+  /** SPDX id from /<pkg>/latest. Free under the hybrid fetch — see spec. */
+  license?: string;
 }
 
 export interface Advisory {

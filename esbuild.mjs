@@ -1,7 +1,15 @@
 import * as esbuild from 'esbuild';
+import { existsSync } from 'node:fs';
 
 const watch = process.argv.includes('--watch');
 const production = process.argv.includes('--production');
+
+/**
+ * The webview lands in a later slice. Until its entry point exists, building it
+ * would fail the whole build — so it is bundled only when present, and the
+ * extension host bundle stands on its own.
+ */
+const WEBVIEW_ENTRY = 'webview/src/main.tsx';
 
 /** Extension host: Node target, vscode is provided by the runtime. */
 const extensionConfig = {
@@ -19,7 +27,7 @@ const extensionConfig = {
 
 /** Webview: browser target, no Node builtins. */
 const webviewConfig = {
-  entryPoints: ['webview/src/main.tsx'],
+  entryPoints: [WEBVIEW_ENTRY],
   bundle: true,
   outfile: 'dist/webview.js',
   format: 'iife',
@@ -30,13 +38,17 @@ const webviewConfig = {
   logLevel: 'info',
 };
 
+const configs = [extensionConfig];
+if (existsSync(WEBVIEW_ENTRY)) {
+  configs.push(webviewConfig);
+} else {
+  console.log(`skipping webview bundle: ${WEBVIEW_ENTRY} does not exist yet`);
+}
+
 if (watch) {
-  const contexts = await Promise.all([
-    esbuild.context(extensionConfig),
-    esbuild.context(webviewConfig),
-  ]);
+  const contexts = await Promise.all(configs.map((c) => esbuild.context(c)));
   await Promise.all(contexts.map((c) => c.watch()));
   console.log('watching...');
 } else {
-  await Promise.all([esbuild.build(extensionConfig), esbuild.build(webviewConfig)]);
+  await Promise.all(configs.map((c) => esbuild.build(c)));
 }

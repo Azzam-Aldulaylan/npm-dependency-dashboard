@@ -8,10 +8,11 @@
 
 /** Why a package has no registry version to compare against. */
 export type UnresolvableReason =
-  | 'workspace-link' // npm workspaces: "link": true in the lockfile
+  | 'workspace-link' // npm workspaces: "link": true in the lockfile, or link:/workspace: specifier
   | 'file' // file: specifier
   | 'git' // git:/github: specifier
   | 'alias' // npm: alias
+  | 'tarball' // direct http(s) tarball URL
   | 'no-lockfile'; // no lockfile present; only a range is known
 
 export type Severity = 'critical' | 'high' | 'moderate' | 'low' | 'info';
@@ -48,6 +49,8 @@ export interface VersionInfo {
   /** Highest stable version. Prereleases only when installed is a prerelease. */
   latest: string | null;
   deprecated?: string;
+  /** SPDX id from /<pkg>/latest. Free under the hybrid fetch — see spec. */
+  license?: string;
 }
 
 export interface Advisory {

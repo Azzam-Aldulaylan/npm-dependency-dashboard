@@ -32,8 +32,8 @@ A panel (VS Code Webview) rendering a table with the following columns:
 
 ### Data Sources
 - **Package list & current versions:** parsed from `package.json` and the lockfile. "Current Version" is defined as the **lockfile-resolved version** (what's actually installed), not the `package.json` range — if no lockfile exists, fall back to showing the range with an "unresolved" indicator.
-- **Available updates:** npm registry API, abbreviated packument only (see Technical Architecture — the `/<pkg>/latest` shortcut was considered and dropped, see below).
-- **Vulnerabilities:** `npm audit --json` is the **primary** source (see Vulnerability Scope below for why). The bulk advisories endpoint (`POST /-/npm/v1/security/advisories/bulk`) is a **fallback** for when no lockfile is present or the npm CLI isn't reachable.
+- **Available updates:** npm registry API, **hybrid fetch** — `GET /<pkg>/latest` for every package, escalating to the abbreviated packument only when `latest` does not satisfy the declared range (see Technical Architecture). This supersedes the earlier "abbreviated packument only" decision, on measured grounds.
+- **Vulnerabilities:** the bulk advisories endpoint (`POST /-/npm/v1/security/advisories/bulk`) is the **primary** source. `npm audit --json` is **optional enrichment** for `fixAvailable` only. This inverts the earlier decision; see Vulnerability Scope below for the measurements behind it.
 
 ### Vulnerability Scope: Direct vs Transitive Dependencies
 Most real-world vulnerabilities live in transitive dependencies, not the packages listed directly in `package.json`. Decision for MVP:
@@ -43,15 +43,33 @@ Most real-world vulnerabilities live in transitive dependencies, not the package
 - Each row is expandable to show which nested package is actually flagged and the path to it.
 - The **"Upgrade" button only appears if a fix exists at the direct-dependency level** (i.e. bumping the direct package resolves the transitive advisory).
 
-**Why `npm audit --json` is the primary source, not the bulk endpoint:** the bulk advisories endpoint takes a package-name → version map and returns advisories keyed by package name — it returns **no dependency paths and no fix information**. Both of the features above (expandable path, fix-gated upgrade button) depend on data the bulk endpoint doesn't have. `npm audit --json` returns both — with implementation caveats:
+**Reversal (measured): the bulk endpoint is primary, and attribution comes from our own lockfile graph.**
 
-- **Exit code handling:** `npm audit --json` exits with code `1` when it finds vulnerabilities — that's the *normal, successful* outcome, not a failure. A `child_process` wrapper that naively branches on exit code (`if (exitCode !== 0) fallback`) will treat every audit that actually finds something as a failure and silently drop to the bulk-endpoint fallback — defeating the entire point of using audit as primary. **Branch on whether stdout parses as valid JSON, not on exit code.**
+The previous rationale was that only `npm audit` supplies dependency paths and fix information. Measurement showed the paths it supplies are not the ones this feature needs, and that the advisory data itself is identical to the bulk endpoint's.
+
+Measured on a 200-package tree with 34 vulnerabilities (3 low / 4 moderate / 18 high / 9 critical):
+
+| | bulk endpoint | `npm audit --json` |
+|---|---|---|
+| Wall time | **348 ms** | 1,584 ms |
+| Request/response | 4,482 B payload → 37,149 B | 76,139 B stdout |
+| Advisory-bearing packages | **32** | **32** |
+
+**The advisory sets match exactly — 32/32, zero difference in either direction.** `npm audit` reports 34 *nodes*, but the extra two (`eslint-plugin-compat`, `optimist`) carry `via: [string]` only — they are blame-graph entries for packages transitively affected by someone else's advisory, not advisories of their own. So audit costs **4.5× the wall time** to return the same advisories, plus a subprocess, an npm-version floor, an `ENOLOCK` failure mode, and an exit-code trap.
+
+**Attribution is ours, not audit's.** `effects` is a one-hop reverse edge and is not a path chain, so the expandable drilldown has to be computed by graph walk regardless. Since we already build a normalized lockfile graph for "Current Version," walking that graph is strictly better: it is complete, whereas audit's `via`/`effects` is a *fix-blame* graph that only links nodes when the vulnerability cannot be fixed in place.
+
+**Honest caveat on the attribution numbers.** On the measured fixture, 31 of 32 advisory-bearing packages were attributable to a direct dependency via `effects`/`via`, and the one failure (`serve-static`) was recoverable from the lockfile graph. **That 31/32 is an upper bound, not a typical result.** Every one of the fixture's 20 direct dependencies was itself vulnerable (`isDirect: 20`), which makes attribution succeed trivially. A realistic application — few vulnerable direct dependencies, many purely transitive ones — would attribute materially worse. The figure should not be read as evidence that `effects` is sufficient.
+
+`npm audit` remains useful for one thing only — `fixAvailable`, which the bulk endpoint does not return. Treat it as optional enrichment: if it is unavailable, the Upgrade button falls back to a self-computed "a non-vulnerable version exists within range" check rather than disappearing. Its implementation caveats still apply when it is used:
+
+- **Exit code handling:** `npm audit --json` exits with code `1` when it finds vulnerabilities — that's the *normal, successful* outcome, not a failure. Confirmed by measurement: exit code 1 alongside a complete, valid 76 KB report on stdout. A `child_process` wrapper that naively branches on exit code will discard the enrichment data on exactly the projects that have something to enrich. **Branch on whether stdout parses as valid JSON, not on exit code.**
 - **`fixAvailable` has three shapes, not one:** it can be `true` (fixable in-place without a top-level version bump), `false` (no fix available), or an object `{ name, version, isSemVerMajor }` (fix exists but requires a specific version, possibly a major bump). The upgrade-gating rule needs to handle all three — only `true` and the object form (when not a major bump, or with a confirmation step when it is) should surface the "Upgrade" button.
 - **`effects` is a one-hop reverse edge, not a full path chain** — it points to the immediate parent only (e.g. `form-data → effects: ['request']`), not the complete chain to the direct dependency. Building the expandable path-to-flagged-package view requires **recursively walking `effects`** (or the `via`/`nodes` structure) rather than reading a single ready-made field. Related: audit output includes an `isDirect` boolean per entry — a cleaner way to identify which rows are direct dependencies than cross-referencing against `package.json`.
 - **Confirmed (in the spec's favor):** `npm audit` works with only a lockfile present — no `node_modules` install needed (verifiable with `--package-lock-only`).
 
-When only the bulk-endpoint fallback is available (no lockfile / CLI unreachable), these two features degrade gracefully: the tag still shows "vulnerable," but without path drilldown or the fix-gated upgrade button.
-- Advisory requests (via either source) target npm's own advisory infrastructure regardless of the resolved `.npmrc` registry — see Registry Resolution below.
+With the bulk endpoint primary and attribution computed from the lockfile graph, path drilldown no longer depends on `npm audit` being reachable. Only the fix-gated Upgrade button degrades when audit is unavailable, and it degrades to the self-computed range check rather than vanishing.
+- Advisory requests must target npm's own advisory infrastructure regardless of the resolved `.npmrc` registry — see Registry Resolution below. Note this is **not** automatic: `npm audit` POSTs the dependency tree to the *configured* registry, so a project-level `.npmrc` can redirect it. Calling the bulk endpoint ourselves makes the target explicit, which is a further argument for it being primary.
 
 ### Refresh Behavior
 - On panel open: check cache validity first. If a warm, non-expired cache exists, render from it immediately; only run the full check cycle (read `package.json` → fetch versions → fetch vulnerabilities) if the cache is cold or expired. (Corrects an earlier contradiction — "always runs the full cycle on open" and "has a cache with a TTL" can't both be true.)
@@ -75,16 +93,39 @@ When only the bulk-endpoint fallback is available (no lockfile / CLI unreachable
 
 - **Extension host:** TypeScript, using the VS Code Extension API
 - **UI layer:** Webview panel, built with React (keeps it consistent with the rest of the stack and snappy to render)
-- **Data layer:** reads local `package.json` and lockfile (npm only, see Package Manager scope below); version data comes from the npm registry, vulnerability data comes from the local `npm audit` CLI or the bulk advisories endpoint as fallback.
-- **Version fetching:** the npm registry has no batch endpoint for version data. Use concurrency-limited per-package requests against the abbreviated packument (`Accept: application/vnd.npm.install-v1+json`). Correction: the abbreviated format is a real but modest saving (~45%, not an order of magnitude as originally implied) — a package with a large version history (e.g. `typescript`) can still be several MB of JSON to parse even abbreviated. Two mitigations: (1) the registry honors `If-None-Match`/ETags, so a conditional request on an unchanged package returns a 304 with no body — use this on repeat fetches; (2) since packument data is **project-independent** (a package's version history doesn't change based on which project references it), it belongs in a **global** cache shared across projects, not the per-workspace cache described below. (`/<pkg>/latest` was considered as a lighter alternative but only returns the `latest` dist-tag, not enough to detect "newer version within range" — dropped.)
+- **Data layer:** reads local `package.json` and lockfile (npm only, see Package Manager scope below); version data comes from the npm registry, vulnerability data from the bulk advisories endpoint, with the local `npm audit` CLI as optional enrichment for `fixAvailable`.
+- **Version fetching (HYBRID — measured):** the npm registry has no batch endpoint for version data, so this is concurrency-limited per-package requests either way. The question was *which* endpoint. Measured over 20 packages, gzipped on the wire and raw after decompression:
+
+  | | wire | raw |
+  |---|---|---|
+  | `GET /<pkg>/latest` × 20 | **35,099 B** | **75,114 B** |
+  | abbreviated packument × 20 | 1,089,456 B | 4,083,785 B |
+  | **abbreviated ÷ latest** | **31.0×** | **54.4×** |
+
+  Worst single case: `mongoose` at 2,898 B via `/latest` versus 396,881 B abbreviated — 136.9× on the wire, 216.6× raw. The raw column is the one that matters most, since it is `JSON.parse` cost on the extension host, shared with every other installed extension.
+
+  **The rule:** fetch `GET /<pkg>/latest` for every package. It answers "is there a newer stable release" — the common case — in one small response. Escalate to the abbreviated packument (`Accept: application/vnd.npm.install-v1+json`) **only when `latest` does not satisfy the declared range**, because that is the only situation where Wanted and Latest can differ. When `latest` satisfies the range, Wanted == Latest and the version list adds nothing.
+
+  This supersedes the earlier "dropped `/latest`" note. That decision was correct on its own terms — `/latest` alone cannot compute "newest version within range" — but it treated the choice as exclusive. The escalation path recovers the Wanted column for the minority of packages that need it, at a fraction of the cost for the rest.
+
+  **ETag support is not uniform across the two endpoints — measured:**
+
+  | endpoint | `ETag` | `Cache-Control` | conditional request |
+  |---|---|---|---|
+  | `GET /<pkg>` (abbreviated) | `W/"..."` | `public, max-age=300` | **yes** — verified 304 with `wireBytes 0`, body length 0 |
+  | `GET /<pkg>/latest` | **none** | `max-age=300` | **no** |
+
+  So `If-None-Match` helps only on the escalation path. `/latest` sends no ETag, and its `Last-Modified` is inconsistent across CDN nodes (present on one probe, absent on the next), so it is not a reliable fallback either. This is fine in practice — a `/latest` response is 1–3 KB, so re-fetching costs little — but the cache must not be designed on the assumption that every repeat request can be made conditional. Honor `max-age=300` locally as the freshness window for `/latest`, and use ETags for packuments.
+
+  Both `/latest` and packument data are **project-independent**, so they belong in a **global** cache shared across projects, not the per-workspace cache described below.
 - **Pre-release handling (corrected):** the naive rule — "highest published version greater than installed by semver" — is broken. Semver precedence compares `major.minor.patch` first and only falls back to the pre-release tag when those are equal, so a package with any published pre-release (e.g. `19.3.0-canary-xxx`) will outrank the actual latest stable release (`19.2.8`) purely because `19.3.0 > 19.2.8` — the canary would show as the "available update" for every user of that package, all the time. Correct rule, matching `npm outdated`'s model:
   - **Wanted** = highest version satisfying the `package.json` semver range.
   - **Latest** = highest **stable** (non-pre-release) published version.
   - Pre-release versions are only considered "available" when the **installed** version is itself a pre-release (so a project intentionally tracking a pre-release track doesn't get falsely flagged as behind a lower stable release).
-- **Vulnerability fetching:** `npm audit --json` (primary) or the bulk advisories endpoint (fallback) — see Vulnerability Scope above.
+- **Vulnerability fetching:** the bulk advisories endpoint (primary), with `npm audit --json` as optional enrichment for `fixAvailable` only — see Vulnerability Scope above. Attribution to direct dependencies is computed from our own lockfile graph, not from audit's `effects`/`via`.
 - **Registry resolution (split rule):**
   - **Version data** follows the resolved `.npmrc` registry (project-level → user-level → default `registry.npmjs.org`), so proxy/Artifactory users don't get an error table on first run. No authentication support yet (deferred to v2/v3).
-  - **Advisory data** (via `npm audit` or the bulk fallback) always targets npm's own advisory infrastructure, regardless of the resolved registry — private mirrors generally don't implement the advisory endpoint.
+  - **Advisory data** must target npm's own advisory infrastructure regardless of the resolved registry — private mirrors generally don't implement the advisory endpoint. Since we call the bulk endpoint directly, that host is ours to set explicitly. When `npm audit` is used for enrichment it must be pinned with `--registry=https://registry.npmjs.org/`, because audit otherwise POSTs the dependency tree to whatever registry the project `.npmrc` configures.
 - **Package manager scope (MVP):** **npm only.** `package-lock.json` is the only lockfile parsed for resolved versions and audit data. pnpm/yarn support — including `workspace:*` protocol handling and per-PM lockfile parsing — is deferred to whenever multi-PM support is added (not MVP).
 
 ### Caching
@@ -133,7 +174,7 @@ These aren't user-facing features but are required before a Marketplace listing 
 
 ## Cheap Wins (free from data already being fetched)
 - **Deprecated flag** — confirmed present in the abbreviated packument; surface it as a tag alongside the vulnerability status.
-- **License field** — ~~correction~~: NOT included in the abbreviated packument (`Accept: application/vnd.npm.install-v1+json` strips it along with description, readme, repository, etc. — that's the entire point of the abbreviated format). Showing it would require a separate full-packument fetch per package, defeating the reason for using the abbreviated format in the first place. **Dropped from MVP cheap wins** — revisit only if a future version fetches full packuments for some other reason.
+- **License field** — **restored to MVP cheap wins.** It is correct that the abbreviated packument strips `license` (that is the point of the abbreviated format), which is why this was previously dropped. But under the hybrid fetch above, `/<pkg>/latest` is fetched for every package anyway, and it **does** carry `license` — measured present on 20/20 packages sampled. No extra request, so it is genuinely free again. (The same sample carried `deprecated` on 1/20 — correctly, only the one deprecated package.)
 
 ## Security: Workspace Trust (MVP blocker — newly identified)
 Not previously addressed, and it's a real gap, not a nice-to-have:
@@ -146,7 +187,8 @@ Not previously addressed, and it's a real gap, not a nice-to-have:
 ## npm Binary Resolution (missing from spec — newly identified)
 The spec's fallback trigger for "no lockfile / CLI unreachable" assumed npm would generally be reachable, but never defined *how* it's located — this isn't an edge case:
 
-- GUI-launched VS Code on macOS does **not** inherit the interactive login shell's PATH. Version managers like nvm, fnm, and volta set `npm`/`node` PATH entries via shell rc files (`.zshrc`, `.bashrc`) — those only apply to interactive shell sessions, not GUI-launched processes. A large fraction of users on these version managers would have **no npm visible to the extension host** and get permanently pushed onto the degraded bulk-endpoint fallback.
+- GUI-launched VS Code on macOS does **not** inherit the interactive login shell's PATH. Version managers like nvm, fnm, and volta set `npm`/`node` PATH entries via shell rc files (`.zshrc`, `.bashrc`) — those only apply to interactive shell sessions, not GUI-launched processes. A large fraction of users on these version managers would have **no npm visible to the extension host**.
+- **This is much less severe now that the bulk endpoint is primary.** Vulnerability detection and path attribution no longer depend on locating the npm binary at all; only `fixAvailable` enrichment and the Upgrade action do. It remains a real requirement for Upgrade, which cannot work without npm.
 - **MVP requirement:** an explicit resolution strategy — e.g. check common version-manager install locations, or invoke the CLI via a login shell (`spawn(shell, ['-l', '-i', '-c', 'npm ...'])`) rather than assuming `npm` resolves from the extension host's inherited PATH.
 
 ## Naming Note

@@ -1,0 +1,40 @@
+{
+  "name": "monorepo",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "monorepo",
+      "version": "1.0.0",
+      "workspaces": ["packages/*"],
+      "dependencies": {
+        "@ws/app": "*"
+      }
+    },
+    "packages/app": {
+      "name": "@ws/app",
+      "version": "1.0.0",
+      "dependencies": {
+        "lodash": "^4.17.21",
+        "@ws/lib": "*"
+      }
+    },
+    "packages/lib": {
+      "name": "@ws/lib",
+      "version": "1.0.0"
+    },
+    "node_modules/@ws/app": {
+      "resolved": "packages/app",
+      "link": true
+    },
+    "node_modules/@ws/lib": {
+      "resolved": "packages/lib",
+      "link": true
+    },
+    "node_modules/lodash": {
+      "version": "4.17.21",
+      "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"
+    }
+  }
+}

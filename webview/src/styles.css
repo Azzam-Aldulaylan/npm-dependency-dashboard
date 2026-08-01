@@ -75,8 +75,19 @@ body {
   cursor: default;
 }
 
+/*
+ * The table genuinely cannot shrink below this width and stay legible, so it
+ * scrolls horizontally inside its own container rather than the whole panel
+ * — the header and footer stay put while only the table body scrolls.
+ */
+.packages-container {
+  overflow-x: auto;
+}
+
 .packages {
   width: 100%;
+  min-width: 34rem;
+  table-layout: fixed;
   border-collapse: collapse;
   text-align: left;
 }
@@ -96,8 +107,29 @@ body {
   letter-spacing: 0.04em;
 }
 
+/* Column widths sum to 100%, keeping Available from ballooning next to a
+   short Vulnerabilities badge and leaving Action room for the longest
+   "Upgrade to X.Y.Z" label. */
+.col-disclosure {
+  width: 4%;
+}
+.col-package {
+  width: 27%;
+}
+.col-current {
+  width: 15%;
+}
+.col-available {
+  width: 19%;
+}
+.col-vulnerabilities {
+  width: 13%;
+}
+.col-action {
+  width: 22%;
+}
+
 .packages__disclosure {
-  width: 1.75rem;
   padding-right: 0;
 }
 
@@ -105,9 +137,27 @@ body {
   font-weight: 600;
 }
 
+.packages__name-text {
+  overflow-wrap: anywhere;
+}
+
+/* Long scoped package names and version strings wrap instead of forcing the
+   column — and the whole table — wider than its allotted share. */
+.packages__wrap {
+  overflow-wrap: anywhere;
+}
+
 .packages__details > td {
   padding: 0;
   background: var(--vscode-editorWidget-background, transparent);
+}
+
+/* Each package row and its (optional) advisory-detail row share one <tbody>,
+   so hovering either highlights both as one visual unit — no animation, the
+   background simply applies while the pointer is over the group. */
+.packages tbody:hover > tr > th,
+.packages tbody:hover > tr > td {
+  background: var(--vscode-list-hoverBackground);
 }
 
 .disclosure {
@@ -127,41 +177,96 @@ body {
   font-size: 0.8em;
 }
 
+.dev-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.02rem 0.35rem;
+  border: 1px solid var(--vscode-panel-border, currentColor);
+  border-radius: 2px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.68em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.version-lines {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.version-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.version-label {
+  min-width: 3.2rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.72em;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.version-value {
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+
 /*
- * PLACEHOLDER PALETTE — the spec leaves the vulnerability colour scale to be
- * finalized visually. Only the ordering is meaningful: critical is the loudest,
- * `none` is deliberately quiet so a healthy table reads as calm.
+ * Badges lean on theme-provided semantic colours (error/warning/info) rather
+ * than fixed hex values, so they stay correct across light, dark, and
+ * high-contrast themes. Colour is a reinforcing cue only — the label text
+ * (Critical, High, Moderate, Low, Info, Safe) is what actually communicates
+ * severity, so the badge reads fine without colour vision.
  */
 .severity {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 4.5rem;
-  padding: 0.1rem 0.45rem;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid currentColor;
   border-radius: 2px;
   text-align: center;
   font-size: 0.8em;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: #fff;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
 .severity--critical {
-  background: #8b1a1a;
+  color: var(--vscode-editorError-foreground);
+  font-weight: 700;
 }
 .severity--high {
-  background: #c0392b;
+  color: var(--vscode-editorError-foreground);
 }
 .severity--moderate {
-  background: #b9770e;
+  color: var(--vscode-editorWarning-foreground);
 }
 .severity--low {
-  background: #1f6f8b;
+  color: var(--vscode-editorInfo-foreground);
 }
 .severity--info {
-  background: #4a5568;
+  color: var(--vscode-descriptionForeground);
 }
 .severity--none {
+  border-color: var(--vscode-panel-border, transparent);
   color: var(--vscode-descriptionForeground);
-  background: transparent;
+  font-weight: 400;
+}
+
+.dashboard__footer {
+  margin: 1rem 0 0;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
 }
 
 .advisories {

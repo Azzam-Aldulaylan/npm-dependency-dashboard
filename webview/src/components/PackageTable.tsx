@@ -3,6 +3,7 @@ import type { ReactElement } from 'react';
 
 import type { PackageRow, UnresolvableReason } from '../../../src/core/types.js';
 import { upgradeActionDisplay } from '../../../src/host/upgradeAction.js';
+import { versionDisplay } from '../../../src/host/versionDisplay.js';
 import { AdvisoryDetails } from './AdvisoryDetails.js';
 import { SeverityBadge } from './SeverityBadge.js';
 
@@ -15,15 +16,22 @@ const UNRESOLVABLE_LABELS: Record<UnresolvableReason, string> = {
   'no-lockfile': 'unresolved',
 };
 
-/**
- * Wanted and Latest are the same value for most packages — the version list is
- * only fetched when they can differ — so they collapse to one number unless
- * they actually disagree.
- */
-function availableVersion(row: PackageRow): string {
-  if (row.wanted === null && row.latest === null) return '—';
-  if (row.wanted === row.latest) return row.wanted ?? '—';
-  return `wanted ${row.wanted ?? '—'} · latest ${row.latest ?? '—'}`;
+function AvailableVersion({ row }: { row: PackageRow }): ReactElement {
+  const display = versionDisplay(row.wanted, row.latest);
+  if (display.kind === 'dash') return <span aria-hidden="true">—</span>;
+  if (display.kind === 'single') return <span className="version-value">{display.value}</span>;
+  return (
+    <span className="version-lines">
+      <span className="version-line">
+        <span className="version-label">Wanted</span>
+        <span className="version-value">{display.wanted}</span>
+      </span>
+      <span className="version-line">
+        <span className="version-label">Latest</span>
+        <span className="version-value">{display.latest}</span>
+      </span>
+    </span>
+  );
 }
 
 function CurrentVersion({ row }: { row: PackageRow }): ReactElement {
@@ -57,63 +65,76 @@ export function PackageTable({ rows }: { rows: readonly PackageRow[] }): ReactEl
   };
 
   return (
-    <table className="packages">
-      <thead>
-        <tr>
-          <th scope="col" className="packages__disclosure" />
-          <th scope="col">Package</th>
-          <th scope="col">Current</th>
-          <th scope="col">Available</th>
-          <th scope="col">Vulnerabilities</th>
-          <th scope="col">Action</th>
-        </tr>
-      </thead>
-      {rows.map((row) => {
-        const expandable = row.advisories.length > 0;
-        const isOpen = expandable && expanded.has(row.name);
-        return (
-          <tbody key={row.name}>
-            <tr>
-              <td className="packages__disclosure">
-                {expandable ? (
-                  <button
-                    className="disclosure"
-                    type="button"
-                    aria-expanded={isOpen}
-                    aria-label={`${isOpen ? 'Hide' : 'Show'} advisories for ${row.name}`}
-                    onClick={() => {
-                      toggle(row.name);
-                    }}
-                  >
-                    {isOpen ? '▾' : '▸'}
-                  </button>
-                ) : null}
-              </td>
-              <th scope="row" className="packages__name">
-                {row.name}
-              </th>
-              <td>
-                <CurrentVersion row={row} />
-              </td>
-              <td>{availableVersion(row)}</td>
-              <td>
-                <SeverityBadge severity={row.worstSeverity} />
-              </td>
-              <td>
-                {/* Inert by design: the Upgrade action runs npm install and lands in a later slice. */}
-                <UpgradeAction row={row} />
-              </td>
-            </tr>
-            {isOpen ? (
-              <tr className="packages__details">
-                <td colSpan={6}>
-                  <AdvisoryDetails advisories={row.advisories} />
+    <div className="packages-container">
+      <table className="packages">
+        <colgroup>
+          <col className="col-disclosure" />
+          <col className="col-package" />
+          <col className="col-current" />
+          <col className="col-available" />
+          <col className="col-vulnerabilities" />
+          <col className="col-action" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th scope="col" className="packages__disclosure" />
+            <th scope="col">Package</th>
+            <th scope="col">Current</th>
+            <th scope="col">Available</th>
+            <th scope="col">Vulnerabilities</th>
+            <th scope="col">Action</th>
+          </tr>
+        </thead>
+        {rows.map((row) => {
+          const expandable = row.advisories.length > 0;
+          const isOpen = expandable && expanded.has(row.name);
+          return (
+            <tbody key={row.name}>
+              <tr>
+                <td className="packages__disclosure">
+                  {expandable ? (
+                    <button
+                      className="disclosure"
+                      type="button"
+                      aria-expanded={isOpen}
+                      aria-label={`${isOpen ? 'Hide' : 'Show'} advisories for ${row.name}`}
+                      onClick={() => {
+                        toggle(row.name);
+                      }}
+                    >
+                      {isOpen ? '▾' : '▸'}
+                    </button>
+                  ) : null}
+                </td>
+                <th scope="row" className="packages__name">
+                  <span className="packages__name-text">{row.name}</span>
+                  {row.dev ? <span className="dev-badge">Dev</span> : null}
+                </th>
+                <td className="packages__wrap">
+                  <CurrentVersion row={row} />
+                </td>
+                <td className="packages__wrap">
+                  <AvailableVersion row={row} />
+                </td>
+                <td>
+                  <SeverityBadge severity={row.worstSeverity} />
+                </td>
+                <td>
+                  {/* Inert by design: the Upgrade action runs npm install and lands in a later slice. */}
+                  <UpgradeAction row={row} />
                 </td>
               </tr>
-            ) : null}
-          </tbody>
-        );
-      })}
-    </table>
+              {isOpen ? (
+                <tr className="packages__details">
+                  <td colSpan={6}>
+                    <AdvisoryDetails advisories={row.advisories} />
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          );
+        })}
+      </table>
+    </div>
   );
 }

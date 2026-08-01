@@ -1,13 +1,14 @@
 import type { ReactElement } from 'react';
 
 import type { Severity } from '../../../src/core/types.js';
+import { severityDisplay } from '../../../src/host/severityDisplay.js';
 
 /**
- * The spec leaves the exact colour scale to be finalized visually, so the
- * palette in styles.css is a sensible placeholder ordered by severity, not a
- * design decision. Only the ordering (critical worst, none best) is meaningful.
+ * Colour alone never carries the meaning here — the label text (Critical,
+ * High, ... Safe) is what a screen reader or colour-blind user relies on;
+ * the themed colour is a reinforcing cue, not the only signal.
  */
 export function SeverityBadge({ severity }: { severity: Severity | null }): ReactElement {
-  const label = severity ?? 'none';
-  return <span className={`severity severity--${label}`}>{label}</span>;
+  const { label, className } = severityDisplay(severity);
+  return <span className={`severity severity--${className}`}>{label}</span>;
 }

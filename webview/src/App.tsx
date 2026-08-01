@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 
+import { dependencyCountLabel } from '../../src/host/dependencySummary.js';
 import type { DashboardData, HostToWebviewMessage } from '../../src/host/webviewProtocol.js';
 import { isHostToWebviewMessage } from '../../src/host/webviewProtocol.js';
 import { PackageTable } from './components/PackageTable.js';
@@ -107,6 +108,10 @@ function Dashboard({
       ) : (
         <PackageTable rows={data.rows} />
       )}
+
+      <p className="dashboard__footer">
+        {dependencyCountLabel(data.rows.length)} • Updated {formatTime(data.generatedAt)}
+      </p>
     </>
   );
 }

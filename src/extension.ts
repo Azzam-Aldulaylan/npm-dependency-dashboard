@@ -7,6 +7,8 @@
 
 import * as vscode from 'vscode';
 
+import { DashboardPanel } from './host/dashboardPanel.js';
+
 export function activate(context: vscode.ExtensionContext): void {
   // The manifest declares untrustedWorkspaces.supported = false, so VS Code
   // won't activate us in an untrusted workspace at all. This check is a
@@ -18,14 +20,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('dependencyDashboard.open', () => {
-      // TODO(S4): create/reveal the panel.
-      vscode.window.showInformationMessage('Dependency Dashboard: panel not built yet.');
+      DashboardPanel.createOrShow(context);
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('dependencyDashboard.refresh', () => {
-      // TODO(S4): force a cache-bypassing refresh of the active project.
+      void DashboardPanel.refresh();
     })
   );
 }

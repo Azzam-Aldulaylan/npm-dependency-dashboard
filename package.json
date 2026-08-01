@@ -60,8 +60,8 @@
     "build:core": "tsc -p src/core/tsconfig.json",
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/core/tsconfig.json",
-    "pretest": "npm run build:core",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/core/tsconfig.json && tsc --noEmit -p webview/tsconfig.json",
+    "pretest": "tsc -p tsconfig.json",
     "test": "node --test",
     "pretest:live": "npm run build:core",
     "test:live": "node --test scripts/live-checks/advisories-bulk-live.mjs",
@@ -69,12 +69,16 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
     "@types/semver": "^7.5.0",
     "@types/vscode": "^1.90.0",
     "esbuild": "^0.28.0",
     "typescript": "^5.4.0"
   },
   "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "semver": "^7.6.0"
   }
 }

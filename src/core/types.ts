@@ -70,6 +70,14 @@ export interface AttributedAdvisory {
   path: string[];
 }
 
+/**
+ * `npm audit --json`'s per-package fix status — optional enrichment, not
+ * available from the bulk advisories endpoint. Three shapes, not one:
+ * `true` (fixable in place, no version bump needed), `false` (no fix), or an
+ * object naming the version a fix requires (possibly a major bump).
+ */
+export type FixAvailable = true | false | { name: string; version: string; isSemVerMajor: boolean };
+
 export interface PackageRow {
   name: string;
   current: string | null;

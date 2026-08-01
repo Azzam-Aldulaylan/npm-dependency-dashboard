@@ -1,0 +1,76 @@
+{
+  "name": "npm-dependency-dashboard",
+  "displayName": "Dependency Dashboard",
+  "description": "See installed packages, available updates, and vulnerabilities in one panel.",
+  "version": "0.0.1",
+  "license": "MIT",
+  "publisher": "CHANGEME",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Azzam-Aldulaylan/npm-dependency-dashboard.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/package.json",
+    "onWebviewPanel:dependencyDashboard"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "This extension reads .npmrc and can run npm install, which executes code from the workspace. It stays disabled until the workspace is trusted."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "dependencyDashboard.open",
+        "title": "Dependency Dashboard: Open"
+      },
+      {
+        "command": "dependencyDashboard.refresh",
+        "title": "Dependency Dashboard: Refresh"
+      }
+    ],
+    "configuration": {
+      "title": "Dependency Dashboard",
+      "properties": {
+        "dependencyDashboard.registry.useProjectNpmrc": {
+          "type": "boolean",
+          "default": true,
+          "description": "Read the registry from the project's .npmrc. Values containing ${ are always rejected. Turn this off to use only your user-level .npmrc."
+        },
+        "dependencyDashboard.upgrade.ignoreScripts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Pass --ignore-scripts when upgrading, so package lifecycle scripts don't run."
+        },
+        "dependencyDashboard.cacheTtlMinutes": {
+          "type": "number",
+          "default": 30,
+          "description": "How long fetched registry data stays fresh before it's checked again."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/core/tsconfig.json",
+    "test": "node --test test/**/*.test.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/semver": "^7.5.0",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "semver": "^7.6.0"
+  }
+}

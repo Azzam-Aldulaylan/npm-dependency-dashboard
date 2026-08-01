@@ -73,8 +73,6 @@ function selfComputedFix(
 export interface UpgradeTargetOptions {
   installed: string | null;
   range: string;
-  /** Highest version satisfying the declared range — what `fixAvailable: true` resolves to. */
-  wanted: string | null;
   /** All published version strings, for the self-computed fallback. */
   availableVersions: readonly string[];
   /** This direct dependency's own attributed advisories, any depth. */
@@ -89,14 +87,24 @@ export interface UpgradeTargetOptions {
  * installed — see `isSafeUpgradeTarget`'s downgrade-trap guard.
  */
 export function resolveUpgradeTarget(options: UpgradeTargetOptions): string | null {
-  const { installed, range, wanted, availableVersions, advisories, fixAvailable } = options;
+  const { installed, range, availableVersions, advisories, fixAvailable } = options;
   if (advisories.length === 0) return null;
 
-  if (fixAvailable !== undefined) {
-    if (fixAvailable === false) return null;
-    const target = fixAvailable === true ? wanted : fixAvailable.version;
-    return isSafeUpgradeTarget(target, installed) ? target : null;
+  if (fixAvailable === false) return null;
+
+  if (fixAvailable !== undefined && fixAvailable !== true) {
+    // The object form names an explicit version audit itself vouches for
+    // (already validated against the direct-dependency set upstream, in
+    // mapFixAvailableToDirectDependencies) — trust it directly.
+    return isSafeUpgradeTarget(fixAvailable.version, installed) ? fixAvailable.version : null;
   }
 
+  // fixAvailable is `true` or absent. `true` only means "fixable without an
+  // explicit version bump" — it names no version at all, so treating `wanted`
+  // (the highest in-range version, per our OWN unrelated version-fetch logic)
+  // as "the fix" would be an unverified guess dressed up as a confirmed
+  // answer. Fall through to the same self-computed check used when audit is
+  // unavailable entirely: it only offers a version actually proven not to
+  // match this dependency's own advisories.
   return selfComputedFix(installed, range, availableVersions, advisories);
 }

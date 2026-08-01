@@ -129,29 +129,6 @@ test('POST: an already-aborted signal is refused before the socket opens', async
   );
 });
 
-test('POST: a real request against the live bulk advisories endpoint round-trips correctly', async () => {
-  // Live-network check, same spirit as the GET tests above: this is the one
-  // place that actually exercises content-length computation and body
-  // writing against a real server, not a mock.
-  const client = new NodeHttpClient();
-  const body = JSON.stringify({ minimatch: ['3.0.4'], react: ['18.2.0'] });
-
-  const response = await client.post(
-    'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk',
-    body,
-    { headers: { 'content-type': 'application/json', accept: 'application/json' }, timeoutMs: 10_000 }
-  );
-
-  assert.equal(response.status, 200);
-  const parsed = JSON.parse(response.body);
-  assert.ok(Array.isArray(parsed.minimatch) && parsed.minimatch.length > 0, 'minimatch@3.0.4 has known advisories');
-  assert.equal('react' in parsed, false, 'a clean package at the queried version is absent, not empty');
-  assert.ok(
-    parsed.minimatch.every(
-      (a) =>
-        typeof a.id !== 'undefined' &&
-        typeof a.severity === 'string' &&
-        typeof a.vulnerable_versions === 'string'
-    )
-  );
-});
+// The live round-trip against the real bulk advisories endpoint lives in
+// scripts/live-checks/advisories-bulk-live.mjs (`npm run test:live`), so the
+// default suite stays offline and deterministic.

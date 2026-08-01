@@ -32,7 +32,6 @@ test('no attributed advisories: no upgrade to offer', () => {
   const target = resolveUpgradeTarget({
     installed: '1.0.0',
     range: '^1.0.0',
-    wanted: '1.2.0',
     availableVersions: ['1.0.0', '1.2.0'],
     advisories: [],
   });
@@ -43,7 +42,6 @@ test('fixAvailable: false means no fix, regardless of other data', () => {
   const target = resolveUpgradeTarget({
     installed: '1.0.0',
     range: '^1.0.0',
-    wanted: '1.2.0',
     availableVersions: ['1.0.0', '1.2.0'],
     advisories: [attributed('high', ['pkg', 'nested'])],
     fixAvailable: false,
@@ -51,23 +49,43 @@ test('fixAvailable: false means no fix, regardless of other data', () => {
   assert.equal(target, null);
 });
 
-test('fixAvailable: true resolves to the wanted version', () => {
+// fixAvailable: true only means "fixable without an explicit version bump" —
+// it names no version at all. Treating some unrelated "wanted" version as
+// proof of a fix would be an unverified guess, so it must fall through to the
+// same self-computed check used when audit is unavailable entirely.
+
+test('fixAvailable: true falls through to the self-computed check, not a blind trust of "wanted"', () => {
+  const advisories = [attributed('high', ['pkg'])].map((a) => ({
+    ...a,
+    advisory: { ...a.advisory, vulnerableVersions: '<1.2.0' },
+  }));
   const target = resolveUpgradeTarget({
     installed: '1.0.0',
     range: '^1.0.0',
-    wanted: '1.2.0',
-    availableVersions: ['1.0.0', '1.2.0'],
-    advisories: [attributed('high', ['pkg', 'nested'])],
+    availableVersions: ['1.0.0', '1.0.1', '1.2.0'],
+    advisories,
     fixAvailable: true,
   });
-  assert.equal(target, '1.2.0');
+  assert.equal(target, '1.2.0', 'the self-computed check finds a version actually proven clean');
+});
+
+test('fixAvailable: true cannot vouch for a purely transitive advisory either', () => {
+  // No own advisory (path length > 1 only) means there is nothing to verify a
+  // version against — `true` does not change that.
+  const target = resolveUpgradeTarget({
+    installed: '1.0.0',
+    range: '^1.0.0',
+    availableVersions: ['1.0.0', '1.2.0'],
+    advisories: [attributed('critical', ['pkg', 'nested-dep'])],
+    fixAvailable: true,
+  });
+  assert.equal(target, null);
 });
 
 test('fixAvailable object names the specific target version, possibly a major bump', () => {
   const target = resolveUpgradeTarget({
     installed: '1.0.0',
     range: '^1.0.0',
-    wanted: '1.2.0',
     availableVersions: ['1.0.0', '1.2.0', '2.0.0'],
     advisories: [attributed('critical', ['pkg', 'nested'])],
     fixAvailable: { name: 'pkg', version: '2.0.0', isSemVerMajor: true },
@@ -79,7 +97,6 @@ test('the downgrade trap: a fixAvailable version not ahead of installed is refus
   const target = resolveUpgradeTarget({
     installed: '2.0.0',
     range: '*',
-    wanted: '2.0.0',
     availableVersions: ['1.9.0', '2.0.0'],
     advisories: [attributed('high', ['pkg', 'nested'])],
     fixAvailable: { name: 'pkg', version: '1.9.0', isSemVerMajor: false },
@@ -92,7 +109,6 @@ test('without fixAvailable, self-computed fallback finds a clean in-range versio
   const target = resolveUpgradeTarget({
     installed: '1.0.0',
     range: '^1.0.0',
-    wanted: '1.0.0', // registry's own "latest" happens to still be vulnerable in this scenario
     availableVersions: ['1.0.0', '1.0.1', '1.2.0'],
     advisories: advisories.map((a) => ({ ...a, advisory: { ...a.advisory, vulnerableVersions: '<1.2.0' } })),
   });
@@ -107,7 +123,6 @@ test('the self-computed fallback cannot vouch for a purely transitive advisory',
   const target = resolveUpgradeTarget({
     installed: '1.0.0',
     range: '^1.0.0',
-    wanted: '1.2.0',
     availableVersions: ['1.0.0', '1.2.0'],
     advisories,
   });
@@ -122,7 +137,6 @@ test('the self-computed fallback never offers a version outside the declared ran
   const target = resolveUpgradeTarget({
     installed: '1.0.0',
     range: '^1.0.0', // 2.0.0 is clean but out of range
-    wanted: '1.0.0',
     availableVersions: ['1.0.0', '2.0.0'],
     advisories,
   });

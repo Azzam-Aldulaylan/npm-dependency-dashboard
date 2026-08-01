@@ -63,6 +63,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/core/tsconfig.json",
     "pretest": "npm run build:core",
     "test": "node --test",
+    "pretest:live": "npm run build:core",
+    "test:live": "node --test scripts/live-checks/advisories-bulk-live.mjs",
     "package": "vsce package"
   },
   "devDependencies": {

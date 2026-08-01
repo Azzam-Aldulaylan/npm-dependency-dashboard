@@ -1,0 +1,19 @@
+# Everything not needed at runtime. Keeps the VSIX small and avoids shipping
+# source, fixtures, or any local config that might contain secrets.
+.vscode/**
+.github/**
+src/**
+webview/src/**
+test/**
+docs/**
+node_modules/**
+out/**
+**/*.ts
+**/*.tsx
+**/*.map
+**/tsconfig.json
+esbuild.mjs
+.gitignore
+.npmrc
+**/*.pem
+**/*.key

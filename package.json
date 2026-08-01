@@ -57,10 +57,12 @@
     }
   },
   "scripts": {
+    "build:core": "tsc -p src/core/tsconfig.json",
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/core/tsconfig.json",
-    "test": "node --test test/**/*.test.js",
+    "pretest": "npm run build:core",
+    "test": "node --test test/",
     "package": "vsce package"
   },
   "devDependencies": {

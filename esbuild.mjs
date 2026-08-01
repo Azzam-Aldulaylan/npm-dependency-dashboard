@@ -25,7 +25,17 @@ const extensionConfig = {
   logLevel: 'info',
 };
 
-/** Webview: browser target, no Node builtins. */
+/**
+ * Webview: browser target, no Node builtins.
+ *
+ * The CSS imported by main.tsx is emitted as a sibling dist/webview.css, which
+ * the panel loads via <link> — the CSP forbids inline <style>, so the
+ * stylesheet has to be a real file.
+ *
+ * `define` is not optional: React branches on process.env.NODE_ENV, and there
+ * is no `process` in a browser bundle, so without this the webview throws on
+ * load rather than at build time.
+ */
 const webviewConfig = {
   entryPoints: [WEBVIEW_ENTRY],
   bundle: true,
@@ -33,6 +43,8 @@ const webviewConfig = {
   format: 'iife',
   platform: 'browser',
   target: 'es2022',
+  jsx: 'automatic',
+  define: { 'process.env.NODE_ENV': production ? '"production"' : '"development"' },
   sourcemap: !production,
   minify: production,
   logLevel: 'info',

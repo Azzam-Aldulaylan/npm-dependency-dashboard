@@ -27,11 +27,26 @@ export interface ProtocolError {
   message: string;
 }
 
+/**
+ * S6 — the currently selected project. Only ever a display `label` plus a
+ * workspace-folder-relative `manifestPath` — never an absolute filesystem
+ * path, and never anything beyond what the webview already needs to render.
+ */
+export interface SelectedProjectInfo {
+  /** Workspace-folder name, plus the containing directory when not the folder root — see projectCandidateLabel. */
+  label: string;
+  /** Workspace-folder-relative POSIX path to package.json. */
+  manifestPath: string;
+}
+
 /** Everything the table needs to render, JSON-safe end to end. */
 export interface DashboardData {
   rows: PackageRow[];
   /** ISO timestamp of the run that produced these rows. */
   generatedAt: string;
+  project: SelectedProjectInfo;
+  /** More than one project candidate was discovered — gates whether "Change project" renders at all. */
+  canChangeProject: boolean;
   /** The bulk advisory fetch failed; rows render without vulnerability data. */
   advisoriesError?: ProtocolError;
   /** `npm audit` enrichment was skipped or failed; upgrade targets are self-computed. */
@@ -59,9 +74,16 @@ export type HostToWebviewMessage =
  * src/core/upgrade/validate.ts. Neither value is trusted directly; both are
  * used only as lookup keys against the controller's most recent result.
  */
+/**
+ * `change-project` carries no payload at all — the webview can only ever ask
+ * the host to open its picker, never name or choose a project itself. The
+ * host owns project discovery and the candidate list end to end; nothing
+ * here could be a raw filesystem path even by accident.
+ */
 export type WebviewToHostMessage =
   | { type: 'ready' }
   | { type: 'refresh' }
+  | { type: 'change-project' }
   | { type: 'upgrade'; package: string; target: string };
 
 const SEVERITIES: ReadonlySet<string> = new Set<Severity>([
@@ -151,6 +173,15 @@ function isPackageRow(value: unknown): value is PackageRow {
   );
 }
 
+function isSelectedProjectInfo(value: unknown): value is SelectedProjectInfo {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['label', 'manifestPath']) &&
+    typeof value['label'] === 'string' &&
+    typeof value['manifestPath'] === 'string'
+  );
+}
+
 function isDashboardData(value: unknown): value is DashboardData {
   if (!isRecord(value)) return false;
   const rows = value['rows'];
@@ -158,6 +189,8 @@ function isDashboardData(value: unknown): value is DashboardData {
     Array.isArray(rows) &&
     rows.every(isPackageRow) &&
     typeof value['generatedAt'] === 'string' &&
+    isSelectedProjectInfo(value['project']) &&
+    typeof value['canChangeProject'] === 'boolean' &&
     isAbsentOr(value['advisoriesError'], isProtocolError) &&
     isAbsentOr(value['auditUnavailable'], (v) => typeof v === 'boolean')
   );
@@ -182,7 +215,9 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (!isRecord(value)) return false;
 
   const type = value['type'];
-  if (type === 'ready' || type === 'refresh') return hasOnlyKeys(value, ['type']);
+  if (type === 'ready' || type === 'refresh' || type === 'change-project') {
+    return hasOnlyKeys(value, ['type']);
+  }
   if (type === 'upgrade') {
     return (
       hasOnlyKeys(value, ['type', 'package', 'target']) &&

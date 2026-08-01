@@ -9,18 +9,24 @@
  */
 
 import type { BuildPackageRowsResult } from '../core/pipeline.js';
-import type { DashboardData, HostToWebviewMessage } from './webviewProtocol.js';
+import type { DashboardData, HostToWebviewMessage, SelectedProjectInfo } from './webviewProtocol.js';
 
 /**
  * `generatedAt` is a parameter rather than always `Date.now()` because a
  * cached result gets re-sent later as `stale`, and that message must carry the
  * timestamp of the run that produced the rows — not the moment it was replayed.
+ *
+ * `project`/`canChangeProject` (S6) are required, not optional: every message
+ * that carries `data` is for some selected project, and the caller (S6:
+ * DashboardController, via its own options) always has both on hand.
  */
 export function toDashboardData(
   result: BuildPackageRowsResult,
+  project: SelectedProjectInfo,
+  canChangeProject: boolean,
   generatedAt: string = new Date().toISOString()
 ): DashboardData {
-  const data: DashboardData = { rows: result.rows, generatedAt };
+  const data: DashboardData = { rows: result.rows, generatedAt, project, canChangeProject };
   if (result.advisoriesError !== undefined) {
     data.advisoriesError = {
       code: result.advisoriesError.code,
@@ -44,9 +50,11 @@ export function toDashboardData(
 export function toHostToWebviewMessage(
   result: BuildPackageRowsResult,
   options: { isEmpty: boolean; isStale: boolean },
+  project: SelectedProjectInfo,
+  canChangeProject: boolean,
   generatedAt?: string
 ): HostToWebviewMessage {
-  const data = toDashboardData(result, generatedAt);
+  const data = toDashboardData(result, project, canChangeProject, generatedAt);
   if (options.isEmpty) return { status: 'empty', data };
   if (options.isStale) return { status: 'stale', data };
   if (result.advisoriesError !== undefined || result.auditUnavailable === true) {

@@ -24,7 +24,7 @@ import type { EtagStore } from '../core/registry/versions.js';
 import type { UpgradeEligibility, UpgradeRequestInput } from '../core/upgrade/validate.js';
 import { validateUpgradeRequest } from '../core/upgrade/validate.js';
 import { toHostToWebviewMessage } from './dashboardData.js';
-import type { HostToWebviewMessage, ProtocolError } from './webviewProtocol.js';
+import type { HostToWebviewMessage, ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
 
 export interface MessageSink {
   postMessage(message: HostToWebviewMessage): void;
@@ -41,6 +41,10 @@ export interface DashboardControllerOptions {
   etagStore: EtagStore;
   /** Omit to skip the optional `npm audit` enrichment. */
   auditRunner?: AuditRunner;
+  /** S6 — display info for the currently selected project, sent out with every DashboardData. */
+  projectInfo: SelectedProjectInfo;
+  /** S6 — whether more than one project candidate was discovered. */
+  canChangeProject: boolean;
 }
 
 function isCancellation(cause: unknown): boolean {
@@ -56,7 +60,7 @@ function toProtocolError(cause: unknown): ProtocolError {
 /** The project-specific slice of options that a reload replaces — everything but the fetch machinery. */
 export type ProjectSnapshot = Pick<
   DashboardControllerOptions,
-  'root' | 'manifestText' | 'lockfileText' | 'registry'
+  'root' | 'manifestText' | 'lockfileText' | 'registry' | 'projectInfo' | 'canChangeProject'
 >;
 
 export class DashboardController {
@@ -137,6 +141,8 @@ export class DashboardController {
         toHostToWebviewMessage(
           cached,
           { isEmpty: cached.rows.length === 0, isStale: true },
+          this.options.projectInfo,
+          this.options.canChangeProject,
           this.lastGeneratedAt
         )
       );
@@ -192,6 +198,8 @@ export class DashboardController {
         toHostToWebviewMessage(
           result,
           { isEmpty: result.rows.length === 0, isStale: false },
+          this.options.projectInfo,
+          this.options.canChangeProject,
           generatedAt
         )
       );

@@ -123,3 +123,89 @@ export function nearestLockfileDir(
     current = idx === -1 ? '' : current.slice(0, idx);
   }
 }
+
+/**
+ * S6 — multi-root/monorepo project discovery, still the pure half.
+ *
+ * `vscode.workspace.findFiles` runs per WorkspaceFolder (a `RelativePattern`
+ * is always scoped to exactly one), so the adapter supplies one raw manifest-
+ * path list per folder; everything about combining them into a stable,
+ * labelled, identifiable candidate list lives here.
+ */
+
+/** One WorkspaceFolder's raw findFiles output, plus enough to label and identify it. */
+export interface ProjectCandidateSource {
+  /** A stable string identity for the owning workspace folder — its URI string, not its display name (names are not guaranteed unique). */
+  folderId: string;
+  /** Display name of the workspace folder, for labels. */
+  folderName: string;
+  /** Raw manifest paths as returned by findFiles for this one folder, workspace-folder-relative. */
+  manifestPaths: readonly string[];
+}
+
+export interface DiscoveredProjectCandidate {
+  /** Deterministic identity — see deriveProjectId. Stable across scans as long as the folder and manifest path don't change. */
+  id: string;
+  folderId: string;
+  folderName: string;
+  /** Workspace-folder-relative POSIX path to package.json, e.g. "packages/app/package.json". */
+  manifestPath: string;
+  /** Directory holding it, relative to the workspace folder; "" for the folder root. */
+  dir: string;
+}
+
+/**
+ * Deterministic identity for a candidate, derived only from its owning
+ * folder's identity and its manifest path — never from anything the webview
+ * could influence, and stable across process restarts (unlike, say, an
+ * array index). Two candidates with the same `dir`/`manifestPath` in
+ * different workspace folders get different ids because `folderId` differs.
+ *
+ * Encoded as `JSON.stringify([folderId, manifestPath])` rather than a
+ * delimiter-joined string: a plain `${folderId}::${manifestPath}` join is
+ * ambiguous whenever either input can itself contain the delimiter —
+ * `folderId = "file:///a::b"` + `manifestPath = "package.json"` and
+ * `folderId = "file:///a"` + `manifestPath = "b::package.json"` would
+ * otherwise collide on the identical string `"file:///a::b::package.json"`.
+ * JSON-encoding the pair as a tuple keeps each element's own boundary
+ * (quoting/escaping) with it, so no choice of delimiter can be defeated by
+ * an input that happens to contain it.
+ */
+export function deriveProjectId(folderId: string, manifestPath: string): string {
+  return JSON.stringify([folderId, manifestPath]);
+}
+
+/**
+ * A candidate's picker/header label. The workspace folder's name is always
+ * included — not just the directory — because two different workspace
+ * folders can easily contain the same relative path (e.g. both have
+ * `packages/api/package.json`); the directory alone would be ambiguous.
+ */
+export function projectCandidateLabel(candidate: Pick<DiscoveredProjectCandidate, 'folderName' | 'dir'>): string {
+  return candidate.dir === '' ? candidate.folderName : `${candidate.folderName} — ${candidate.dir}`;
+}
+
+/**
+ * Combine every workspace folder's raw findFiles results into one ordered,
+ * deduplicated, labelled candidate list — root-first then alphabetical
+ * *within* each folder (via toProjectCandidates), folders themselves kept in
+ * the order they were given (VS Code's own multi-root order).
+ */
+export function discoverProjectCandidates(
+  sources: readonly ProjectCandidateSource[],
+  excluded: readonly string[] = DEFAULT_EXCLUDED_DIRS
+): DiscoveredProjectCandidate[] {
+  const out: DiscoveredProjectCandidate[] = [];
+  for (const source of sources) {
+    for (const candidate of toProjectCandidates(source.manifestPaths, excluded)) {
+      out.push({
+        id: deriveProjectId(source.folderId, candidate.manifestPath),
+        folderId: source.folderId,
+        folderName: source.folderName,
+        manifestPath: candidate.manifestPath,
+        dir: candidate.dir,
+      });
+    }
+  }
+  return out;
+}

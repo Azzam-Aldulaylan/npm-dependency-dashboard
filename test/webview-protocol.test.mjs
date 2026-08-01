@@ -53,16 +53,29 @@ const VULNERABLE_ROW = {
   upgradeTo: '9.0.0',
 };
 
+const PROJECT = { label: 'app', manifestPath: 'package.json' };
+
 const DATA = {
   rows: [CLEAN_ROW, VULNERABLE_ROW],
   generatedAt: '2026-08-01T12:00:00.000Z',
+  project: PROJECT,
+  canChangeProject: false,
 };
 
 // ------------------------------------------------- webview -> host
 
-test('both webview-to-host messages are accepted', () => {
+test('every payload-free webview-to-host message is accepted', () => {
   assert.equal(isWebviewToHostMessage({ type: 'ready' }), true);
   assert.equal(isWebviewToHostMessage({ type: 'refresh' }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'change-project' }), true);
+});
+
+test('change-project carries no payload — extra keys are rejected, not ignored', () => {
+  // Same closed-shape rule as every other message: the webview can only ever
+  // ask to open the picker, never smuggle a path or an id alongside the ask.
+  assert.equal(isWebviewToHostMessage({ type: 'change-project', path: '/etc/passwd' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'change-project', id: 'anything' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'change-project', manifestPath: 'package.json' }), false);
 });
 
 test('a non-object is never a webview-to-host message', () => {
@@ -228,6 +241,13 @@ test('a malformed DashboardData shell is rejected', () => {
     { ...DATA, advisoriesError: null },
     { ...DATA, advisoriesError: { code: 'X' } },
     { ...DATA, auditUnavailable: 'yes' },
+    { ...DATA, project: undefined },
+    { ...DATA, project: null },
+    { ...DATA, project: { label: 'app' } },
+    { ...DATA, project: { label: 'app', manifestPath: 'package.json', extra: 1 } },
+    { ...DATA, project: { label: 1, manifestPath: 'package.json' } },
+    { ...DATA, canChangeProject: undefined },
+    { ...DATA, canChangeProject: 'true' },
   ];
   for (const data of bad) {
     assert.equal(

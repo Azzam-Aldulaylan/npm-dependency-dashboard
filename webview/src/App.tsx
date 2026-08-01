@@ -82,6 +82,10 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'refresh' });
   }, []);
 
+  const changeProject = useCallback(() => {
+    vscode.postMessage({ type: 'change-project' });
+  }, []);
+
   const requestUpgrade = useCallback((packageName: string, target: string) => {
     setActiveUpgrade(packageName);
     vscode.postMessage({ type: 'upgrade', package: packageName, target });
@@ -89,17 +93,34 @@ export function App(): ReactElement {
 
   // No message yet is the same user-visible state as an explicit loading one.
   const loading = message === undefined || message.status === 'loading';
-  // Disabled while an upgrade is active — a manual refresh mid-upgrade would
-  // race the scan against a package.json/lockfile the task is still writing
-  // to; the host rejects it too (see DashboardPanel.handle), this just keeps
-  // the button from inviting a click that can't do anything anyway.
-  const refreshDisabled = loading || activeUpgrade !== null;
+  const data = message !== undefined && 'data' in message ? message.data : undefined;
+  // Disabled while an upgrade is active — a manual refresh or project switch
+  // mid-upgrade would race the scan (and, for a project switch, a controller
+  // replacement) against a package.json/lockfile the task is still writing
+  // to; the host rejects both too (see DashboardPanel.handle), this just
+  // keeps the buttons from inviting a click that can't do anything anyway.
+  const actionsDisabled = loading || activeUpgrade !== null;
 
   return (
     <main className="dashboard">
       <header className="dashboard__header">
-        <h1 className="dashboard__title">Dependencies</h1>
-        <RefreshButton onRefresh={refresh} disabled={refreshDisabled} />
+        <div className="dashboard__header-titles">
+          <h1 className="dashboard__title">Dependencies</h1>
+          {data !== undefined ? <p className="dashboard__project">{data.project.label}</p> : null}
+        </div>
+        <div className="dashboard__header-actions">
+          {data !== undefined && data.canChangeProject ? (
+            <button
+              className="button"
+              type="button"
+              onClick={changeProject}
+              disabled={actionsDisabled}
+            >
+              Change project
+            </button>
+          ) : null}
+          <RefreshButton onRefresh={refresh} disabled={actionsDisabled} />
+        </div>
       </header>
 
       {loading ? <p className="notice">Checking dependencies…</p> : null}

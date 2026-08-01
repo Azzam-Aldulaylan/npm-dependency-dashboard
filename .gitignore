@@ -1,8 +1,23 @@
+# Dependencies and build output
 node_modules/
 dist/
 out/
 *.vsix
+
+# Local environment
+.env
+.env.*
 .npmrc
 *.pem
 *.key
 .DS_Store
+
+# Local AI tooling and runtime state
+.agents/
+.claude/
+.claude-flow/
+.codex/
+.swarm/
+ruvector.db
+*.db-shm
+*.db-wal

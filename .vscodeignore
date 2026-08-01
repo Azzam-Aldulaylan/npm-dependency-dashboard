@@ -1,7 +1,7 @@
-# Everything not needed at runtime. Keeps the VSIX small and avoids shipping
-# source, fixtures, or any local config that might contain secrets.
-.vscode/**
+# Development files
+.git/**
 .github/**
+.vscode/**
 src/**
 webview/src/**
 test/**
@@ -17,3 +17,20 @@ esbuild.mjs
 .npmrc
 **/*.pem
 **/*.key
+
+# Local AI tooling and runtime state
+.agents/**
+.claude/**
+.claude-flow/**
+.codex/**
+.swarm/**
+AGENTS.md
+CLAUDE.md
+ruvector.db
+**/*.db-shm
+**/*.db-wal
+
+# Local environment
+.env
+.env.*
+*.vsix

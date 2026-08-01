@@ -8,10 +8,11 @@
 
 /** Why a package has no registry version to compare against. */
 export type UnresolvableReason =
-  | 'workspace-link' // npm workspaces: "link": true in the lockfile
+  | 'workspace-link' // npm workspaces: "link": true in the lockfile, or link:/workspace: specifier
   | 'file' // file: specifier
   | 'git' // git:/github: specifier
   | 'alias' // npm: alias
+  | 'tarball' // direct http(s) tarball URL
   | 'no-lockfile'; // no lockfile present; only a range is known
 
 export type Severity = 'critical' | 'high' | 'moderate' | 'low' | 'info';

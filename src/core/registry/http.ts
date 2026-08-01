@@ -74,6 +74,7 @@ export interface HttpRequestOptions {
 
 export interface HttpClient {
   get(url: string, options?: HttpRequestOptions): Promise<HttpResponse>;
+  post(url: string, body: string, options?: HttpRequestOptions): Promise<HttpResponse>;
 }
 
 function decompress(stream: Readable, encoding: string | undefined): Readable {
@@ -91,10 +92,23 @@ function decompress(stream: Readable, encoding: string | undefined): Readable {
  */
 export class NodeHttpClient implements HttpClient {
   async get(url: string, options: HttpRequestOptions = {}): Promise<HttpResponse> {
+    return this.requestWithRedirects('GET', url, undefined, options);
+  }
+
+  async post(url: string, body: string, options: HttpRequestOptions = {}): Promise<HttpResponse> {
+    return this.requestWithRedirects('POST', url, body, options);
+  }
+
+  private async requestWithRedirects(
+    method: 'GET' | 'POST',
+    url: string,
+    body: string | undefined,
+    options: HttpRequestOptions
+  ): Promise<HttpResponse> {
     let current = url;
 
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
-      const response = await this.once(current, options);
+      const response = await this.once(method, current, body, options);
 
       const isRedirect =
         response.status === 301 ||
@@ -118,7 +132,12 @@ export class NodeHttpClient implements HttpClient {
     throw new FetchError('TOO_MANY_REDIRECTS', `more than ${MAX_REDIRECTS} redirects from ${url}`);
   }
 
-  private once(url: string, options: HttpRequestOptions): Promise<HttpResponse> {
+  private once(
+    method: 'GET' | 'POST',
+    url: string,
+    body: string | undefined,
+    options: HttpRequestOptions
+  ): Promise<HttpResponse> {
     return new Promise<HttpResponse>((resolve, reject) => {
       let parsed: URL;
       try {
@@ -147,13 +166,18 @@ export class NodeHttpClient implements HttpClient {
         if (typeof value === 'string' && value !== '') headers[key] = value;
       }
 
+      // Computed rather than trusted from the caller, so it always matches
+      // what is actually written below.
+      const bodyBuffer = body === undefined ? undefined : Buffer.from(body, 'utf8');
+      if (bodyBuffer !== undefined) headers['content-length'] = String(bodyBuffer.length);
+
       const req = request(
         {
           protocol: parsed.protocol,
           host: parsed.hostname,
           port: parsed.port === '' ? undefined : parsed.port,
           path: `${parsed.pathname}${parsed.search}`,
-          method: 'GET',
+          method,
           headers,
         },
         (res) => {
@@ -227,6 +251,7 @@ export class NodeHttpClient implements HttpClient {
       };
       signal?.addEventListener('abort', onAbort, { once: true });
 
+      if (bodyBuffer !== undefined) req.write(bodyBuffer);
       req.end();
     });
   }

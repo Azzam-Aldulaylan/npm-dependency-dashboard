@@ -24,19 +24,26 @@ const ROW = {
 };
 
 const AT = '2026-08-01T12:00:00.000Z';
+const PROJECT = { label: 'app', manifestPath: 'package.json' };
+const CAN_CHANGE_PROJECT = false;
 
 // ------------------------------------------------------- toDashboardData
 
-test('a clean result carries rows and nothing else', () => {
-  const data = toDashboardData({ rows: [ROW] }, AT);
-  assert.deepEqual(data, { rows: [ROW], generatedAt: AT });
+test('a clean result carries rows, project info, and nothing else', () => {
+  const data = toDashboardData({ rows: [ROW] }, PROJECT, CAN_CHANGE_PROJECT, AT);
+  assert.deepEqual(data, {
+    rows: [ROW],
+    generatedAt: AT,
+    project: PROJECT,
+    canChangeProject: CAN_CHANGE_PROJECT,
+  });
 });
 
 test('a FetchError is flattened to a plain code/message pair', () => {
   // A FetchError does not survive structured cloning with its prototype, and
   // its internals are not the webview's business either.
   const error = new FetchError('REGISTRY_5XX', 'server error 503: https://registry.npmjs.org', 503);
-  const data = toDashboardData({ rows: [ROW], advisoriesError: error }, AT);
+  const data = toDashboardData({ rows: [ROW], advisoriesError: error }, PROJECT, CAN_CHANGE_PROJECT, AT);
 
   assert.deepEqual(data.advisoriesError, {
     code: 'REGISTRY_5XX',
@@ -48,19 +55,29 @@ test('a FetchError is flattened to a plain code/message pair', () => {
 });
 
 test('auditUnavailable is copied only when actually true', () => {
-  assert.equal(toDashboardData({ rows: [ROW], auditUnavailable: true }, AT).auditUnavailable, true);
-  assert.equal(toDashboardData({ rows: [ROW] }, AT).auditUnavailable, undefined);
+  assert.equal(
+    toDashboardData({ rows: [ROW], auditUnavailable: true }, PROJECT, CAN_CHANGE_PROJECT, AT).auditUnavailable,
+    true
+  );
+  assert.equal(toDashboardData({ rows: [ROW] }, PROJECT, CAN_CHANGE_PROJECT, AT).auditUnavailable, undefined);
 });
 
 test('generatedAt defaults to now when not supplied', () => {
   const before = Date.now();
-  const { generatedAt } = toDashboardData({ rows: [] });
+  const { generatedAt } = toDashboardData({ rows: [] }, PROJECT, CAN_CHANGE_PROJECT);
   assert.ok(Date.parse(generatedAt) >= before, 'a fresh timestamp is stamped on');
+});
+
+test('project and canChangeProject are carried through exactly as given', () => {
+  const multiProject = { label: 'api — packages/api', manifestPath: 'packages/api/package.json' };
+  const data = toDashboardData({ rows: [ROW] }, multiProject, true, AT);
+  assert.deepEqual(data.project, multiProject);
+  assert.equal(data.canChangeProject, true);
 });
 
 // -------------------------------------------------- toHostToWebviewMessage
 
-const map = (result, options) => toHostToWebviewMessage(result, options, AT);
+const map = (result, options) => toHostToWebviewMessage(result, options, PROJECT, CAN_CHANGE_PROJECT, AT);
 
 test('a complete result is ready', () => {
   const message = map({ rows: [ROW] }, { isEmpty: false, isStale: false });

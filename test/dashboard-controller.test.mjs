@@ -84,6 +84,8 @@ function generationalClient({ versions, delayMs = {} }) {
 
 const staticClient = (version) => generationalClient({ versions: [version] });
 
+const PROJECT_INFO = { label: 'app', manifestPath: 'package.json' };
+
 function makeController(client, overrides = {}) {
   return new DashboardController({
     root: ROOT,
@@ -92,6 +94,8 @@ function makeController(client, overrides = {}) {
     registry: REGISTRY,
     httpClient: client,
     etagStore: new MemoryEtagStore(),
+    projectInfo: PROJECT_INFO,
+    canChangeProject: false,
     ...overrides,
   });
 }
@@ -302,6 +306,8 @@ test('updateProjectSnapshot then handleRefresh scans the new lockfile content, n
     manifestText: MANIFEST,
     lockfileText: updatedLockfile,
     registry: REGISTRY,
+    projectInfo: PROJECT_INFO,
+    canChangeProject: false,
   });
 
   const sink = recordingSink();
@@ -347,6 +353,8 @@ test('updateProjectSnapshot then handleRefresh scans the new manifest content, n
     manifestText: updatedManifest,
     lockfileText: updatedLockfile,
     registry: REGISTRY,
+    projectInfo: PROJECT_INFO,
+    canChangeProject: false,
   });
 
   const sink = recordingSink();
@@ -368,9 +376,87 @@ test('updateProjectSnapshot changes root, read via the root getter', () => {
     manifestText: MANIFEST,
     lockfileText: LOCKFILE,
     registry: REGISTRY,
+    projectInfo: PROJECT_INFO,
+    canChangeProject: false,
   });
 
   assert.equal(controller.root, '/tmp/other-project');
+});
+
+test('switching project updates root, manifest, lockfile, registry, dependency classification, and the outgoing project info', async () => {
+  const controller = makeController(staticClient('1.0.1'), {
+    projectInfo: { label: 'frontend', manifestPath: 'package.json' },
+    canChangeProject: true,
+  });
+  const first = recordingSink();
+  await controller.handleReady(first);
+  assert.deepEqual(first.posted[1].data.project, { label: 'frontend', manifestPath: 'package.json' });
+  assert.equal(first.posted[1].data.canChangeProject, true);
+
+  const otherManifest = JSON.stringify({
+    name: 'api',
+    version: '1.0.0',
+    devDependencies: { 'clean-pkg': '^1.0.0' },
+  });
+  const otherLockfile = JSON.stringify({
+    name: 'api',
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'api', version: '1.0.0', devDependencies: { 'clean-pkg': '^1.0.0' } },
+      'node_modules/clean-pkg': { version: '1.0.0', dev: true },
+    },
+  });
+  const otherProjectInfo = { label: 'api — packages/api', manifestPath: 'packages/api/package.json' };
+
+  controller.updateProjectSnapshot({
+    root: '/tmp/other-project',
+    manifestText: otherManifest,
+    lockfileText: otherLockfile,
+    registry: 'https://custom.registry.example/',
+    projectInfo: otherProjectInfo,
+    canChangeProject: true,
+  });
+
+  const sink = recordingSink();
+  await controller.handleRefresh(sink);
+
+  assert.equal(controller.root, '/tmp/other-project', 'root switched');
+  assert.deepEqual(sink.posted[1].data.project, otherProjectInfo, 'project info switched');
+  assert.equal(sink.posted[1].data.rows[0].dev, true, 'manifest/lockfile switched — dependency now reads as dev');
+
+  const classification = controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' });
+  assert.notEqual(classification.reason, 'not-declared', 'dependency classification derives from the new manifest');
+});
+
+test('a project switch while a scan is in flight is not overwritten by the superseded scan', async () => {
+  // Run 0 (the original project) is held back so it would otherwise finish
+  // last and overwrite the switch's newer scan. Uses the same abort-and-
+  // supersede mechanism as two racing refreshes — switching project is just
+  // another handleRefresh, preceded by updateProjectSnapshot.
+  const client = generationalClient({ versions: ['1.0.1', '1.0.2'], delayMs: { 0: 60 } });
+  const controller = makeController(client);
+  const sink = recordingSink();
+
+  const superseded = controller.handleRefresh(sink);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  controller.updateProjectSnapshot({
+    root: '/tmp/other-project',
+    manifestText: MANIFEST,
+    lockfileText: LOCKFILE,
+    registry: REGISTRY,
+    projectInfo: { label: 'other', manifestPath: 'package.json' },
+    canChangeProject: true,
+  });
+  const winner = controller.handleRefresh(sink);
+
+  await Promise.all([superseded, winner]);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const results = sink.posted.filter((m) => m.status !== 'loading');
+  assert.equal(results.length, 1, `expected exactly one result, got ${sink.statuses.join(', ')}`);
+  assert.equal(latestOf(results[0]), '1.0.2', 'the scan for the newly selected project is the one that lands');
+  assert.equal(controller.root, '/tmp/other-project', 'the selection itself was not reverted either');
 });
 
 test('updateProjectSnapshot changes declaredDependencies, reflected in upgrade classification', async () => {
@@ -396,6 +482,8 @@ test('updateProjectSnapshot changes declaredDependencies, reflected in upgrade c
     manifestText: reclassifiedManifest,
     lockfileText: reclassifiedLockfile,
     registry: REGISTRY,
+    projectInfo: PROJECT_INFO,
+    canChangeProject: false,
   });
   await controller.handleRefresh(recordingSink());
 

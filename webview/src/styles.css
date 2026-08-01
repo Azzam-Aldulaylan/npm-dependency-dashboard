@@ -23,10 +23,30 @@ body {
   padding: 1rem 0;
 }
 
+.dashboard__header-titles {
+  min-width: 0;
+}
+
+.dashboard__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
 .dashboard__title {
   margin: 0;
   font-size: 1.15rem;
   font-weight: 600;
+}
+
+.dashboard__project {
+  margin: 0.15rem 0 0;
+  overflow: hidden;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .notice {

@@ -83,6 +83,21 @@ test('refresh cannot start while an upgrade holds the lock, and can once it rele
   assert.equal(refreshWouldRun(), true, 'refresh is allowed again once the upgrade releases the lock');
 });
 
+test('S6: a project change cannot start while an upgrade holds the lock, and can once it releases', () => {
+  const lock = new UpgradeLock();
+  // Mirrors DashboardPanel.handle's change-project guard, the identical
+  // check as refresh — one upgrade lock gates both actions.
+  const changeProjectWouldRun = () => !lock.isHeld();
+
+  assert.equal(changeProjectWouldRun(), true, 'no upgrade is active yet, so a project change is allowed');
+
+  lock.tryAcquire('left-pad');
+  assert.equal(changeProjectWouldRun(), false, 'an upgrade is active — the project change must not start');
+
+  lock.release('left-pad');
+  assert.equal(changeProjectWouldRun(), true, 'a project change is allowed again once the upgrade releases the lock');
+});
+
 // ----------------------------------------------------------- PendingUpgradeRuns
 
 test('settleAll calls every still-registered callback exactly once', () => {

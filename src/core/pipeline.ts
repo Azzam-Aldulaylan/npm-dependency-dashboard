@@ -143,7 +143,12 @@ export async function buildPackageRows(
   for (const node of roots) {
     if (node.unresolvable !== undefined) continue;
     const own = attributed.get(node.name)?.some((a) => a.path.length === 1) ?? false;
-    if (!own || fixes.has(node.name)) continue;
+    const fix = fixes.get(node.name);
+    // An object names an explicit version and `false` says no fix exists, so
+    // neither needs a version-list lookup. Boolean `true` names no version;
+    // verify a clean candidate ourselves just as we do when audit is absent.
+    const needsSelfComputedFix = fix === undefined || fix === true;
+    if (!own || !needsSelfComputedFix) continue;
     // Checked per iteration, not just once before the loop: this can run over
     // several packages, and a signal firing partway through should stop it
     // before the remaining ones are fetched too.

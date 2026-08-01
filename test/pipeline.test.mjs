@@ -110,6 +110,22 @@ const AUDIT_MINIMATCH = JSON.stringify({
   },
 });
 
+const AUDIT_MINIMATCH_BOOLEAN_FIX = JSON.stringify({
+  auditReportVersion: 2,
+  vulnerabilities: {
+    minimatch: {
+      name: 'minimatch',
+      severity: 'high',
+      isDirect: true,
+      via: [],
+      effects: [],
+      range: '<=3.1.3',
+      nodes: ['node_modules/minimatch'],
+      fixAvailable: true,
+    },
+  },
+});
+
 function baseOptions(client, extra = {}) {
   return {
     root: ROOT,
@@ -170,6 +186,20 @@ test('a usable fixAvailable suppresses the packument escalation entirely', async
 
   assert.equal(rowFor(result, 'minimatch').upgradeTo, '3.1.5');
   assert.deepEqual(client.urls, [`${REGISTRY}/clean-pkg/latest`, `${REGISTRY}/minimatch/latest`]);
+});
+
+test('fixAvailable: true fetches the packument and offers only a verified clean version', async () => {
+  const client = fakeClient(
+    { ...LATEST_ROUTES, [`${REGISTRY}/minimatch`]: MINIMATCH_PACKUMENT },
+    BULK_RESPONSE
+  );
+
+  const result = await buildPackageRows(
+    baseOptions(client, { auditRunner: fakeAuditRunner(AUDIT_MINIMATCH_BOOLEAN_FIX) })
+  );
+
+  assert.ok(client.urls.includes(`${REGISTRY}/minimatch`), 'the version list is fetched for verification');
+  assert.equal(rowFor(result, 'minimatch').upgradeTo, '3.1.5');
 });
 
 // ------------------------------------------------- graceful degradation

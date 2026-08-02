@@ -92,6 +92,7 @@ export function isPackageRow(value: unknown): value is PackageRow {
     isStringOrNull(value['wanted']) &&
     isStringOrNull(value['latest']) &&
     typeof value['dev'] === 'boolean' &&
+    typeof value['range'] === 'string' &&
     isStringOrNull(value['upgradeTo']) &&
     (worstSeverity === null ||
       (typeof worstSeverity === 'string' && SEVERITIES.has(worstSeverity))) &&

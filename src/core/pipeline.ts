@@ -176,6 +176,7 @@ export async function buildPackageRows(
       wanted: info?.wanted ?? null,
       latest: info?.latest ?? null,
       dev: node.dev,
+      range: node.range,
       advisories,
       worstSeverity: worstSeverity(advisories),
       upgradeTo: resolveUpgradeTarget({

@@ -25,7 +25,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node 20 reached EOL; 22 is also what @vscode/vsce's own resolved
+          # dependency tree (path-scurry, lru-cache, etc.) declares support
+          # for going forward — see their package.json "engines" fields.
+          node-version: 22
           cache: npm
 
       # `npm ci` installs exactly the committed lockfile and fails if
@@ -41,3 +44,12 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # Packaging smoke check: vsce package fails on a missing required
+      # manifest field, a broken .vscodeignore, or a build vscode:prepublish
+      # can't reproduce. @vscode/vsce is a pinned devDependency (no global
+      # tool, no publish credentials needed for `package`), so this is fully
+      # deterministic and runs offline. The resulting .vsix is not uploaded
+      # or committed — it's discarded with the runner.
+      - name: Package (smoke check)
+        run: npm run package

@@ -6,6 +6,7 @@ src/**
 webview/src/**
 test/**
 docs/**
+scripts/**
 node_modules/**
 out/**
 **/*.ts

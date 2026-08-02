@@ -93,6 +93,22 @@ test('fixAvailable object names the specific target version, possibly a major bu
   assert.equal(target, '2.0.0');
 });
 
+test('no real installed version: a fixAvailable object is refused outright, never treated as "anything is ahead"', () => {
+  // installed: null means there is no real installed version to compare
+  // against at all (a workspace link, an unresolvable specifier, or no
+  // lockfile) — this must never be offered as an upgrade target regardless
+  // of what fixAvailable names, even though nothing here can prove the
+  // target ISN'T ahead of some hypothetical installed version either.
+  const target = resolveUpgradeTarget({
+    installed: null,
+    range: '^1.0.0',
+    availableVersions: ['1.0.0', '1.2.0', '2.0.0'],
+    advisories: [attributed('critical', ['pkg', 'nested'])],
+    fixAvailable: { name: 'pkg', version: '2.0.0', isSemVerMajor: true },
+  });
+  assert.equal(target, null);
+});
+
 test('the downgrade trap: a fixAvailable version not ahead of installed is refused', () => {
   const target = resolveUpgradeTarget({
     installed: '2.0.0',

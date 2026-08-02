@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 
 import { buildPackageRows } from '../out/core/pipeline.js';
 import { MemoryEtagStore } from '../out/core/registry/versions.js';
+import { currentVersionDisplay } from '../out/host/versionDisplay.js';
 
 const REGISTRY = 'https://registry.npmjs.org';
 const BULK = 'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk';
@@ -365,10 +366,19 @@ test('a workspace-linked dependency is tagged and never looked up', async () => 
   const linked = rowFor(result, '@app/shared');
   assert.ok(linked !== undefined, 'the linked package still gets a row');
   assert.equal(linked.unresolvable, 'workspace-link');
+  // No real installed version — current stays null (never the range itself;
+  // that would break upgrade-eligibility's `current === null` safety check).
+  // The declared range is still carried on the row for display purposes.
   assert.equal(linked.current, null);
+  assert.equal(linked.range, '^1.0.0', 'the declared range is preserved for the Current column fallback');
+  assert.deepEqual(
+    currentVersionDisplay(linked.current, linked.range, linked.unresolvable),
+    { kind: 'declared-range', value: '^1.0.0', tag: 'workspace-link' },
+    'the UI falls back to the declared spec/range, tagged workspace-link, instead of a bare dash'
+  );
   assert.equal(linked.wanted, null);
   assert.equal(linked.latest, null);
-  assert.equal(linked.upgradeTo, null);
+  assert.equal(linked.upgradeTo, null, 'never offered without a real installed version');
 
   assert.equal(
     client.urls.some((u) => u.includes('%2fshared') || u.includes('@app')),
@@ -395,13 +405,88 @@ test('with no lockfile every declared dependency still gets a tagged row, in ord
     ['alpha', 'bravo', 'charlie'],
     'declaration order is preserved'
   );
+  const expectedRanges = { alpha: '^1.0.0', bravo: '^2.0.0', charlie: '^3.0.0' };
   for (const row of result.rows) {
     assert.equal(row.unresolvable, 'no-lockfile');
+    // No lockfile means no real installed version — current stays null, the
+    // registry is never asked, and no upgrade is ever offered; the declared
+    // range is still carried on the row so Current can show it instead of a
+    // bare dash.
     assert.equal(row.current, null);
+    assert.equal(row.range, expectedRanges[row.name]);
+    assert.deepEqual(currentVersionDisplay(row.current, row.range, row.unresolvable), {
+      kind: 'declared-range',
+      value: expectedRanges[row.name],
+      tag: 'no-lockfile',
+    });
     assert.equal(row.wanted, null);
+    assert.equal(row.upgradeTo, null, 'never offered without a real installed version');
   }
   assert.equal(client.calls.length, 0, 'nothing resolvable, so nothing is fetched');
   assert.equal(client.posts.length, 0, 'an empty bulk body is not sent at all');
+});
+
+test('a declared dependency missing from an otherwise-present lockfile is untagged in the graph but still shown with an "unresolved" tag, and its Wanted/Latest lookup is preserved', async () => {
+  // Not the "no lockfile at all" case above, and not a workspace-link/file:/
+  // git:/alias/tarball specifier either — a lockfile genuinely exists, this
+  // one dependency is just absent from it (declared in package.json but
+  // `npm install` hasn't run since, or the lockfile has drifted). The graph
+  // correctly leaves `unresolvable` undefined for it (it's a normal,
+  // resolvable semver range) — the regression this test guards is the
+  // DISPLAY layer wrongly treating "no tag" as "this must be a real
+  // resolved version" just because `unresolvable` happens to be undefined.
+  const manifestText = JSON.stringify({
+    name: 'app',
+    dependencies: { 'clean-pkg': '^1.0.0', 'never-installed': '^2.0.0' },
+  });
+  const lockfileText = JSON.stringify({
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'app', dependencies: { 'clean-pkg': '^1.0.0', 'never-installed': '^2.0.0' } },
+      'node_modules/clean-pkg': { version: '1.0.0' },
+      // 'never-installed' has no entry at all.
+    },
+  });
+  const client = fakeClient(
+    { ...LATEST_ROUTES, [`${REGISTRY}/never-installed/latest`]: json({ version: '2.5.0', license: 'MIT' }) },
+    json({})
+  );
+
+  const result = await buildPackageRows(baseOptions(client, { manifestText, lockfileText }));
+
+  const missing = rowFor(result, 'never-installed');
+  assert.ok(missing !== undefined, 'still gets a row');
+  assert.equal(
+    missing.unresolvable,
+    undefined,
+    'not classified as unresolvable — a normal, resolvable specifier, just absent from the lockfile'
+  );
+  assert.equal(missing.current, null, 'no real installed version');
+  assert.equal(missing.range, '^2.0.0');
+
+  // Preserved: Wanted/Latest lookup is NOT skipped, unlike a genuinely
+  // unresolvable node (workspace link, file:/git:, or no lockfile at all).
+  assert.equal(missing.wanted, '2.5.0');
+  assert.equal(missing.latest, '2.5.0');
+  assert.equal(
+    client.urls.includes(`${REGISTRY}/never-installed/latest`),
+    true,
+    'the registry IS asked for this package'
+  );
+
+  assert.equal(missing.upgradeTo, null, 'never offered without a real installed version');
+
+  // The actual regression: without a display-layer fix, this would render
+  // as a bare, untagged "^2.0.0" — indistinguishable from a real
+  // lockfile-resolved version.
+  assert.deepEqual(currentVersionDisplay(missing.current, missing.range, missing.unresolvable), {
+    kind: 'declared-range',
+    value: '^2.0.0',
+    tag: 'unresolved',
+  });
+
+  // The rest of the table is unaffected.
+  assert.equal(rowFor(result, 'clean-pkg').current, '1.0.0');
 });
 
 // ------------------------------------------------------------- plumbing

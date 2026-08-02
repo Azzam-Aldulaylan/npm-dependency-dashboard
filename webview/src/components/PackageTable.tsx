@@ -1,19 +1,21 @@
 import { useState } from 'react';
 import type { ReactElement } from 'react';
 
-import type { PackageRow, UnresolvableReason } from '../../../src/core/types.js';
+import type { PackageRow } from '../../../src/core/types.js';
 import { upgradeActionDisplay } from '../../../src/host/upgradeAction.js';
-import { versionDisplay } from '../../../src/host/versionDisplay.js';
+import type { CurrentVersionTag } from '../../../src/host/versionDisplay.js';
+import { currentVersionDisplay, versionDisplay } from '../../../src/host/versionDisplay.js';
 import { AdvisoryDetails } from './AdvisoryDetails.js';
 import { SeverityBadge } from './SeverityBadge.js';
 
-const UNRESOLVABLE_LABELS: Record<UnresolvableReason, string> = {
+const TAG_LABELS: Record<CurrentVersionTag, string> = {
   'workspace-link': 'workspace',
   file: 'file:',
   git: 'git',
   alias: 'alias',
   tarball: 'tarball',
   'no-lockfile': 'unresolved',
+  unresolved: 'unresolved',
 };
 
 /**
@@ -55,10 +57,12 @@ function AvailableVersion({ row }: { row: PackageRow }): ReactElement {
 }
 
 function CurrentVersion({ row }: { row: PackageRow }): ReactElement {
-  if (row.unresolvable === undefined) return <>{row.current ?? '—'}</>;
+  const display = currentVersionDisplay(row.current, row.range, row.unresolvable);
+  const text = display.kind === 'dash' ? '—' : display.value;
+  if (display.tag === null) return <>{text}</>;
   return (
     <>
-      {row.current ?? '—'} <span className="tag">{UNRESOLVABLE_LABELS[row.unresolvable]}</span>
+      {text} <span className="tag">{TAG_LABELS[display.tag]}</span>
     </>
   );
 }

@@ -70,3 +70,11 @@ test('an upgrade target equal to installed is refused', () => {
 test('a genuine upgrade target is allowed', () => {
   assert.equal(isSafeUpgradeTarget('5.1.0', '5.0.1'), true);
 });
+
+test('no installed version at all is refused, not treated as vacuously ahead', () => {
+  // installed === null means there is no real installed version to compare
+  // against (a workspace link, an unresolvable specifier, no lockfile) —
+  // "strictly ahead" is unprovable, not automatically true.
+  assert.equal(isSafeUpgradeTarget('5.1.0', null), false);
+  assert.equal(isSafeUpgradeTarget('0.0.1', null), false);
+});

@@ -80,10 +80,18 @@ export type FixAvailable = true | false | { name: string; version: string; isSem
 
 export interface PackageRow {
   name: string;
+  /**
+   * The real, lockfile-resolved installed version, or null when there is
+   * none — never a range/spec string. Callers (upgrade eligibility in
+   * particular) rely on `null` meaning "no real installed version exists";
+   * see `range` below for what the UI shows instead in that case.
+   */
   current: string | null;
   wanted: string | null;
   latest: string | null;
   dev: boolean;
+  /** The declared package.json spec/range, e.g. "^18.2.0" or "file:../x". Display-only fallback for Current when `current` is null — never a substitute for a real installed version. */
+  range: string;
   deprecated?: string;
   unresolvable?: UnresolvableReason;
   advisories: AttributedAdvisory[];

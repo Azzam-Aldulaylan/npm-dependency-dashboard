@@ -111,13 +111,19 @@ export function buildVersionInfo(
  * Guard against the downgrade trap: an advisory fix can name a version LOWER
  * than what's installed, which would silently downgrade the user. Never offer
  * an upgrade that isn't strictly ahead.
+ *
+ * `installed === null` means there is no real installed version to compare
+ * against at all (a workspace link, an unresolvable specifier, or no
+ * lockfile) — "strictly ahead" is unprovable, not vacuously true, so this
+ * refuses rather than allows. validateUpgradeRequest's own `row.current ===
+ * null` check relies on this never returning true in that case.
  */
 export function isSafeUpgradeTarget(
   target: string | null,
   installed: string | null
 ): boolean {
   if (target === null || semver.valid(target) === null) return false;
-  if (installed === null) return true;
+  if (installed === null) return false;
   if (semver.valid(installed) === null) return false;
   return semver.gt(target, installed);
 }

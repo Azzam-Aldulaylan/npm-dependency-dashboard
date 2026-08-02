@@ -3,16 +3,40 @@
   "displayName": "Dependency Dashboard",
   "description": "See installed packages, available updates, and vulnerabilities in one panel.",
   "version": "0.0.1",
+  "private": true,
+  "preview": true,
   "license": "MIT",
   "publisher": "CHANGEME",
+  "author": "Azzam Aldulaylan",
+  "homepage": "https://github.com/Azzam-Aldulaylan/npm-dependency-dashboard#readme",
+  "bugs": {
+    "url": "https://github.com/Azzam-Aldulaylan/npm-dependency-dashboard/issues"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/Azzam-Aldulaylan/npm-dependency-dashboard.git"
   },
+  "keywords": [
+    "npm",
+    "dependencies",
+    "outdated",
+    "vulnerabilities",
+    "security",
+    "audit",
+    "dependency dashboard",
+    "package management",
+    "monorepo"
+  ],
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
   "main": "./dist/extension.js",
   "activationEvents": [
     "workspaceContains:**/package.json",
@@ -66,7 +90,9 @@
     "test": "node --test",
     "pretest:live": "npm run build:core",
     "test:live": "node --test scripts/live-checks/advisories-bulk-live.mjs",
-    "package": "vsce package"
+    "vscode:prepublish": "node esbuild.mjs --production",
+    "package": "vsce package",
+    "marketplace:publish": "vsce publish"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
@@ -74,6 +100,7 @@
     "@types/react-dom": "^19.2.4",
     "@types/semver": "^7.5.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "3.9.2",
     "esbuild": "^0.28.0",
     "typescript": "^5.4.0"
   },

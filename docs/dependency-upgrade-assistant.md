@@ -19,6 +19,7 @@ This document records the implemented upgrade-assistant architecture and the bou
 
 - `src/core` owns pure graph, metadata, compatibility, planning, and command-construction decisions. It never imports VS Code or starts preflight processes.
 - `src/host` owns project discovery, trust checks, filesystem access, process/task execution, transaction orchestration, and user decisions.
+- `UpgradeAssistantCoordinator` owns the host upgrade lifecycle from validated request through final reload. `DashboardPanel` only routes webview events and retains panel, watcher, cache, and reload ownership through narrow callbacks.
 - The webview remains presentation-only and still sends only the requested package and exact displayed target. It never supplies plan steps, commands, scripts, paths, arguments, or rollback targets.
 - Peer edges never participate in advisory subtree traversal; only runtime and optional edges do.
 - Resolver verification is supporting evidence, not a claim that an upgrade is universally safe. `unknown` remains distinct from compatible.

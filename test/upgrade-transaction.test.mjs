@@ -187,6 +187,36 @@ test('failed verification rolls back exact pre-existing bytes and removes a tran
   assert.equal(files.casCalls.length, 2);
 });
 
+test('rollback restores allowlisted dependency files but never restores node_modules state', async () => {
+  const nodeModulesMarker = '/workspace/node_modules/.dependency-dashboard-state';
+  const files = new MemoryFiles({
+    [manifestPath]: present('manifest-before'),
+    [lockfilePath]: present('lock-before'),
+    [nodeModulesMarker]: present('installed-before'),
+  });
+
+  const result = await runUpgradeTransaction({
+    allowlistedPaths: [manifestPath, lockfilePath],
+    files,
+    install: successfulInstall(() => {
+      files.set(manifestPath, present('manifest-after'));
+      files.set(lockfilePath, present('lock-after'));
+      files.set(nodeModulesMarker, present('installed-after'));
+    }),
+    verifier: failedVerification(),
+  });
+
+  assert.equal(result.completion, 'rolled-back');
+  assert.equal(files.text(manifestPath), 'manifest-before');
+  assert.equal(files.text(lockfilePath), 'lock-before');
+  assert.equal(files.text(nodeModulesMarker), 'installed-after');
+  assert.equal(
+    files.casCalls.some(({ path }) => path === nodeModulesMarker),
+    false,
+    'node_modules is outside the transaction allowlist and must never be a rollback target'
+  );
+});
+
 test('a failed install is assumed potentially mutating and is rolled back', async () => {
   const files = new MemoryFiles({ [manifestPath]: present('before') });
   const install = {

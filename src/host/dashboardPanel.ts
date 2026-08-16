@@ -2,8 +2,9 @@
  * The webview panel: lifecycle, CSP, and the message boundary.
  *
  * One panel at a time, following the create-or-reveal pattern from VS Code's
- * own webview sample. All decision-making lives in DashboardController; this
- * file only owns the parts that need a real `vscode.WebviewPanel`.
+ * own webview sample. Scan decisions live in DashboardController and upgrade
+ * lifecycle decisions live in UpgradeAssistantCoordinator; this file owns
+ * the parts that need a real `vscode.WebviewPanel` plus watcher/reload wiring.
  *
  * SECURITY — the four rules enforced here:
  *   1. A fresh cryptographically-random nonce per HTML load, and no
@@ -30,8 +31,6 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { NodeAuditRunner } from '../core/audit/npmAudit.js';
-import { analyzeCompatibility, CompatibilityCancelledError } from '../core/compatibility/preflight.js';
-import { RegistryPackageMetadataProvider, registryForPackage } from '../core/compatibility/registryMetadataProvider.js';
 import { realTimerScheduler, BackgroundRefreshTimer } from '../core/cache/backgroundRefreshTimer.js';
 import type { FileChangeKind } from '../core/cache/fileChangeCoordinator.js';
 import { FileChangeCoordinator } from '../core/cache/fileChangeCoordinator.js';
@@ -39,14 +38,8 @@ import { DEFAULT_TTL_MINUTES, effectiveTtlMinutes } from '../core/cache/freshnes
 import { deriveProjectCacheKey } from '../core/cache/keys.js';
 import { PersistentEtagStore } from '../core/cache/persistentEtagStore.js';
 import { PersistentProjectCacheStore } from '../core/cache/projectCacheStore.js';
-import { describeRejection } from '../core/upgrade/validate.js';
-import { planSmartUpgrade } from '../core/upgrade/smartPlan.js';
-import { buildDependencyGraph } from '../core/lockfile/build.js';
-import { directNodes } from '../core/lockfile/parse.js';
-import { parseManifest } from '../core/manifest/parse.js';
 import { isSameProjectReload, lockfileWatchDirs, projectCandidateLabel } from '../core/workspace/scan.js';
 import { NodeHttpClient } from '../core/registry/http.js';
-import { fetchPackument } from '../core/registry/versions.js';
 import { DashboardController } from './dashboardController.js';
 import type { MessageSink } from './dashboardController.js';
 import type { ReloadSource } from './fileChangeReload.js';
@@ -54,13 +47,7 @@ import { reloadControllerFromDisk } from './fileChangeReload.js';
 import { pickProject } from './projectPicker.js';
 import type { DiscoveredProject, ResolvedProject } from './projectResolution.js';
 import { discoverProjects, loadProject } from './projectResolution.js';
-import { confirmUpgrade, UpgradeExecutionSession } from './upgradeRunner.js';
-import { createNodeNpmResolverDeps, resolveNpmInvocation } from './npmResolver.js';
-import { resolveInstalledPnpmInvocation } from './pnpmResolver.js';
-import { createNodeUpgradeTransactionFileAdapter } from './nodeUpgradeTransactionFiles.js';
-import { IsolatedResolverVerifier, probePackageManagerVersion } from './resolverVerifier.js';
-import { runUpgradeTransaction } from './upgradeTransaction.js';
-import { selectVerificationScripts } from './verificationPolicy.js';
+import { UpgradeAssistantCoordinator } from './upgradeAssistantCoordinator.js';
 import type { ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
 import type { WebviewToHostMessage } from './webviewProtocol.js';
 import { isWebviewToHostMessage } from './webviewProtocol.js';
@@ -110,20 +97,6 @@ function toProjectInfo(candidate: DiscoveredProject): SelectedProjectInfo {
   return { label: projectCandidateLabel(candidate), manifestPath: candidate.manifestPath };
 }
 
-function compatibilitySummary(analysis: Awaited<ReturnType<typeof analyzeCompatibility>>): string[] {
-  const important = analysis.findings.filter((finding) => finding.status !== 'compatible').slice(0, 4);
-  return [
-    `Result: ${analysis.status}${analysis.completeness === 'partial' ? ' (partial evidence)' : ''}.`,
-    ...important.map((finding) => `• ${finding.explanation}`),
-    ...(analysis.findings.length > important.length
-      ? [`• ${analysis.findings.length - important.length} additional finding(s).`]
-      : []),
-    ...(analysis.resolverVerification === undefined
-      ? []
-      : [`Resolver: ${analysis.resolverVerification.explanation}`]),
-  ];
-}
-
 export class DashboardPanel {
   private static current: DashboardPanel | undefined;
 
@@ -132,8 +105,8 @@ export class DashboardPanel {
   private controller: DashboardController | undefined;
   /** In-flight or completed project resolution, dropped on failure so a retry re-runs it. */
   private pending: Promise<DashboardController | undefined> | undefined;
-  /** One session per panel: tracks the panel-wide upgrade lock and task listeners. */
-  private readonly upgradeSession = new UpgradeExecutionSession();
+  /** Owns preflight, confirmation, transaction, verification, and completion. */
+  private readonly upgradeCoordinator: UpgradeAssistantCoordinator;
   /**
    * Shared across every controller this panel ever builds (initial open and
    * every reload) so ETag caching survives a reload — only the project
@@ -173,7 +146,7 @@ export class DashboardPanel {
   private invalidationTimer: NodeJS.Timeout | undefined;
   /** Owns coalescing, upgrade-busy deferral, and serialized generation-checked reloads for watcher events — see fileChangeCoordinator.ts. This panel only owns the actual watcher subscriptions and debounce timing. */
   private readonly fileChangeCoordinator = new FileChangeCoordinator({
-    isBusy: () => this.upgradeSession.isBusy(),
+    isBusy: () => this.upgradeCoordinator.isBusy(),
     currentGeneration: () => this.reloadGeneration,
     reload: (kinds, generation) => this.reloadAfterFileChange(kinds, generation),
   });
@@ -193,6 +166,16 @@ export class DashboardPanel {
     };
     this.etagStore = new PersistentEtagStore(context.globalState);
     this.projectCacheStore = new PersistentProjectCacheStore(context.workspaceState);
+    this.upgradeCoordinator = new UpgradeAssistantCoordinator({
+      sink: this.sink,
+      httpClient: this.httpClient,
+      etagStore: this.etagStore,
+      ensureController: () => this.ensureController(),
+      getSelectedProject: () => this.selectedProject,
+      isDisposed: () => this.disposed,
+      reloadFinalState: () => this.reloadAndScan(),
+      flushDeferredChanges: () => this.fileChangeCoordinator.flushDeferred(),
+    });
     this.backgroundTimer = new BackgroundRefreshTimer(realTimerScheduler, BACKGROUND_REFRESH_INTERVAL_MS, () => {
       this.onBackgroundTick();
     });
@@ -219,7 +202,7 @@ export class DashboardPanel {
         // A mutating task is deliberately allowed to reach a stable boundary
         // even after its panel closes. The transaction's async owner keeps the
         // session alive until install/verification/rollback completes.
-        if (!this.upgradeSession.isBusy()) this.upgradeSession.dispose();
+        this.upgradeCoordinator.disposeWhenIdle();
         this.disposeWatchers();
         this.fileChangeCoordinator.dispose();
         this.backgroundTimer.dispose();
@@ -258,14 +241,14 @@ export class DashboardPanel {
 
   private async handle(message: WebviewToHostMessage): Promise<void> {
     if (message.type === 'upgrade') {
-      await this.handleUpgrade(message);
+      await this.upgradeCoordinator.handleUpgrade(message);
       return;
     }
     if (message.type === 'change-project') {
       // Same rule as refresh below: a project switch mid-upgrade would race
       // a scan (and a controller replacement) against a package.json/
       // lockfile an upgrade task is still writing to.
-      if (this.upgradeSession.isBusy()) return;
+      if (this.upgradeCoordinator.isBusy()) return;
       await this.changeProject();
       return;
     }
@@ -276,7 +259,7 @@ export class DashboardPanel {
       // Palette's "Dependency Dashboard: Refresh", which bypasses the
       // webview entirely and would otherwise race a scan against a
       // package.json/lockfile an upgrade task is still writing to.
-      if (this.upgradeSession.isBusy()) return;
+      if (this.upgradeCoordinator.isBusy()) return;
       // Manual refresh always re-reads the *currently selected* project's
       // package.json/lockfile from disk — see reloadAndScan — so externally
       // changed dependencies show up, without silently reverting to
@@ -287,387 +270,6 @@ export class DashboardPanel {
     const controller = await this.ensureController();
     if (controller === undefined) return; // ensureController already posted the failure.
     await controller.handleReady(this.sink);
-  }
-
-  /**
-   * The full Upgrade flow: host-side eligibility check against the
-   * controller's last scan, modal confirmation, then UpgradeExecutionSession
-   * (which re-checks Workspace Trust immediately before running the task).
-   * Every early-exit path posts an `upgrade-error` so the webview can clear
-   * its optimistic "running" state for this package — the existing table is
-   * never touched by any of them.
-   */
-  private async handleUpgrade(message: { package: string; target: string }): Promise<void> {
-    const controller = await this.ensureController();
-    if (controller === undefined) return;
-
-    const eligibility = controller.validateUpgradeRequest({
-      package: message.package,
-      target: message.target,
-    });
-    if (!eligibility.ok) {
-      this.sink.postMessage({
-        status: 'upgrade-error',
-        package: message.package,
-        error: describeRejection(eligibility.reason),
-      });
-      return;
-    }
-
-    // One upgrade at a time for the whole panel/project, not one per
-    // package — reserved for the whole confirm-then-run flow, not just the
-    // run, so a flood of forged requests (same package or a different one)
-    // can't each reach (and stack) their own confirmation dialog, and two
-    // npm installs can never race to write the same package.json/lockfile.
-    if (!this.upgradeSession.reserve(eligibility.packageName)) {
-      this.sink.postMessage({
-        status: 'upgrade-error',
-        package: eligibility.packageName,
-        error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
-      });
-      return;
-    }
-
-    try {
-      const selected = this.selectedProject;
-      if (selected === undefined) return;
-      const source = controller.upgradeSource;
-      const preflightProject = await loadProject(selected);
-      if (
-        preflightProject.root !== controller.root ||
-        preflightProject.manifestText !== source.manifestText ||
-        preflightProject.lockfileText !== source.lockfileText ||
-        preflightProject.lockfilePath !== source.lockfilePath ||
-        preflightProject.registry !== source.registry ||
-        preflightProject.packageManager !== source.packageManager ||
-        preflightProject.importerId !== source.importerId
-      ) {
-        this.sink.postMessage({
-          status: 'upgrade-error',
-          package: eligibility.packageName,
-          error: { code: 'STALE_SOURCE', message: 'Project dependency files changed. Refresh and try again.' },
-        });
-        return;
-      }
-
-      let proposal = {
-        requested: {
-          packageName: eligibility.packageName,
-          currentVersion: eligibility.currentVersion,
-          targetVersion: eligibility.target,
-          classification: eligibility.classification,
-        },
-        changes: [
-          {
-            packageName: eligibility.packageName,
-            currentVersion: eligibility.currentVersion,
-            targetVersion: eligibility.target,
-            classification: eligibility.classification,
-          },
-        ],
-      };
-      const manifest = parseManifest(preflightProject.manifestText);
-      const graph = buildDependencyGraph({
-        root: preflightProject.root,
-        manifest,
-        lockfileText: preflightProject.lockfileText,
-        packageManager: preflightProject.packageManager,
-        importerId: preflightProject.importerId,
-      });
-      const npmResolution = resolveNpmInvocation(createNodeNpmResolverDeps(controller.root));
-      const packageManagerInvocation =
-        !npmResolution.ok
-          ? null
-          : preflightProject.packageManager === 'npm'
-            ? {
-                executable: npmResolution.invocation.node,
-                prefixArgs: [npmResolution.invocation.npmCliJs],
-              }
-            : resolveInstalledPnpmInvocation(npmResolution.invocation, controller.root);
-      const resolverVerifier = packageManagerInvocation !== null
-        ? new IsolatedResolverVerifier({
-            packageManager: preflightProject.packageManager,
-            packageManagerVersion: probePackageManagerVersion(packageManagerInvocation, controller.root),
-            invocation: packageManagerInvocation,
-            manifestText: preflightProject.manifestText,
-            ...(preflightProject.lockfileText === null || preflightProject.lockfileName === null
-              ? {}
-              : {
-                  lockfile: {
-                    name: preflightProject.lockfileName,
-                    text: preflightProject.lockfileText,
-                  },
-                }),
-            registry: preflightProject.registry,
-            policy: preflightProject.peerPolicy,
-          })
-        : undefined;
-      const metadataProvider = new RegistryPackageMetadataProvider(
-        this.httpClient,
-        this.etagStore,
-        preflightProject.resolvedRegistry
-      );
-      let analysis = await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: `Checking compatibility for ${eligibility.packageName}@${eligibility.target}`,
-          cancellable: true,
-        },
-        async (_progress, token) => {
-          const abort = new AbortController();
-          const cancellation = token.onCancellationRequested(() => abort.abort());
-          try {
-            return await analyzeCompatibility({
-              graph,
-              proposal,
-              metadataProvider,
-              policy: preflightProject.peerPolicy,
-              ...(resolverVerifier === undefined ? {} : { resolverVerifier }),
-              signal: abort.signal,
-            });
-          } finally {
-            cancellation.dispose();
-          }
-        }
-      );
-      if (analysis.status === 'conflict') {
-        const declaredByName = new Map(manifest.dependencies.map((dependency) => [dependency.name, dependency]));
-        const upgradeableDirectDependencies = directNodes(graph).flatMap((node) => {
-          const declared = declaredByName.get(node.name);
-          if (declared === undefined || node.version === null) return [];
-          return [{
-            packageName: node.name,
-            currentVersion: node.version,
-            classification: declared.optional ? ('optional' as const) : declared.dev ? ('dev' as const) : ('prod' as const),
-          }];
-        });
-        const planned = await planSmartUpgrade({
-          graph,
-          initialAnalysis: analysis,
-          upgradeableDirectDependencies,
-          candidateProvider: {
-            getStableVersionCandidates: async (packageName, signal) => {
-              const packument = await fetchPackument(
-                this.httpClient,
-                this.etagStore,
-                registryForPackage(preflightProject.resolvedRegistry, packageName),
-                packageName,
-                signal
-              );
-              return { versions: packument.versions, complete: true };
-            },
-          },
-          metadataProvider,
-          policy: preflightProject.peerPolicy,
-          ...(resolverVerifier === undefined ? {} : { resolverVerifier }),
-        });
-        const atomicPlan =
-          planned.outcome === 'found' &&
-          planned.plan.proposal.changes.every(
-            (change) => change.classification === planned.plan.proposal.changes[0]?.classification
-          )
-            ? planned.plan
-            : null;
-        if (atomicPlan === null) {
-          const summary = compatibilitySummary(analysis).join('\n');
-          void vscode.window.showErrorMessage(
-            `Upgrade blocked by dependency compatibility conflicts. Smart-plan result: ${planned.outcome}.\n${summary}`,
-            { modal: true }
-          );
-          this.sink.postMessage({
-            status: 'upgrade-error',
-            package: eligibility.packageName,
-            error: { code: 'PREFLIGHT_CONFLICT', message: 'Compatibility preflight found blocking peer conflicts.' },
-          });
-          return;
-        }
-        const coordinated = atomicPlan.proposal.changes
-          .map((change) => `${change.packageName} → ${change.targetVersion}`)
-          .join('\n');
-        const choice = await vscode.window.showWarningMessage(
-          'This upgrade requires coordinated dependency changes.',
-          { modal: true, detail: coordinated },
-          'Use Coordinated Plan'
-        );
-        if (choice !== 'Use Coordinated Plan') {
-          this.sink.postMessage({
-            status: 'upgrade-error',
-            package: eligibility.packageName,
-            error: { code: 'CANCELLED', message: 'Coordinated upgrade cancelled.' },
-          });
-          return;
-        }
-        proposal = atomicPlan.proposal;
-        analysis = atomicPlan.compatibility;
-      }
-
-      const ignoreScripts = vscode.workspace
-        .getConfiguration('dependencyDashboard')
-        .get<boolean>('upgrade.ignoreScripts', true);
-      const configuredVerification = vscode.workspace
-        .getConfiguration('dependencyDashboard')
-        .get<unknown[]>('upgrade.verificationScripts', []);
-      const verificationScripts = selectVerificationScripts(
-        controller.upgradeSource.manifestText,
-        configuredVerification
-      );
-
-      const runParams = {
-        packageName: eligibility.packageName,
-        currentVersion: eligibility.currentVersion,
-        target: eligibility.target,
-        classification: eligibility.classification,
-        cwd: controller.root,
-        ignoreScripts,
-        packageManager: source.packageManager,
-        verificationScriptNames: verificationScripts.map((script) => script.scriptName),
-        compatibilitySummary: compatibilitySummary(analysis),
-        coordinatedChanges: proposal.changes.map((change) => ({
-          packageName: change.packageName,
-          target: change.targetVersion,
-          classification: change.classification,
-        })),
-      };
-
-      const confirmed = await confirmUpgrade(runParams);
-      if (this.disposed) return; // the confirmation dialog can outlive the panel
-      if (!confirmed) {
-        this.sink.postMessage({
-          status: 'upgrade-error',
-          package: eligibility.packageName,
-          error: { code: 'CANCELLED', message: 'Upgrade cancelled.' },
-        });
-        return;
-      }
-
-      // Confirmation can remain open while files change. Re-read the selected
-      // project and repeat the host-owned eligibility check immediately before
-      // snapshot/execution; the pre-modal result is never sufficient authority.
-      const disk = await loadProject(selected);
-      const sourceStillMatches =
-        disk.root === controller.root &&
-        disk.manifestText === source.manifestText &&
-        disk.lockfileText === source.lockfileText &&
-        disk.lockfilePath === source.lockfilePath &&
-        disk.registry === source.registry &&
-        disk.packageManager === preflightProject.packageManager &&
-        disk.importerId === preflightProject.importerId &&
-        JSON.stringify(disk.peerPolicy) === JSON.stringify(preflightProject.peerPolicy) &&
-        JSON.stringify(disk.resolvedRegistry) === JSON.stringify(preflightProject.resolvedRegistry);
-      const rechecked = controller.validateUpgradeRequest(message);
-      if (!sourceStillMatches || !rechecked.ok) {
-        this.sink.postMessage({
-          status: 'upgrade-error',
-          package: eligibility.packageName,
-          error: {
-            code: 'STALE_SOURCE',
-            message: 'Project dependency files changed while confirmation was open. Refresh and try again.',
-          },
-        });
-        return;
-      }
-
-      const manifestPath = path.join(controller.root, 'package.json');
-      const expectedLockfilePath =
-        source.lockfilePath ??
-        path.join(controller.root, source.packageManager === 'pnpm' ? 'pnpm-lock.yaml' : 'package-lock.json');
-      const allowlistedPaths = [manifestPath, expectedLockfilePath];
-      const files = await createNodeUpgradeTransactionFileAdapter({
-        workspaceRoot: selected.folder.uri.fsPath,
-        allowlistedPaths,
-      });
-
-      const transaction = await runUpgradeTransaction({
-        allowlistedPaths,
-        files,
-        install: {
-          execute: async () => {
-            const outcome = await this.upgradeSession.run(runParams);
-            return outcome.ok
-              ? { status: 'succeeded' as const }
-              : { status: 'failed' as const, code: outcome.code, message: outcome.message };
-          },
-        },
-        ...(verificationScripts.length === 0
-          ? {}
-          : {
-              verifier: {
-                verify: () =>
-                  this.upgradeSession.verify({
-                    packageName: eligibility.packageName,
-                    cwd: controller.root,
-                    packageManager: source.packageManager,
-                    scripts: verificationScripts,
-                  }),
-              },
-              verificationFailureDecider: {
-                decide: async () => {
-                  if (this.disposed) return 'rollback' as const;
-                  const choice = await vscode.window.showWarningMessage(
-                    'The dependency installed, but post-upgrade verification failed.',
-                    {
-                      modal: true,
-                      detail: 'Rollback restores only package.json and the active lockfile captured by this upgrade transaction.',
-                    },
-                    'Rollback',
-                    'Keep Changes'
-                  );
-                  return choice === 'Keep Changes' ? ('keep' as const) : ('rollback' as const);
-                },
-              },
-            }),
-      });
-
-      // Always reload the final kept/restored/partial state while this
-      // transaction still owns the project-wide mutation lock.
-      if (!this.disposed) await this.reloadAndScan();
-      if (this.disposed) return;
-
-      if (transaction.completion === 'kept' && transaction.reason === 'verified') {
-        void vscode.window.showInformationMessage(`Upgraded ${eligibility.packageName}; verification passed.`);
-      } else if (transaction.completion === 'kept') {
-        void vscode.window.showWarningMessage(
-          `Upgraded ${eligibility.packageName}, but the application upgrade is not verified.`
-        );
-      } else if (transaction.completion === 'rolled-back') {
-        void vscode.window.showWarningMessage(`Upgrade of ${eligibility.packageName} was rolled back.`);
-      } else {
-        const rollbackStatus = transaction.rollback.status;
-        this.sink.postMessage({
-          status: 'upgrade-error',
-          package: eligibility.packageName,
-          error: {
-            code: rollbackStatus === 'conflict' ? 'ROLLBACK_CONFLICT' : 'UPGRADE_TRANSACTION_FAILED',
-            message:
-              rollbackStatus === 'conflict'
-                ? 'Rollback stopped because dependency files changed concurrently; those newer edits were preserved.'
-                : 'The upgrade transaction did not reach a verified or fully restored state. Review package.json and the lockfile.',
-          },
-        });
-      }
-    } catch (cause) {
-      if (!this.disposed) {
-        this.sink.postMessage({
-          status: 'upgrade-error',
-          package: eligibility.packageName,
-          error:
-            cause instanceof CompatibilityCancelledError
-              ? { code: 'CANCELLED', message: 'Compatibility preflight was cancelled.' }
-              : toProtocolError(cause),
-        });
-      }
-    } finally {
-      this.upgradeSession.release(eligibility.packageName);
-      // A watcher event that fired *while* the lock was held was deferred,
-      // not dropped (see FileChangeCoordinator) — process it now that the
-      // upgrade is done, success or failure alike, since a failed task can
-      // still have partially rewritten package.json/the lockfile before it
-      // failed. On success this is already a no-op: `reloadAndScan` above
-      // discards anything pending/deferred at its very start, since its own
-      // full reload already supersedes it.
-      await this.fileChangeCoordinator.flushDeferred();
-      if (this.disposed) this.upgradeSession.dispose();
-    }
   }
 
   /**
@@ -709,7 +311,7 @@ export class DashboardPanel {
       // (it isn't itself lock-holding) — re-check right before applying,
       // the same "closest to the effect" placement the multi-candidate
       // branch below already uses for its own picker.
-      if (this.upgradeSession.isBusy()) return;
+      if (this.upgradeCoordinator.isBusy()) return;
       await this.reloadAndScan(candidates[0]);
       return;
     }
@@ -721,7 +323,7 @@ export class DashboardPanel {
     // itself lock-holding); re-check right before applying the pick, the
     // same "closest to the effect" placement the upgrade flow's own
     // Workspace Trust re-check uses.
-    if (this.upgradeSession.isBusy()) return;
+    if (this.upgradeCoordinator.isBusy()) return;
 
     await this.reloadAndScan(picked);
   }
@@ -995,7 +597,7 @@ export class DashboardPanel {
   };
 
   private onBackgroundTick(): void {
-    if (this.disposed || this.controller === undefined || this.upgradeSession.isBusy()) return;
+    if (this.disposed || this.controller === undefined || this.upgradeCoordinator.isBusy()) return;
     if (!this.controller.needsBackgroundRefresh()) return;
     void this.controller.refreshInBackground(this.sink);
   }

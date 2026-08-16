@@ -12,6 +12,7 @@
 
 export const SHRINKWRAP = 'npm-shrinkwrap.json';
 export const PACKAGE_LOCK = 'package-lock.json';
+export const PNPM_LOCK = 'pnpm-lock.yaml';
 
 /**
  * Directories never worth scanning. `node_modules` is the important one — a
@@ -90,15 +91,25 @@ export function toProjectCandidates(
 }
 
 /**
- * Pick the lockfile for a directory.
- *
- * npm-shrinkwrap.json wins when both are present — that is npm's own
- * precedence, and a project that ships a shrinkwrap is explicitly overriding
- * the lockfile.
+ * Pick the lockfile for a directory. npm-shrinkwrap.json wins over
+ * package-lock.json; when npm and pnpm files coexist, a recognized
+ * package.json `packageManager` preference wins, with npm as the
+ * backward-compatible default.
  */
-export function chooseLockfile(filenames: readonly string[]): string | null {
+export function chooseLockfile(
+  filenames: readonly string[],
+  preferredPackageManager: 'npm' | 'pnpm' = 'npm'
+): string | null {
+  if (preferredPackageManager === 'pnpm' && filenames.includes(PNPM_LOCK)) return PNPM_LOCK;
   if (filenames.includes(SHRINKWRAP)) return SHRINKWRAP;
   if (filenames.includes(PACKAGE_LOCK)) return PACKAGE_LOCK;
+  if (filenames.includes(PNPM_LOCK)) return PNPM_LOCK;
+  return null;
+}
+
+export function packageManagerForLockfile(filename: string): 'npm' | 'pnpm' | null {
+  if (filename === PNPM_LOCK) return 'pnpm';
+  if (filename === PACKAGE_LOCK || filename === SHRINKWRAP) return 'npm';
   return null;
 }
 
@@ -117,8 +128,8 @@ export function chooseLockfile(filenames: readonly string[]): string | null {
  * a watcher must use each directory as a literal URI/path base (as
  * `vscode.RelativePattern`'s first argument already is, never as part of its
  * glob `pattern` argument) and combine it only with `PACKAGE_LOCK`/
- * `SHRINKWRAP` — both fixed, developer-controlled constants — for the actual
- * glob, e.g. `{package-lock.json,npm-shrinkwrap.json}`.
+ * `SHRINKWRAP`/`PNPM_LOCK` — fixed, developer-controlled constants — for the
+ * actual glob.
  */
 export function lockfileWatchDirs(dir: string): string[] {
   const dirs: string[] = [];
@@ -135,7 +146,7 @@ export function lockfileWatchDirs(dir: string): string[] {
 /**
  * Every workspace-folder-relative path a lockfile topology change could
  * affect this project's resolved lockfile from — `lockfileWatchDirs(dir)`
- * crossed with both lockfile filenames. Useful for tests and for any caller
+ * crossed with every supported lockfile filename. Useful for tests and for any caller
  * that just wants the full path list as data (never as a glob to build a
  * watcher from directly — see `lockfileWatchDirs`'s own doc for why).
  */
@@ -143,7 +154,7 @@ export function lockfileWatchPaths(dir: string): string[] {
   const paths: string[] = [];
   for (const candidateDir of lockfileWatchDirs(dir)) {
     const prefix = candidateDir === '' ? '' : `${candidateDir}/`;
-    paths.push(`${prefix}${PACKAGE_LOCK}`, `${prefix}${SHRINKWRAP}`);
+    paths.push(`${prefix}${PACKAGE_LOCK}`, `${prefix}${SHRINKWRAP}`, `${prefix}${PNPM_LOCK}`);
   }
   return paths;
 }
@@ -151,9 +162,9 @@ export function lockfileWatchPaths(dir: string): string[] {
 /**
  * Find the nearest directory at or above `dir` that holds a lockfile.
  *
- * npm workspaces keep one lockfile at the repo root covering every member, so
- * a member's resolved versions are not in its own directory. Returns null when
- * nothing up the chain has one.
+ * npm and pnpm workspaces commonly keep one lockfile at the repo root covering
+ * every member, so a member's resolved versions are not in its own directory.
+ * Returns null when nothing up the chain has one.
  */
 export function nearestLockfileDir(
   dir: string,

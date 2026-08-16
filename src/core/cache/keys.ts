@@ -45,6 +45,10 @@ export function stripUrlCredentials(url: string): string {
  * fix for the same reason: a delimiter-joined string is ambiguous whenever
  * either input could itself contain the delimiter.
  */
-export function deriveProjectCacheKey(projectId: string, registry: string): string {
-  return JSON.stringify([projectId, stripUrlCredentials(registry)]);
+export function deriveProjectCacheKey(
+  projectId: string,
+  registry: string,
+  packageManager: 'npm' | 'pnpm' = 'npm'
+): string {
+  return JSON.stringify([projectId, stripUrlCredentials(registry), packageManager]);
 }

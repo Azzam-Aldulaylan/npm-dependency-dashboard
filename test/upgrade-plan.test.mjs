@@ -10,6 +10,9 @@ import assert from 'node:assert/strict';
 
 import {
   buildNpmInstallArgs,
+  buildPnpmAddArgs,
+  buildInstallArgs,
+  buildCoordinatedInstallArgs,
   isMajorUpgrade,
   isSafeNpmPackageName,
   isSafeSemverVersion,
@@ -45,6 +48,47 @@ test('an optional dependency gets --save-optional', () => {
     ignoreScripts: false,
   });
   assert.deepEqual(args, ['install', 'fsevents@2.3.3', '--save-optional']);
+});
+
+test('pnpm uses add with the same explicit classification and ignore-scripts policy', () => {
+  assert.deepEqual(buildPnpmAddArgs({
+    packageName: '@scope/pkg',
+    target: '3.0.0',
+    classification: 'dev',
+    ignoreScripts: true,
+  }), ['add', '@scope/pkg@3.0.0', '--save-dev', '--ignore-scripts']);
+  assert.deepEqual(buildInstallArgs('pnpm', {
+    packageName: 'left-pad', target: '2.0.0', classification: 'prod', ignoreScripts: false,
+  }), ['add', 'left-pad@2.0.0', '--save-prod']);
+  assert.deepEqual(buildInstallArgs('npm', {
+    packageName: 'left-pad', target: '2.0.0', classification: 'prod', ignoreScripts: false,
+  }), ['install', 'left-pad@2.0.0', '--save-prod']);
+});
+
+test('coordinated plans install same-classification changes atomically with literal argv', () => {
+  const changes = [
+    { packageName: 'some-library', target: '5.0.0', classification: 'prod' },
+    { packageName: 'react', target: '19.0.0', classification: 'prod' },
+  ];
+  assert.deepEqual(buildCoordinatedInstallArgs('npm', { changes, ignoreScripts: true }), [
+    'install', 'some-library@5.0.0', 'react@19.0.0', '--save-prod', '--ignore-scripts',
+  ]);
+  assert.deepEqual(buildCoordinatedInstallArgs('pnpm', { changes, ignoreScripts: false }), [
+    'add', 'some-library@5.0.0', 'react@19.0.0', '--save-prod',
+  ]);
+});
+
+test('coordinated plans refuse mixed manifest classifications instead of silently rewriting them', () => {
+  assert.throws(
+    () => buildCoordinatedInstallArgs('npm', {
+      changes: [
+        { packageName: 'react', target: '19.0.0', classification: 'prod' },
+        { packageName: 'typescript', target: '6.0.0', classification: 'dev' },
+      ],
+      ignoreScripts: true,
+    }),
+    /cannot be installed atomically/
+  );
 });
 
 // ------------------------------------------------------------ ignoreScripts

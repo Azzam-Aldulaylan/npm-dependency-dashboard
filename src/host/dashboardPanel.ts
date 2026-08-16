@@ -30,6 +30,8 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { NodeAuditRunner } from '../core/audit/npmAudit.js';
+import { analyzeCompatibility, CompatibilityCancelledError } from '../core/compatibility/preflight.js';
+import { RegistryPackageMetadataProvider, registryForPackage } from '../core/compatibility/registryMetadataProvider.js';
 import { realTimerScheduler, BackgroundRefreshTimer } from '../core/cache/backgroundRefreshTimer.js';
 import type { FileChangeKind } from '../core/cache/fileChangeCoordinator.js';
 import { FileChangeCoordinator } from '../core/cache/fileChangeCoordinator.js';
@@ -38,8 +40,13 @@ import { deriveProjectCacheKey } from '../core/cache/keys.js';
 import { PersistentEtagStore } from '../core/cache/persistentEtagStore.js';
 import { PersistentProjectCacheStore } from '../core/cache/projectCacheStore.js';
 import { describeRejection } from '../core/upgrade/validate.js';
+import { planSmartUpgrade } from '../core/upgrade/smartPlan.js';
+import { buildDependencyGraph } from '../core/lockfile/build.js';
+import { directNodes } from '../core/lockfile/parse.js';
+import { parseManifest } from '../core/manifest/parse.js';
 import { isSameProjectReload, lockfileWatchDirs, projectCandidateLabel } from '../core/workspace/scan.js';
 import { NodeHttpClient } from '../core/registry/http.js';
+import { fetchPackument } from '../core/registry/versions.js';
 import { DashboardController } from './dashboardController.js';
 import type { MessageSink } from './dashboardController.js';
 import type { ReloadSource } from './fileChangeReload.js';
@@ -48,6 +55,12 @@ import { pickProject } from './projectPicker.js';
 import type { DiscoveredProject, ResolvedProject } from './projectResolution.js';
 import { discoverProjects, loadProject } from './projectResolution.js';
 import { confirmUpgrade, UpgradeExecutionSession } from './upgradeRunner.js';
+import { createNodeNpmResolverDeps, resolveNpmInvocation } from './npmResolver.js';
+import { resolveInstalledPnpmInvocation } from './pnpmResolver.js';
+import { createNodeUpgradeTransactionFileAdapter } from './nodeUpgradeTransactionFiles.js';
+import { IsolatedResolverVerifier, probePackageManagerVersion } from './resolverVerifier.js';
+import { runUpgradeTransaction } from './upgradeTransaction.js';
+import { selectVerificationScripts } from './verificationPolicy.js';
 import type { ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
 import type { WebviewToHostMessage } from './webviewProtocol.js';
 import { isWebviewToHostMessage } from './webviewProtocol.js';
@@ -97,6 +110,20 @@ function toProjectInfo(candidate: DiscoveredProject): SelectedProjectInfo {
   return { label: projectCandidateLabel(candidate), manifestPath: candidate.manifestPath };
 }
 
+function compatibilitySummary(analysis: Awaited<ReturnType<typeof analyzeCompatibility>>): string[] {
+  const important = analysis.findings.filter((finding) => finding.status !== 'compatible').slice(0, 4);
+  return [
+    `Result: ${analysis.status}${analysis.completeness === 'partial' ? ' (partial evidence)' : ''}.`,
+    ...important.map((finding) => `• ${finding.explanation}`),
+    ...(analysis.findings.length > important.length
+      ? [`• ${analysis.findings.length - important.length} additional finding(s).`]
+      : []),
+    ...(analysis.resolverVerification === undefined
+      ? []
+      : [`Resolver: ${analysis.resolverVerification.explanation}`]),
+  ];
+}
+
 export class DashboardPanel {
   private static current: DashboardPanel | undefined;
 
@@ -140,6 +167,7 @@ export class DashboardPanel {
   private manifestWatcher: vscode.FileSystemWatcher | undefined;
   /** One watcher per ancestor directory (see setupFileWatchers) — never a single glob built by interpolating directory names, which real directory content could break out of. */
   private lockfileWatchers: vscode.FileSystemWatcher[] = [];
+  private configurationWatchers: vscode.FileSystemWatcher[] = [];
   /** The absolute lockfile path the current persisted entry was built against — needed to purge every npm-workspace sibling sharing it once a reload has just replaced it. Null means the selected project has no lockfile. */
   private selectedLockfilePath: string | null = null;
   private invalidationTimer: NodeJS.Timeout | undefined;
@@ -152,7 +180,8 @@ export class DashboardPanel {
   private readonly reloadSource: ReloadSource<DiscoveredProject> = {
     loadProject: (candidate) => loadProject(candidate),
     toProjectInfo,
-    cacheKeyFor: (candidate, registry) => deriveProjectCacheKey(candidate.id, registry),
+    cacheKeyFor: (candidate, registry, packageManager) =>
+      deriveProjectCacheKey(candidate.id, registry, packageManager ?? 'npm'),
   };
 
   private constructor(panel: vscode.WebviewPanel, context: vscode.ExtensionContext) {
@@ -187,7 +216,10 @@ export class DashboardPanel {
         this.controller?.dispose();
         this.controller = undefined;
         this.pending = undefined;
-        this.upgradeSession.dispose();
+        // A mutating task is deliberately allowed to reach a stable boundary
+        // even after its panel closes. The transaction's async owner keeps the
+        // session alive until install/verification/rollback completes.
+        if (!this.upgradeSession.isBusy()) this.upgradeSession.dispose();
         this.disposeWatchers();
         this.fileChangeCoordinator.dispose();
         this.backgroundTimer.dispose();
@@ -297,9 +329,188 @@ export class DashboardPanel {
     }
 
     try {
+      const selected = this.selectedProject;
+      if (selected === undefined) return;
+      const source = controller.upgradeSource;
+      const preflightProject = await loadProject(selected);
+      if (
+        preflightProject.root !== controller.root ||
+        preflightProject.manifestText !== source.manifestText ||
+        preflightProject.lockfileText !== source.lockfileText ||
+        preflightProject.lockfilePath !== source.lockfilePath ||
+        preflightProject.registry !== source.registry ||
+        preflightProject.packageManager !== source.packageManager ||
+        preflightProject.importerId !== source.importerId
+      ) {
+        this.sink.postMessage({
+          status: 'upgrade-error',
+          package: eligibility.packageName,
+          error: { code: 'STALE_SOURCE', message: 'Project dependency files changed. Refresh and try again.' },
+        });
+        return;
+      }
+
+      let proposal = {
+        requested: {
+          packageName: eligibility.packageName,
+          currentVersion: eligibility.currentVersion,
+          targetVersion: eligibility.target,
+          classification: eligibility.classification,
+        },
+        changes: [
+          {
+            packageName: eligibility.packageName,
+            currentVersion: eligibility.currentVersion,
+            targetVersion: eligibility.target,
+            classification: eligibility.classification,
+          },
+        ],
+      };
+      const manifest = parseManifest(preflightProject.manifestText);
+      const graph = buildDependencyGraph({
+        root: preflightProject.root,
+        manifest,
+        lockfileText: preflightProject.lockfileText,
+        packageManager: preflightProject.packageManager,
+        importerId: preflightProject.importerId,
+      });
+      const npmResolution = resolveNpmInvocation(createNodeNpmResolverDeps(controller.root));
+      const packageManagerInvocation =
+        !npmResolution.ok
+          ? null
+          : preflightProject.packageManager === 'npm'
+            ? {
+                executable: npmResolution.invocation.node,
+                prefixArgs: [npmResolution.invocation.npmCliJs],
+              }
+            : resolveInstalledPnpmInvocation(npmResolution.invocation, controller.root);
+      const resolverVerifier = packageManagerInvocation !== null
+        ? new IsolatedResolverVerifier({
+            packageManager: preflightProject.packageManager,
+            packageManagerVersion: probePackageManagerVersion(packageManagerInvocation, controller.root),
+            invocation: packageManagerInvocation,
+            manifestText: preflightProject.manifestText,
+            ...(preflightProject.lockfileText === null || preflightProject.lockfileName === null
+              ? {}
+              : {
+                  lockfile: {
+                    name: preflightProject.lockfileName,
+                    text: preflightProject.lockfileText,
+                  },
+                }),
+            registry: preflightProject.registry,
+            policy: preflightProject.peerPolicy,
+          })
+        : undefined;
+      const metadataProvider = new RegistryPackageMetadataProvider(
+        this.httpClient,
+        this.etagStore,
+        preflightProject.resolvedRegistry
+      );
+      let analysis = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `Checking compatibility for ${eligibility.packageName}@${eligibility.target}`,
+          cancellable: true,
+        },
+        async (_progress, token) => {
+          const abort = new AbortController();
+          const cancellation = token.onCancellationRequested(() => abort.abort());
+          try {
+            return await analyzeCompatibility({
+              graph,
+              proposal,
+              metadataProvider,
+              policy: preflightProject.peerPolicy,
+              ...(resolverVerifier === undefined ? {} : { resolverVerifier }),
+              signal: abort.signal,
+            });
+          } finally {
+            cancellation.dispose();
+          }
+        }
+      );
+      if (analysis.status === 'conflict') {
+        const declaredByName = new Map(manifest.dependencies.map((dependency) => [dependency.name, dependency]));
+        const upgradeableDirectDependencies = directNodes(graph).flatMap((node) => {
+          const declared = declaredByName.get(node.name);
+          if (declared === undefined || node.version === null) return [];
+          return [{
+            packageName: node.name,
+            currentVersion: node.version,
+            classification: declared.optional ? ('optional' as const) : declared.dev ? ('dev' as const) : ('prod' as const),
+          }];
+        });
+        const planned = await planSmartUpgrade({
+          graph,
+          initialAnalysis: analysis,
+          upgradeableDirectDependencies,
+          candidateProvider: {
+            getStableVersionCandidates: async (packageName, signal) => {
+              const packument = await fetchPackument(
+                this.httpClient,
+                this.etagStore,
+                registryForPackage(preflightProject.resolvedRegistry, packageName),
+                packageName,
+                signal
+              );
+              return { versions: packument.versions, complete: true };
+            },
+          },
+          metadataProvider,
+          policy: preflightProject.peerPolicy,
+          ...(resolverVerifier === undefined ? {} : { resolverVerifier }),
+        });
+        const atomicPlan =
+          planned.outcome === 'found' &&
+          planned.plan.proposal.changes.every(
+            (change) => change.classification === planned.plan.proposal.changes[0]?.classification
+          )
+            ? planned.plan
+            : null;
+        if (atomicPlan === null) {
+          const summary = compatibilitySummary(analysis).join('\n');
+          void vscode.window.showErrorMessage(
+            `Upgrade blocked by dependency compatibility conflicts. Smart-plan result: ${planned.outcome}.\n${summary}`,
+            { modal: true }
+          );
+          this.sink.postMessage({
+            status: 'upgrade-error',
+            package: eligibility.packageName,
+            error: { code: 'PREFLIGHT_CONFLICT', message: 'Compatibility preflight found blocking peer conflicts.' },
+          });
+          return;
+        }
+        const coordinated = atomicPlan.proposal.changes
+          .map((change) => `${change.packageName} → ${change.targetVersion}`)
+          .join('\n');
+        const choice = await vscode.window.showWarningMessage(
+          'This upgrade requires coordinated dependency changes.',
+          { modal: true, detail: coordinated },
+          'Use Coordinated Plan'
+        );
+        if (choice !== 'Use Coordinated Plan') {
+          this.sink.postMessage({
+            status: 'upgrade-error',
+            package: eligibility.packageName,
+            error: { code: 'CANCELLED', message: 'Coordinated upgrade cancelled.' },
+          });
+          return;
+        }
+        proposal = atomicPlan.proposal;
+        analysis = atomicPlan.compatibility;
+      }
+
       const ignoreScripts = vscode.workspace
         .getConfiguration('dependencyDashboard')
         .get<boolean>('upgrade.ignoreScripts', true);
+      const configuredVerification = vscode.workspace
+        .getConfiguration('dependencyDashboard')
+        .get<unknown[]>('upgrade.verificationScripts', []);
+      const verificationScripts = selectVerificationScripts(
+        controller.upgradeSource.manifestText,
+        configuredVerification
+      );
 
       const runParams = {
         packageName: eligibility.packageName,
@@ -308,6 +519,14 @@ export class DashboardPanel {
         classification: eligibility.classification,
         cwd: controller.root,
         ignoreScripts,
+        packageManager: source.packageManager,
+        verificationScriptNames: verificationScripts.map((script) => script.scriptName),
+        compatibilitySummary: compatibilitySummary(analysis),
+        coordinatedChanges: proposal.changes.map((change) => ({
+          packageName: change.packageName,
+          target: change.targetVersion,
+          classification: change.classification,
+        })),
       };
 
       const confirmed = await confirmUpgrade(runParams);
@@ -321,19 +540,120 @@ export class DashboardPanel {
         return;
       }
 
-      const outcome = await this.upgradeSession.run(runParams);
-      if (this.disposed) return; // dispose() already settled this run; nothing left to post into
-      if (outcome.ok) {
-        // Exit 0: re-resolve the *same selected* project (package.json/the
-        // lockfile the upgrade task itself just rewrote) and force a fresh
-        // scan against that, not the pre-upgrade snapshot — see
-        // reloadAndScan, which defaults to `this.selectedProject`.
-        await this.reloadAndScan();
-      } else {
+      // Confirmation can remain open while files change. Re-read the selected
+      // project and repeat the host-owned eligibility check immediately before
+      // snapshot/execution; the pre-modal result is never sufficient authority.
+      const disk = await loadProject(selected);
+      const sourceStillMatches =
+        disk.root === controller.root &&
+        disk.manifestText === source.manifestText &&
+        disk.lockfileText === source.lockfileText &&
+        disk.lockfilePath === source.lockfilePath &&
+        disk.registry === source.registry &&
+        disk.packageManager === preflightProject.packageManager &&
+        disk.importerId === preflightProject.importerId &&
+        JSON.stringify(disk.peerPolicy) === JSON.stringify(preflightProject.peerPolicy) &&
+        JSON.stringify(disk.resolvedRegistry) === JSON.stringify(preflightProject.resolvedRegistry);
+      const rechecked = controller.validateUpgradeRequest(message);
+      if (!sourceStillMatches || !rechecked.ok) {
         this.sink.postMessage({
           status: 'upgrade-error',
           package: eligibility.packageName,
-          error: { code: outcome.code, message: outcome.message },
+          error: {
+            code: 'STALE_SOURCE',
+            message: 'Project dependency files changed while confirmation was open. Refresh and try again.',
+          },
+        });
+        return;
+      }
+
+      const manifestPath = path.join(controller.root, 'package.json');
+      const expectedLockfilePath =
+        source.lockfilePath ??
+        path.join(controller.root, source.packageManager === 'pnpm' ? 'pnpm-lock.yaml' : 'package-lock.json');
+      const allowlistedPaths = [manifestPath, expectedLockfilePath];
+      const files = await createNodeUpgradeTransactionFileAdapter({
+        workspaceRoot: selected.folder.uri.fsPath,
+        allowlistedPaths,
+      });
+
+      const transaction = await runUpgradeTransaction({
+        allowlistedPaths,
+        files,
+        install: {
+          execute: async () => {
+            const outcome = await this.upgradeSession.run(runParams);
+            return outcome.ok
+              ? { status: 'succeeded' as const }
+              : { status: 'failed' as const, code: outcome.code, message: outcome.message };
+          },
+        },
+        ...(verificationScripts.length === 0
+          ? {}
+          : {
+              verifier: {
+                verify: () =>
+                  this.upgradeSession.verify({
+                    packageName: eligibility.packageName,
+                    cwd: controller.root,
+                    packageManager: source.packageManager,
+                    scripts: verificationScripts,
+                  }),
+              },
+              verificationFailureDecider: {
+                decide: async () => {
+                  if (this.disposed) return 'rollback' as const;
+                  const choice = await vscode.window.showWarningMessage(
+                    'The dependency installed, but post-upgrade verification failed.',
+                    {
+                      modal: true,
+                      detail: 'Rollback restores only package.json and the active lockfile captured by this upgrade transaction.',
+                    },
+                    'Rollback',
+                    'Keep Changes'
+                  );
+                  return choice === 'Keep Changes' ? ('keep' as const) : ('rollback' as const);
+                },
+              },
+            }),
+      });
+
+      // Always reload the final kept/restored/partial state while this
+      // transaction still owns the project-wide mutation lock.
+      if (!this.disposed) await this.reloadAndScan();
+      if (this.disposed) return;
+
+      if (transaction.completion === 'kept' && transaction.reason === 'verified') {
+        void vscode.window.showInformationMessage(`Upgraded ${eligibility.packageName}; verification passed.`);
+      } else if (transaction.completion === 'kept') {
+        void vscode.window.showWarningMessage(
+          `Upgraded ${eligibility.packageName}, but the application upgrade is not verified.`
+        );
+      } else if (transaction.completion === 'rolled-back') {
+        void vscode.window.showWarningMessage(`Upgrade of ${eligibility.packageName} was rolled back.`);
+      } else {
+        const rollbackStatus = transaction.rollback.status;
+        this.sink.postMessage({
+          status: 'upgrade-error',
+          package: eligibility.packageName,
+          error: {
+            code: rollbackStatus === 'conflict' ? 'ROLLBACK_CONFLICT' : 'UPGRADE_TRANSACTION_FAILED',
+            message:
+              rollbackStatus === 'conflict'
+                ? 'Rollback stopped because dependency files changed concurrently; those newer edits were preserved.'
+                : 'The upgrade transaction did not reach a verified or fully restored state. Review package.json and the lockfile.',
+          },
+        });
+      }
+    } catch (cause) {
+      if (!this.disposed) {
+        this.sink.postMessage({
+          status: 'upgrade-error',
+          package: eligibility.packageName,
+          error:
+            cause instanceof CompatibilityCancelledError
+              ? { code: 'CANCELLED', message: 'Compatibility preflight was cancelled.' }
+              : toProtocolError(cause),
         });
       }
     } finally {
@@ -346,6 +666,7 @@ export class DashboardPanel {
       // discards anything pending/deferred at its very start, since its own
       // full reload already supersedes it.
       await this.fileChangeCoordinator.flushDeferred();
+      if (this.disposed) this.upgradeSession.dispose();
     }
   }
 
@@ -646,6 +967,9 @@ export class DashboardPanel {
       manifestText: project.manifestText,
       lockfileText: project.lockfileText,
       lockfilePath: project.lockfilePath,
+      packageManager: project.packageManager,
+      importerId: project.importerId,
+      lockfileName: project.lockfileName,
       registry: project.registry,
       httpClient: this.httpClient,
       etagStore: this.etagStore,
@@ -660,7 +984,7 @@ export class DashboardPanel {
 
   /** S6 project identity (stable across scans) plus registry — see deriveProjectCacheKey for why both are needed to avoid cross-registry contamination within the same project. */
   private cacheKeyFor(candidate: DiscoveredProject, project: ResolvedProject): string {
-    return deriveProjectCacheKey(candidate.id, project.registry);
+    return deriveProjectCacheKey(candidate.id, project.registry, project.packageManager);
   }
 
   private readonly ttlMinutesProvider = (): number => {
@@ -681,6 +1005,8 @@ export class DashboardPanel {
     this.manifestWatcher = undefined;
     for (const watcher of this.lockfileWatchers) watcher.dispose();
     this.lockfileWatchers = [];
+    for (const watcher of this.configurationWatchers) watcher.dispose();
+    this.configurationWatchers = [];
     if (this.invalidationTimer !== undefined) {
       clearTimeout(this.invalidationTimer);
       this.invalidationTimer = undefined;
@@ -694,14 +1020,14 @@ export class DashboardPanel {
    * One watcher per ancestor directory `lockfileWatchDirs` returns — every
    * directory `nearestLockfileDir` could ever resolve to for this project,
    * up to the workspace folder root — each watching only the fixed pattern
-   * `{package-lock.json,npm-shrinkwrap.json}`. Deliberately NOT a single
+   * `{package-lock.json,npm-shrinkwrap.json,pnpm-lock.yaml}`. Deliberately NOT a single
    * watcher built by interpolating every ancestor directory *name* into one
    * glob string: a directory name is real filesystem content the workspace
    * happens to contain, and a legal one containing `*`, `?`, `[`, `]`, `{`,
    * `}`, or `,` would be reinterpreted as glob syntax instead of matched
    * literally — see lockfileWatchDirs's own doc. Each directory here is used
    * only as `RelativePattern`'s literal URI base, exactly like the manifest
-   * watcher below already does; only the two hardcoded filenames, which this
+   * watcher below already does; only the hardcoded filenames, which this
    * codebase controls, ever appear in the glob pattern itself.
    */
   private setupFileWatchers(candidate: DiscoveredProject, manifestPath: string): void {
@@ -715,16 +1041,33 @@ export class DashboardPanel {
     this.manifestWatcher.onDidCreate(onManifestEvent);
     this.manifestWatcher.onDidDelete(onManifestEvent);
 
+    const onConfigurationEvent = (): void => this.onWatchedFileEvent('configuration');
+    const npmrcWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(vscode.Uri.file(path.dirname(manifestPath)), '.npmrc')
+    );
+    npmrcWatcher.onDidChange(onConfigurationEvent);
+    npmrcWatcher.onDidCreate(onConfigurationEvent);
+    npmrcWatcher.onDidDelete(onConfigurationEvent);
+    this.configurationWatchers.push(npmrcWatcher);
+
     const onLockfileEvent = (): void => this.onWatchedFileEvent('lockfile');
     for (const dir of lockfileWatchDirs(candidate.dir)) {
       const dirUri = vscode.Uri.joinPath(candidate.folder.uri, dir);
       const watcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(dirUri, '{package-lock.json,npm-shrinkwrap.json}')
+        new vscode.RelativePattern(dirUri, '{package-lock.json,npm-shrinkwrap.json,pnpm-lock.yaml}')
       );
       watcher.onDidChange(onLockfileEvent);
       watcher.onDidCreate(onLockfileEvent);
       watcher.onDidDelete(onLockfileEvent);
       this.lockfileWatchers.push(watcher);
+
+      const workspaceConfigWatcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(dirUri, 'pnpm-workspace.yaml')
+      );
+      workspaceConfigWatcher.onDidChange(onConfigurationEvent);
+      workspaceConfigWatcher.onDidCreate(onConfigurationEvent);
+      workspaceConfigWatcher.onDidDelete(onConfigurationEvent);
+      this.configurationWatchers.push(workspaceConfigWatcher);
     }
   }
 

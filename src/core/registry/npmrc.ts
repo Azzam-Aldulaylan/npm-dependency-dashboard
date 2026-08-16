@@ -136,6 +136,64 @@ export interface ResolveResult {
   rejectedForExpansion: string[];
 }
 
+export type PeerPolicySource = 'default' | 'user-npmrc' | 'project-npmrc';
+
+/** Resolution settings that materially change how peer findings are treated. */
+export interface PeerResolutionPolicy {
+  strictPeerDeps: boolean;
+  legacyPeerDeps: boolean;
+  sources: {
+    strictPeerDeps: PeerPolicySource;
+    legacyPeerDeps: PeerPolicySource;
+  };
+}
+
+/**
+ * Parse the two peer-resolution booleans without invoking `npm config`.
+ *
+ * The same security rules as registry resolution apply: project config is
+ * ignored unless explicitly allowed, `${...}` values have already been
+ * rejected by `parseNpmrc`, and auth material is never read. Invalid boolean
+ * values are ignored rather than guessed.
+ */
+export function resolvePeerResolutionPolicy(options: ResolveOptions): PeerResolutionPolicy {
+  let strictPeerDeps = false;
+  let legacyPeerDeps = false;
+  let strictSource: PeerPolicySource = 'default';
+  let legacySource: PeerPolicySource = 'default';
+
+  const layers: Array<{ text: string | undefined; source: Exclude<PeerPolicySource, 'default'> }> = [
+    { text: options.userNpmrc, source: 'user-npmrc' },
+    {
+      text: options.allowProjectNpmrc ? options.projectNpmrc : undefined,
+      source: 'project-npmrc',
+    },
+  ];
+
+  for (const layer of layers) {
+    if (layer.text === undefined) continue;
+    for (const entry of parseNpmrc(layer.text).entries) {
+      const key = entry.key.toLowerCase();
+      const value = entry.value.toLowerCase();
+      if (value !== 'true' && value !== 'false') continue;
+      const enabled = value === 'true';
+      if (key === 'strict-peer-deps' || key === 'strict-peer-dependencies') {
+        strictPeerDeps = enabled;
+        strictSource = layer.source;
+      } else if (key === 'legacy-peer-deps') {
+        legacyPeerDeps = enabled;
+        legacySource = layer.source;
+      }
+    }
+  }
+
+  return {
+    strictPeerDeps,
+    legacyPeerDeps,
+    sources: { strictPeerDeps: strictSource, legacyPeerDeps: legacySource },
+  };
+}
+
 /**
  * Resolve the effective registry: project .npmrc (when allowed), then user
  * .npmrc, then the public registry. Scoped keys get the same validation as the

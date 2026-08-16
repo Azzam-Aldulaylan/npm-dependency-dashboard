@@ -10,6 +10,7 @@
  */
 
 import semver from 'semver';
+import type { PackageManagerKind } from '../types.js';
 
 /** Where a dependency is declared in package.json — decides the npm save flag. */
 export type DependencyClassification = 'prod' | 'dev' | 'optional';
@@ -24,6 +25,11 @@ export interface UpgradeArgsOptions {
   packageName: string;
   target: string;
   classification: DependencyClassification;
+  ignoreScripts: boolean;
+}
+
+export interface CoordinatedUpgradeArgsOptions {
+  changes: readonly Omit<UpgradeArgsOptions, 'ignoreScripts'>[];
   ignoreScripts: boolean;
 }
 
@@ -43,6 +49,42 @@ export function buildNpmInstallArgs(options: UpgradeArgsOptions): string[] {
   const { packageName, target, classification, ignoreScripts } = options;
   const args = ['install', `${packageName}@${target}`, SAVE_FLAG[classification]];
   if (ignoreScripts) args.push('--ignore-scripts');
+  return args;
+}
+
+/** pnpm's equivalent structured argv. The caller still owns host-side validation. */
+export function buildPnpmAddArgs(options: UpgradeArgsOptions): string[] {
+  const { packageName, target, classification, ignoreScripts } = options;
+  const args = ['add', `${packageName}@${target}`, SAVE_FLAG[classification]];
+  if (ignoreScripts) args.push('--ignore-scripts');
+  return args;
+}
+
+/** Manager-neutral dispatch for host orchestration; always returns literal argv. */
+export function buildInstallArgs(
+  packageManager: PackageManagerKind,
+  options: UpgradeArgsOptions
+): string[] {
+  return packageManager === 'pnpm' ? buildPnpmAddArgs(options) : buildNpmInstallArgs(options);
+}
+
+/** Build one atomic package-manager invocation for a same-classification plan. */
+export function buildCoordinatedInstallArgs(
+  packageManager: PackageManagerKind,
+  options: CoordinatedUpgradeArgsOptions
+): string[] {
+  if (options.changes.length === 0) throw new Error('A coordinated upgrade needs at least one change.');
+  const classification = options.changes[0]?.classification;
+  if (classification === undefined || options.changes.some((change) => change.classification !== classification)) {
+    throw new Error('Coordinated upgrades across dependency classifications cannot be installed atomically.');
+  }
+  const command = packageManager === 'pnpm' ? 'add' : 'install';
+  const args = [
+    command,
+    ...options.changes.map((change) => `${change.packageName}@${change.target}`),
+    SAVE_FLAG[classification],
+  ];
+  if (options.ignoreScripts) args.push('--ignore-scripts');
   return args;
 }
 

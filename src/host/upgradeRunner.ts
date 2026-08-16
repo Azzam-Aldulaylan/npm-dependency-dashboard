@@ -17,9 +17,14 @@
 import * as vscode from 'vscode';
 
 import type { DependencyClassification } from '../core/upgrade/plan.js';
-import { buildNpmInstallArgs, isMajorUpgrade } from '../core/upgrade/plan.js';
+import { buildCoordinatedInstallArgs, buildInstallArgs, isMajorUpgrade } from '../core/upgrade/plan.js';
 import { createNodeNpmResolverDeps, resolveNpmInvocation } from './npmResolver.js';
+import { resolveInstalledPnpmInvocation } from './pnpmResolver.js';
+import type { PackageManagerInvocation } from './resolverVerifier.js';
 import { PendingUpgradeRuns, UpgradeLock, isSuccessfulExitCode } from './upgradeTracker.js';
+import type { VerificationExecutionResult } from './upgradeTransaction.js';
+import { buildVerificationScriptArgs } from './verificationPolicy.js';
+import type { VerificationScript } from './verificationPolicy.js';
 
 export interface UpgradeRunParams {
   packageName: string;
@@ -28,9 +33,24 @@ export interface UpgradeRunParams {
   classification: DependencyClassification;
   cwd: string;
   ignoreScripts: boolean;
+  packageManager: 'npm' | 'pnpm';
+  verificationScriptNames?: readonly string[];
+  compatibilitySummary?: readonly string[];
+  coordinatedChanges?: readonly {
+    packageName: string;
+    target: string;
+    classification: DependencyClassification;
+  }[];
 }
 
 export type UpgradeRunOutcome = { ok: true } | { ok: false; code: string; message: string };
+
+export interface UpgradeVerificationParams {
+  packageName: string;
+  cwd: string;
+  packageManager: 'npm' | 'pnpm';
+  scripts: readonly VerificationScript[];
+}
 
 const DISPOSED_OUTCOME: UpgradeRunOutcome = {
   ok: false,
@@ -55,6 +75,19 @@ export async function confirmUpgrade(params: UpgradeRunParams): Promise<boolean>
     params.ignoreScripts
       ? 'Lifecycle scripts are disabled for this upgrade (--ignore-scripts).'
       : 'Lifecycle scripts will run as part of this upgrade.',
+    params.verificationScriptNames !== undefined && params.verificationScriptNames.length > 0
+      ? `Post-upgrade verification: ${params.verificationScriptNames.join(', ')}.`
+      : 'No application verification scripts are configured; install success will remain unverified.',
+    ...(params.compatibilitySummary === undefined
+      ? []
+      : ['', 'Preflight compatibility:', ...params.compatibilitySummary]),
+    ...(params.coordinatedChanges === undefined || params.coordinatedChanges.length <= 1
+      ? []
+      : [
+          '',
+          'Coordinated changes:',
+          ...params.coordinatedChanges.map((change) => `• ${change.packageName} → ${change.target}`),
+        ]),
   ].join('\n');
 
   const choice = await vscode.window.showWarningMessage(
@@ -123,32 +156,83 @@ export class UpgradeExecutionSession {
     // the identical, single-read value, so a Volta pin (which depends on the
     // working directory) resolves the same way during this validation as it
     // will during the actual visible task.
-    const resolution = resolveNpmInvocation(createNodeNpmResolverDeps(params.cwd));
-    if (!resolution.ok) {
+    const invocation = this.resolveInvocation(params.cwd, params.packageManager);
+    if (invocation === null) {
       void vscode.window.showErrorMessage(
-        'Dependency Dashboard could not locate a working npm installation. Make sure Node.js/npm is installed and on your PATH, then try again.'
+        `Dependency Dashboard could not locate a working ${params.packageManager} installation.`
       );
       return {
         ok: false,
-        code: 'NPM_NOT_FOUND',
-        message: 'A working npm installation could not be located.',
+        code: 'PACKAGE_MANAGER_NOT_FOUND',
+        message: `A working ${params.packageManager} installation could not be located.`,
       };
     }
 
-    return await this.executeTask(resolution.invocation, params);
+    const args =
+      params.coordinatedChanges !== undefined && params.coordinatedChanges.length > 1
+        ? buildCoordinatedInstallArgs(params.packageManager, {
+            changes: params.coordinatedChanges,
+            ignoreScripts: params.ignoreScripts,
+          })
+        : buildInstallArgs(params.packageManager, {
+            packageName: params.packageName,
+            target: params.target,
+            classification: params.classification,
+            ignoreScripts: params.ignoreScripts,
+          });
+    return await this.executeTask(
+      invocation,
+      params.cwd,
+      params.packageName,
+      args,
+      `Dependency Dashboard: Upgrade ${params.packageName}`
+    );
+  }
+
+  /** Runs only host-selected package.json script names, one visible task at a time. */
+  async verify(params: UpgradeVerificationParams): Promise<VerificationExecutionResult> {
+    if (!vscode.workspace.isTrusted) {
+      return { status: 'failed', checks: [], message: 'Verification is disabled in untrusted workspaces.' };
+    }
+    const invocation = this.resolveInvocation(params.cwd, params.packageManager);
+    if (invocation === null) {
+      return { status: 'failed', checks: [], message: `A working ${params.packageManager} installation could not be located.` };
+    }
+
+    const checks: Array<{ id: string; status: 'passed' | 'failed'; message?: string }> = [];
+    for (const script of params.scripts) {
+      const outcome = await this.executeTask(
+        invocation,
+        params.cwd,
+        params.packageName,
+        buildVerificationScriptArgs(params.packageManager, script.scriptName),
+        `Dependency Dashboard: Verify ${script.scriptName}`
+      );
+      if (!outcome.ok) {
+        checks.push({ id: script.id, status: 'failed', message: outcome.message });
+        return { status: 'failed', checks, message: `Verification script ${script.scriptName} failed.` };
+      }
+      checks.push({ id: script.id, status: 'passed' });
+    }
+    return { status: 'passed', checks };
+  }
+
+  private resolveInvocation(cwd: string, packageManager: 'npm' | 'pnpm'): PackageManagerInvocation | null {
+    const npm = resolveNpmInvocation(createNodeNpmResolverDeps(cwd));
+    if (!npm.ok) return null;
+    if (packageManager === 'npm') {
+      return { executable: npm.invocation.node, prefixArgs: [npm.invocation.npmCliJs] };
+    }
+    return resolveInstalledPnpmInvocation(npm.invocation, cwd);
   }
 
   private async executeTask(
-    invocation: { node: string; npmCliJs: string },
-    params: UpgradeRunParams
+    invocation: PackageManagerInvocation,
+    cwd: string,
+    packageName: string,
+    args: readonly string[],
+    taskName: string
   ): Promise<UpgradeRunOutcome> {
-    const args = buildNpmInstallArgs({
-      packageName: params.packageName,
-      target: params.target,
-      classification: params.classification,
-      ignoreScripts: params.ignoreScripts,
-    });
-
     // An argument array, never a shell string: `invocation.node` and every
     // element of `[invocation.npmCliJs, ...args]` reach the process as
     // literal argv entries, with no shell parsing step in between for a
@@ -156,13 +240,13 @@ export class UpgradeExecutionSession {
     // `params.cwd` here is the same single-read value passed to
     // `createNodeNpmResolverDeps` in `run` above — resolution and execution
     // never see different working directories.
-    const execution = new vscode.ProcessExecution(invocation.node, [invocation.npmCliJs, ...args], {
-      cwd: params.cwd,
+    const execution = new vscode.ProcessExecution(invocation.executable, [...invocation.prefixArgs, ...args], {
+      cwd,
     });
     const task = new vscode.Task(
-      { type: 'dependencyDashboard.upgrade', package: params.packageName },
+      { type: 'dependencyDashboard.upgrade', package: packageName },
       vscode.TaskScope.Workspace,
-      `Dependency Dashboard: Upgrade ${params.packageName}`,
+      taskName,
       'Dependency Dashboard',
       execution
     );

@@ -15,6 +15,7 @@
 import { createHash } from 'node:crypto';
 
 import { isRecord } from '../validation.js';
+import type { PackageManagerKind } from '../types.js';
 
 export interface ProjectSourceFingerprint {
   manifestHash: string;
@@ -22,6 +23,8 @@ export interface ProjectSourceFingerprint {
   lockfileHash: string | null;
   /** Absolute path, or null — a topology change (no-lockfile -> package-lock, package-lock -> shrinkwrap, a nearer lockfile appearing) changes *which* file is authoritative even if none of the file contents involved happen to differ. */
   lockfilePath: string | null;
+  packageManager?: PackageManagerKind;
+  importerId?: string;
 }
 
 function sha256(text: string): string {
@@ -32,16 +35,26 @@ export function computeSourceFingerprint(input: {
   manifestText: string;
   lockfileText: string | null;
   lockfilePath: string | null;
+  packageManager?: PackageManagerKind;
+  importerId?: string;
 }): ProjectSourceFingerprint {
   return {
     manifestHash: sha256(input.manifestText),
     lockfileHash: input.lockfileText === null ? null : sha256(input.lockfileText),
     lockfilePath: input.lockfilePath,
+    packageManager: input.packageManager ?? 'npm',
+    importerId: input.importerId ?? '.',
   };
 }
 
 export function sourceFingerprintsMatch(a: ProjectSourceFingerprint, b: ProjectSourceFingerprint): boolean {
-  return a.manifestHash === b.manifestHash && a.lockfileHash === b.lockfileHash && a.lockfilePath === b.lockfilePath;
+  return (
+    a.manifestHash === b.manifestHash &&
+    a.lockfileHash === b.lockfileHash &&
+    a.lockfilePath === b.lockfilePath &&
+    (a.packageManager ?? 'npm') === (b.packageManager ?? 'npm') &&
+    (a.importerId ?? '.') === (b.importerId ?? '.')
+  );
 }
 
 export function isSourceFingerprint(value: unknown): value is ProjectSourceFingerprint {
@@ -49,6 +62,8 @@ export function isSourceFingerprint(value: unknown): value is ProjectSourceFinge
     isRecord(value) &&
     typeof value['manifestHash'] === 'string' &&
     (value['lockfileHash'] === null || typeof value['lockfileHash'] === 'string') &&
-    (value['lockfilePath'] === null || typeof value['lockfilePath'] === 'string')
+    (value['lockfilePath'] === null || typeof value['lockfilePath'] === 'string') &&
+    (value['packageManager'] === undefined || value['packageManager'] === 'npm' || value['packageManager'] === 'pnpm') &&
+    (value['importerId'] === undefined || typeof value['importerId'] === 'string')
   );
 }

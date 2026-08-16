@@ -17,6 +17,28 @@ export type UnresolvableReason =
 
 export type Severity = 'critical' | 'high' | 'moderate' | 'low' | 'info';
 
+/** Package managers whose on-disk resolution formats this project understands. */
+export type PackageManagerKind = 'npm' | 'pnpm';
+
+export type DependencyEdgeKind = 'runtime' | 'optional' | 'peer';
+
+/**
+ * One normalized dependency relationship.
+ *
+ * `targetNodeId` is explicit because npm's ancestor node_modules lookup and
+ * pnpm's snapshot references are different resolver models. Consumers such as
+ * compatibility analysis and advisory attribution must not have to recreate
+ * either package manager's lookup rules.
+ */
+export interface DependencyEdge {
+  name: string;
+  requestedRange: string;
+  kind: DependencyEdgeKind;
+  /** The key of the resolved node in DependencyGraph.nodes, or null when missing/unresolved. */
+  targetNodeId: string | null;
+  optional: boolean;
+}
+
 export interface DependencyNode {
   name: string;
   /** Resolved version from the lockfile, or null when unresolvable. */
@@ -30,6 +52,8 @@ export interface DependencyNode {
   path: string;
   /** Names of this node's own dependencies, for graph traversal. */
   deps: string[];
+  /** Package-manager-independent, explicitly resolved relationships. */
+  edges: DependencyEdge[];
   /** Set when the package can't be resolved against a registry. */
   unresolvable?: UnresolvableReason;
 }
@@ -37,8 +61,9 @@ export interface DependencyNode {
 export interface DependencyGraph {
   /** Absolute path to the directory holding package.json. */
   root: string;
-  /** Which lockfile shape was parsed. */
-  lockfileVersion: 1 | 2 | 3 | null;
+  packageManager: PackageManagerKind;
+  /** Which lockfile shape was parsed. Numeric for npm, string/number for pnpm. */
+  lockfileVersion: 1 | 2 | 3 | string | number | null;
   nodes: Map<string, DependencyNode>;
 }
 

@@ -10,6 +10,13 @@ for everything built so far rather than a per-version history.
 
 Initial feature set, not yet published:
 
+- Safe upgrade-assistant flow with on-demand peer compatibility preflight,
+  isolated package-manager resolver verification, bounded coordinated upgrade
+  plans, transactional snapshots, optional explicit verification scripts, and
+  compare-and-swap rollback.
+- pnpm lockfile v9, workspace importer, advisory graph, watching, preflight,
+  and structured upgrade execution support alongside the existing npm flow.
+
 - Dashboard panel listing every direct npm dependency with Current, Wanted,
   and Latest versions.
 - Vulnerability detection via npm's bulk advisories endpoint, with optional

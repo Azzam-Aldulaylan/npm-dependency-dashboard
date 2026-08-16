@@ -22,7 +22,10 @@ import * as path from 'node:path';
 
 import * as vscode from 'vscode';
 
-import { resolveRegistry } from '../core/registry/npmrc.js';
+import { resolvePeerResolutionPolicy, resolveRegistry } from '../core/registry/npmrc.js';
+import type { PeerResolutionPolicy } from '../core/registry/npmrc.js';
+import { parseManifest } from '../core/manifest/parse.js';
+import type { PackageManagerKind, ResolvedRegistry } from '../core/types.js';
 import type { DiscoveredProjectCandidate, ProjectCandidateSource } from '../core/workspace/scan.js';
 import {
   DEFAULT_EXCLUDED_DIRS,
@@ -32,6 +35,8 @@ import {
   discoverProjectCandidates,
   dirOf,
   nearestLockfileDir,
+  packageManagerForLockfile,
+  PNPM_LOCK,
 } from '../core/workspace/scan.js';
 
 export class NoProjectFoundError extends Error {
@@ -57,6 +62,13 @@ export interface ResolvedProject {
   /** Absolute path to the resolved lockfile, or null if none — S7 file-watcher wiring; may live outside `root` for an npm workspace member. */
   lockfilePath: string | null;
   registry: string;
+  resolvedRegistry: ResolvedRegistry;
+  peerPolicy: PeerResolutionPolicy;
+  packageManager: PackageManagerKind;
+  lockfileName: 'package-lock.json' | 'npm-shrinkwrap.json' | 'pnpm-lock.yaml' | null;
+  lockfileRoot: string;
+  /** Lock-root-relative POSIX pnpm importer id; `.` at the lock root. */
+  importerId: string;
 }
 
 /**
@@ -69,7 +81,7 @@ export interface DiscoveredProject extends DiscoveredProjectCandidate {
 }
 
 const EXCLUDE_GLOB = `**/{${DEFAULT_EXCLUDED_DIRS.join(',')}}/**`;
-const LOCKFILE_GLOB = `**/{${PACKAGE_LOCK},${SHRINKWRAP}}`;
+const LOCKFILE_GLOB = `**/{${PACKAGE_LOCK},${SHRINKWRAP},${PNPM_LOCK}}`;
 
 async function readIfExists(absolutePath: string): Promise<string | undefined> {
   try {
@@ -103,7 +115,8 @@ function relativeToFolder(folder: vscode.WorkspaceFolder, uri: vscode.Uri): stri
  */
 async function findLockfile(
   folder: vscode.WorkspaceFolder,
-  projectDir: string
+  projectDir: string,
+  preferredPackageManager: PackageManagerKind
 ): Promise<{ dir: string; name: string } | null> {
   const uris = await vscode.workspace.findFiles(
     new vscode.RelativePattern(folder, LOCKFILE_GLOB),
@@ -122,11 +135,14 @@ async function findLockfile(
   const dir = nearestLockfileDir(projectDir, [...namesByDir.keys()]);
   if (dir === null) return null;
 
-  const name = chooseLockfile(namesByDir.get(dir) ?? []);
+  const name = chooseLockfile(namesByDir.get(dir) ?? [], preferredPackageManager);
   return name === null ? null : { dir, name };
 }
 
-async function resolveRegistryUrl(projectRoot: string): Promise<string> {
+async function resolveRegistryConfiguration(projectRoot: string): Promise<{
+  registry: ResolvedRegistry;
+  peerPolicy: PeerResolutionPolicy;
+}> {
   // Project .npmrc is attacker-controlled content in a cloned repo. Trust is
   // checked here as well as at activation because this is the read that
   // actually consumes it — see the SECURITY block in core/registry/npmrc.ts.
@@ -140,12 +156,13 @@ async function resolveRegistryUrl(projectRoot: string): Promise<string> {
     : undefined;
   const userNpmrc = await readIfExists(path.join(homedir(), '.npmrc'));
 
-  const { registry } = resolveRegistry({
+  const resolveOptions = {
     allowProjectNpmrc,
     ...(projectNpmrc === undefined ? {} : { projectNpmrc }),
     ...(userNpmrc === undefined ? {} : { userNpmrc }),
-  });
-  return registry.url;
+  };
+  const { registry } = resolveRegistry(resolveOptions);
+  return { registry, peerPolicy: resolvePeerResolutionPolicy(resolveOptions) };
 }
 
 /**
@@ -188,10 +205,33 @@ export async function loadProject(candidate: DiscoveredProject): Promise<Resolve
   const base = candidate.folder.uri.fsPath;
   const root = candidate.dir === '' ? base : path.join(base, candidate.dir);
   const manifestText = await readFile(path.join(base, candidate.manifestPath), 'utf8');
+  const manifest = parseManifest(manifestText);
+  const preferredPackageManager = manifest.packageManager?.name ?? 'npm';
 
-  const lockfile = await findLockfile(candidate.folder, candidate.dir);
+  const lockfile = await findLockfile(candidate.folder, candidate.dir, preferredPackageManager);
   const lockfilePath = lockfile === null ? null : path.join(base, lockfile.dir, lockfile.name);
   const lockfileText = lockfilePath === null ? null : ((await readIfExists(lockfilePath)) ?? null);
+  const packageManager =
+    (lockfile === null ? null : packageManagerForLockfile(lockfile.name)) ?? preferredPackageManager;
+  const lockfileRoot = lockfile === null ? root : path.join(base, lockfile.dir);
+  const importerRelative = path.relative(lockfileRoot, root).split(path.sep).join('/');
+  const importerId = importerRelative === '' ? '.' : importerRelative;
 
-  return { root, manifestText, lockfileText, lockfilePath, registry: await resolveRegistryUrl(root) };
+  const configuration = await resolveRegistryConfiguration(root);
+  return {
+    root,
+    manifestText,
+    lockfileText,
+    lockfilePath,
+    registry: configuration.registry.url,
+    resolvedRegistry: configuration.registry,
+    peerPolicy: configuration.peerPolicy,
+    packageManager,
+    lockfileName:
+      lockfile === null
+        ? null
+        : (lockfile.name as 'package-lock.json' | 'npm-shrinkwrap.json' | 'pnpm-lock.yaml'),
+    lockfileRoot,
+    importerId,
+  };
 }

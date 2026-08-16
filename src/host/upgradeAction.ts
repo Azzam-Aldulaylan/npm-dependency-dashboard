@@ -20,7 +20,7 @@ export interface UpgradeActionDisplay {
 }
 
 export const UPGRADE_TOOLTIP =
-  'Runs npm install as a visible VS Code task, after a confirmation step.';
+  'Runs compatibility preflight, then a transactional npm/pnpm upgrade as a visible VS Code task after confirmation.';
 
 /**
  * `null` means: render an em dash, no button at all — there is nothing to

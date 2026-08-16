@@ -33,6 +33,12 @@ test('deriveProjectCacheKey differs when only the registry differs, for the iden
   assert.notEqual(a, b);
 });
 
+test('npm and pnpm scans of the same project never share a persisted project cache entry', () => {
+  const npm = deriveProjectCacheKey('project-a', 'https://registry.npmjs.org', 'npm');
+  const pnpm = deriveProjectCacheKey('project-a', 'https://registry.npmjs.org', 'pnpm');
+  assert.notEqual(npm, pnpm);
+});
+
 test('the same relative manifest path in two different workspace folders never collides — folderId flows through deriveProjectId into the cache key', () => {
   const idInFolderOne = deriveProjectId('file:///workspace/one', 'package.json');
   const idInFolderTwo = deriveProjectId('file:///workspace/two', 'package.json');

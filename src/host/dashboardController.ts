@@ -30,6 +30,7 @@ import type { HttpClient } from '../core/registry/http.js';
 import { FetchError } from '../core/registry/http.js';
 import type { EtagStore } from '../core/registry/versions.js';
 import type { UpgradeEligibility, UpgradeRequestInput } from '../core/upgrade/validate.js';
+import type { PackageManagerKind } from '../core/types.js';
 import { validateUpgradeRequest } from '../core/upgrade/validate.js';
 import { toHostToWebviewMessage } from './dashboardData.js';
 import type { HostToWebviewMessage, ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
@@ -45,6 +46,9 @@ export interface DashboardControllerOptions {
   lockfileText: string | null;
   /** Absolute path to the resolved lockfile, or null if none — persisted alongside each cache entry so a file-watcher event can purge every entry sharing an npm-workspace root lockfile. */
   lockfilePath: string | null;
+  packageManager?: PackageManagerKind;
+  importerId?: string;
+  lockfileName?: 'package-lock.json' | 'npm-shrinkwrap.json' | 'pnpm-lock.yaml' | null;
   /** Already resolved by the caller via resolveRegistry. */
   registry: string;
   httpClient: HttpClient;
@@ -97,6 +101,9 @@ export type ProjectSnapshot = Pick<
   | 'manifestText'
   | 'lockfileText'
   | 'lockfilePath'
+  | 'packageManager'
+  | 'importerId'
+  | 'lockfileName'
   | 'registry'
   | 'projectInfo'
   | 'canChangeProject'
@@ -189,6 +196,27 @@ export class DashboardController {
   /** Absolute path to the directory holding package.json — the Upgrade task's cwd. */
   get root(): string {
     return this.options.root;
+  }
+
+  /** Host-only source state used to build preflight and transaction inputs. */
+  get upgradeSource(): {
+    manifestText: string;
+    lockfileText: string | null;
+    lockfilePath: string | null;
+    registry: string;
+    packageManager: PackageManagerKind;
+    importerId: string;
+    lockfileName: 'package-lock.json' | 'npm-shrinkwrap.json' | 'pnpm-lock.yaml' | null;
+  } {
+    return {
+      manifestText: this.options.manifestText,
+      lockfileText: this.options.lockfileText,
+      lockfilePath: this.options.lockfilePath,
+      registry: this.options.registry,
+      packageManager: this.options.packageManager ?? 'npm',
+      importerId: this.options.importerId ?? '.',
+      lockfileName: this.options.lockfileName ?? null,
+    };
   }
 
   /**
@@ -384,6 +412,8 @@ export class DashboardController {
     return computeSourceFingerprint({
       manifestText: this.options.manifestText,
       lockfileText: this.options.lockfileText,
+      packageManager: this.options.packageManager ?? 'npm',
+      importerId: this.options.importerId ?? '.',
       lockfilePath: this.options.lockfilePath,
     });
   }
@@ -585,11 +615,13 @@ export class DashboardController {
       root: this.options.root,
       manifestText: this.options.manifestText,
       lockfileText: this.options.lockfileText,
+      packageManager: this.options.packageManager ?? 'npm',
+      importerId: this.options.importerId ?? '.',
       registry: this.options.registry,
       httpClient: this.options.httpClient,
       etagStore: this.options.etagStore,
       signal: controller.signal,
-      ...(this.options.auditRunner === undefined
+      ...(this.options.auditRunner === undefined || this.options.packageManager === 'pnpm'
         ? {}
         : { auditRunner: this.options.auditRunner }),
     };

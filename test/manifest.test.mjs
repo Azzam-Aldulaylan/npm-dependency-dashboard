@@ -106,6 +106,18 @@ test('workspaces are read in both the array and object forms', () => {
   );
 });
 
+test('recognized npm and pnpm packageManager declarations are parsed without guessing others', () => {
+  assert.deepEqual(parseManifest(JSON.stringify({ packageManager: 'pnpm@10.4.1' })).packageManager, {
+    name: 'pnpm',
+    version: '10.4.1',
+  });
+  assert.deepEqual(parseManifest(JSON.stringify({ packageManager: 'npm@11.0.0+sha512.fixture' })).packageManager, {
+    name: 'npm',
+    version: '11.0.0+sha512.fixture',
+  });
+  assert.equal(parseManifest(JSON.stringify({ packageManager: 'yarn@4.0.0' })).packageManager, null);
+});
+
 test('a manifest with no dependency blocks yields an empty list, not a throw', () => {
   const m = parseManifest(JSON.stringify({ name: 'empty' }));
   assert.deepEqual(m.dependencies, []);

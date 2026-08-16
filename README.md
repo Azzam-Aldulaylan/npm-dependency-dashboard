@@ -2,7 +2,7 @@
 
 A VS Code extension that shows every direct npm dependency of your project — package name, current/wanted/latest version, and known vulnerabilities — in a single in-editor panel, with a one-click upgrade action. No more jumping to the terminal for `npm outdated` and `npm audit`.
 
-npm only. No yarn, pnpm, or private-registry authentication support (see [Known limitations](#known-limitations)).
+Supports npm and pnpm projects. Yarn and private-registry authentication beyond the package manager's own configuration remain out of scope (see [Known limitations](#known-limitations)).
 
 ## What it does
 
@@ -39,11 +39,15 @@ Vulnerability data comes primarily from npm's bulk advisories endpoint (see [Pri
 
 ## Upgrading a package
 
-Clicking Upgrade on a row:
+Clicking Upgrade on a row now runs a safe-assistant lifecycle:
 
-1. Shows a modal confirmation dialog naming the package, current version, target version (flagged "(major upgrade)" when the semver major version changes), and whether lifecycle scripts are enabled for this upgrade. The dialog cannot be dismissed accidentally — pressing Escape, clicking outside it, or clicking Cancel are all treated as "don't upgrade."
-2. Re-checks Workspace Trust.
-3. Runs `npm install <package>@<target>` as a visible VS Code Task — never silently in the background — with the correct `--save-prod`/`--save-dev`/`--save-optional` flag always passed explicitly (never left to npm's or `.npmrc`'s own default).
+1. Runs an on-demand compatibility preflight over peer dependencies, optional/missing peers, relevant graph paths, package-manager peer policy, exact target metadata, and—when a secure package-manager invocation is available—an isolated resolver check in a temporary project.
+2. When a peer conflict is found, performs a bounded search for a coordinated direct-dependency upgrade plan. Plans can span production, development, and optional dependencies while preserving each package's existing manifest classification.
+3. Shows a modal confirmation naming the requested and coordinated changes, compatibility findings, lifecycle-script policy, and configured verification scripts.
+4. Re-reads the project and repeats host-side eligibility validation after the modal, then snapshots `package.json` and the active npm/pnpm lockfile. Mixed-classification plans stage exact, host-generated manifest changes through compare-and-swap protection.
+5. Runs one visible VS Code Task with structured arguments: a classified `npm install`/`pnpm add` for ordinary plans, or a bare manifest-reconciliation install for mixed-classification plans.
+6. Runs only verification scripts explicitly listed in `dependencyDashboard.upgrade.verificationScripts`. No application scripts run by default, and install success alone is reported as unverified.
+7. On install failure, or when the user chooses Rollback after failed verification, restores only the transaction-owned files. Rollback refuses to overwrite concurrent edits.
 
 Only one upgrade can run at a time per panel; Refresh and further upgrades are blocked while one is in flight.
 
@@ -59,7 +63,7 @@ This extension reads a workspace-controlled `.npmrc` (sensitive — a workspace 
 
 If a workspace contains more than one `package.json` (excluding `node_modules`, `.git`, `dist`, `out`, `build`, `coverage`, `.next`, `.nuxt`, `.svelte-kit`, `.cache`, `vendor`, and `tmp`), the dashboard prompts you to pick which project to view, labelled by workspace folder (and sub-directory, for nested projects). A "Change Project" action lets you switch later.
 
-For npm workspaces, each member project's lockfile is resolved correctly by walking up to the nearest ancestor `package-lock.json` (or `npm-shrinkwrap.json`, which takes precedence if both exist) — npm keeps a single lockfile at the workspace root covering every member.
+For npm and pnpm workspaces, each member resolves the nearest supported ancestor lockfile. pnpm v9 importers and `workspace:`/`link:` entries are recognized; linked workspace packages remain displayed as workspace links rather than registry-resolved packages.
 
 ## Cache and refresh behavior
 
@@ -67,7 +71,7 @@ For npm workspaces, each member project's lockfile is resolved correctly by walk
 - Opening the dashboard with a warm, non-expired cache renders instantly with no network call. A stale cache renders instantly too, while a revalidation runs underneath. A cold cache runs the full fetch.
 - Independently of the TTL setting, a background timer checks every 30 minutes (while the panel is open) whether a refresh is due, and runs one if so — this is a fixed interval, separate from the (also currently 30-minute-default) TTL setting.
 - Manual refresh (command or button) always bypasses the cache and re-reads from disk.
-- The extension watches the project's `package.json` and lockfile(s) on disk and reloads automatically when they change outside the dashboard (e.g. `npm install` run from a terminal).
+- The extension watches the project's `package.json` and supported lockfile topology (`package-lock.json`, `npm-shrinkwrap.json`, and `pnpm-lock.yaml`) and reloads automatically when they change outside the dashboard.
 - Cache data is stored using VS Code's own extension storage: project scan results are workspace-scoped; registry version-lookup ETags (public package metadata only, never project-specific) are shared across workspaces. Nothing is written anywhere outside VS Code's extension storage.
 
 ## Settings
@@ -76,6 +80,7 @@ For npm workspaces, each member project's lockfile is resolved correctly by walk
 |---|---|---|---|
 | `dependencyDashboard.registry.useProjectNpmrc` | boolean | `true` | Read the registry from the project's `.npmrc`. Values containing `${` are always rejected. Turn this off to use only your user-level `.npmrc`. |
 | `dependencyDashboard.upgrade.ignoreScripts` | boolean | `true` | Pass `--ignore-scripts` when upgrading, so package lifecycle scripts don't run. |
+| `dependencyDashboard.upgrade.verificationScripts` | string[] | `[]` | Existing package.json script names to run explicitly after installation. Empty means the application upgrade remains unverified. |
 | `dependencyDashboard.cacheTtlMinutes` | number | `30` (minimum `0`) | How long cached dependency data stays fresh before it's rescanned, in minutes. `0` means always revalidate. |
 
 ## Privacy and network access
@@ -85,7 +90,8 @@ For npm workspaces, each member project's lockfile is resolved correctly by walk
 - `GET https://registry.npmjs.org/<package>/latest` and, when needed, the full package metadata — or whichever registry your resolved `.npmrc` points to instead, if `dependencyDashboard.registry.useProjectNpmrc` is enabled.
 - `POST https://registry.npmjs.org/-/npm/v1/security/advisories/bulk` for vulnerability data — always npm's own advisory host, regardless of which registry is otherwise configured, since private registry mirrors generally don't implement this endpoint.
 - A locally spawned `npm audit --json --package-lock-only --registry=https://registry.npmjs.org/` for optional vulnerability-fix enrichment — also always pinned to npm's own registry host, not your configured one.
-- A locally spawned `npm install` when you click Upgrade, which itself talks to whatever registry npm/`.npmrc` resolves — standard `npm install` behavior, not something this extension controls.
+- An isolated npm/pnpm resolution check when an upgrade is considered, with scripts disabled and a temporary directory as its working project.
+- A locally spawned `npm install` or `pnpm add` after confirmation, which talks to the registry resolved by the package manager's own configuration.
 
 The dashboard's webview has no network access of its own (`default-src 'none'`, no inline scripts); all network activity happens in the extension host, never in the webview. All version/vulnerability data returned is public npm registry metadata about packages you already declared a dependency on — nothing about you or your source code is ever sent anywhere.
 
@@ -111,7 +117,10 @@ npm run package    # runs vscode:prepublish (a production build) automatically, 
 
 ## Known limitations
 
-- **npm only.** No yarn or pnpm lockfile support, and no private-registry authentication beyond what your own `.npmrc` already provides to `npm` directly.
+- Yarn is not supported.
+- pnpm lockfile support currently targets lockfile format v9. Catalog/alias protocols and pnpm-specific audit enrichment are not yet supported; bulk advisory attribution still works over the normalized pnpm graph.
+- Workspace-linked packages are identified but their member manifests are not traversed as registry packages during compatibility analysis.
+- Private-registry authentication is left to the package manager; the extension never reads or persists auth keys.
 - The table is direct-dependency-level: transitive vulnerabilities are attributed to the direct dependency that pulls them in, not listed as their own rows.
 - No dependency-tree visualization or changelog viewer yet.
 - Desktop-only: the extension spawns local `npm`/Node processes and hasn't been tested in vscode.dev or other web-extension contexts.

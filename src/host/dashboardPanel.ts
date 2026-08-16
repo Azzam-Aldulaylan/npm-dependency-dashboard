@@ -2,8 +2,9 @@
  * The webview panel: lifecycle, CSP, and the message boundary.
  *
  * One panel at a time, following the create-or-reveal pattern from VS Code's
- * own webview sample. All decision-making lives in DashboardController; this
- * file only owns the parts that need a real `vscode.WebviewPanel`.
+ * own webview sample. Scan decisions live in DashboardController and upgrade
+ * lifecycle decisions live in UpgradeAssistantCoordinator; this file owns
+ * the parts that need a real `vscode.WebviewPanel` plus watcher/reload wiring.
  *
  * SECURITY — the four rules enforced here:
  *   1. A fresh cryptographically-random nonce per HTML load, and no
@@ -37,7 +38,6 @@ import { DEFAULT_TTL_MINUTES, effectiveTtlMinutes } from '../core/cache/freshnes
 import { deriveProjectCacheKey } from '../core/cache/keys.js';
 import { PersistentEtagStore } from '../core/cache/persistentEtagStore.js';
 import { PersistentProjectCacheStore } from '../core/cache/projectCacheStore.js';
-import { describeRejection } from '../core/upgrade/validate.js';
 import { isSameProjectReload, lockfileWatchDirs, projectCandidateLabel } from '../core/workspace/scan.js';
 import { NodeHttpClient } from '../core/registry/http.js';
 import { DashboardController } from './dashboardController.js';
@@ -47,7 +47,7 @@ import { reloadControllerFromDisk } from './fileChangeReload.js';
 import { pickProject } from './projectPicker.js';
 import type { DiscoveredProject, ResolvedProject } from './projectResolution.js';
 import { discoverProjects, loadProject } from './projectResolution.js';
-import { confirmUpgrade, UpgradeExecutionSession } from './upgradeRunner.js';
+import { UpgradeAssistantCoordinator } from './upgradeAssistantCoordinator.js';
 import type { ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
 import type { WebviewToHostMessage } from './webviewProtocol.js';
 import { isWebviewToHostMessage } from './webviewProtocol.js';
@@ -105,8 +105,8 @@ export class DashboardPanel {
   private controller: DashboardController | undefined;
   /** In-flight or completed project resolution, dropped on failure so a retry re-runs it. */
   private pending: Promise<DashboardController | undefined> | undefined;
-  /** One session per panel: tracks the panel-wide upgrade lock and task listeners. */
-  private readonly upgradeSession = new UpgradeExecutionSession();
+  /** Owns preflight, confirmation, transaction, verification, and completion. */
+  private readonly upgradeCoordinator: UpgradeAssistantCoordinator;
   /**
    * Shared across every controller this panel ever builds (initial open and
    * every reload) so ETag caching survives a reload — only the project
@@ -140,19 +140,21 @@ export class DashboardPanel {
   private manifestWatcher: vscode.FileSystemWatcher | undefined;
   /** One watcher per ancestor directory (see setupFileWatchers) — never a single glob built by interpolating directory names, which real directory content could break out of. */
   private lockfileWatchers: vscode.FileSystemWatcher[] = [];
+  private configurationWatchers: vscode.FileSystemWatcher[] = [];
   /** The absolute lockfile path the current persisted entry was built against — needed to purge every npm-workspace sibling sharing it once a reload has just replaced it. Null means the selected project has no lockfile. */
   private selectedLockfilePath: string | null = null;
   private invalidationTimer: NodeJS.Timeout | undefined;
   /** Owns coalescing, upgrade-busy deferral, and serialized generation-checked reloads for watcher events — see fileChangeCoordinator.ts. This panel only owns the actual watcher subscriptions and debounce timing. */
   private readonly fileChangeCoordinator = new FileChangeCoordinator({
-    isBusy: () => this.upgradeSession.isBusy(),
+    isBusy: () => this.upgradeCoordinator.isBusy(),
     currentGeneration: () => this.reloadGeneration,
     reload: (kinds, generation) => this.reloadAfterFileChange(kinds, generation),
   });
   private readonly reloadSource: ReloadSource<DiscoveredProject> = {
     loadProject: (candidate) => loadProject(candidate),
     toProjectInfo,
-    cacheKeyFor: (candidate, registry) => deriveProjectCacheKey(candidate.id, registry),
+    cacheKeyFor: (candidate, registry, packageManager) =>
+      deriveProjectCacheKey(candidate.id, registry, packageManager ?? 'npm'),
   };
 
   private constructor(panel: vscode.WebviewPanel, context: vscode.ExtensionContext) {
@@ -164,6 +166,16 @@ export class DashboardPanel {
     };
     this.etagStore = new PersistentEtagStore(context.globalState);
     this.projectCacheStore = new PersistentProjectCacheStore(context.workspaceState);
+    this.upgradeCoordinator = new UpgradeAssistantCoordinator({
+      sink: this.sink,
+      httpClient: this.httpClient,
+      etagStore: this.etagStore,
+      ensureController: () => this.ensureController(),
+      getSelectedProject: () => this.selectedProject,
+      isDisposed: () => this.disposed,
+      reloadFinalState: () => this.reloadAndScan(),
+      flushDeferredChanges: () => this.fileChangeCoordinator.flushDeferred(),
+    });
     this.backgroundTimer = new BackgroundRefreshTimer(realTimerScheduler, BACKGROUND_REFRESH_INTERVAL_MS, () => {
       this.onBackgroundTick();
     });
@@ -187,7 +199,10 @@ export class DashboardPanel {
         this.controller?.dispose();
         this.controller = undefined;
         this.pending = undefined;
-        this.upgradeSession.dispose();
+        // A mutating task is deliberately allowed to reach a stable boundary
+        // even after its panel closes. The transaction's async owner keeps the
+        // session alive until install/verification/rollback completes.
+        this.upgradeCoordinator.disposeWhenIdle();
         this.disposeWatchers();
         this.fileChangeCoordinator.dispose();
         this.backgroundTimer.dispose();
@@ -226,14 +241,14 @@ export class DashboardPanel {
 
   private async handle(message: WebviewToHostMessage): Promise<void> {
     if (message.type === 'upgrade') {
-      await this.handleUpgrade(message);
+      await this.upgradeCoordinator.handleUpgrade(message);
       return;
     }
     if (message.type === 'change-project') {
       // Same rule as refresh below: a project switch mid-upgrade would race
       // a scan (and a controller replacement) against a package.json/
       // lockfile an upgrade task is still writing to.
-      if (this.upgradeSession.isBusy()) return;
+      if (this.upgradeCoordinator.isBusy()) return;
       await this.changeProject();
       return;
     }
@@ -244,7 +259,7 @@ export class DashboardPanel {
       // Palette's "Dependency Dashboard: Refresh", which bypasses the
       // webview entirely and would otherwise race a scan against a
       // package.json/lockfile an upgrade task is still writing to.
-      if (this.upgradeSession.isBusy()) return;
+      if (this.upgradeCoordinator.isBusy()) return;
       // Manual refresh always re-reads the *currently selected* project's
       // package.json/lockfile from disk — see reloadAndScan — so externally
       // changed dependencies show up, without silently reverting to
@@ -255,98 +270,6 @@ export class DashboardPanel {
     const controller = await this.ensureController();
     if (controller === undefined) return; // ensureController already posted the failure.
     await controller.handleReady(this.sink);
-  }
-
-  /**
-   * The full Upgrade flow: host-side eligibility check against the
-   * controller's last scan, modal confirmation, then UpgradeExecutionSession
-   * (which re-checks Workspace Trust immediately before running the task).
-   * Every early-exit path posts an `upgrade-error` so the webview can clear
-   * its optimistic "running" state for this package — the existing table is
-   * never touched by any of them.
-   */
-  private async handleUpgrade(message: { package: string; target: string }): Promise<void> {
-    const controller = await this.ensureController();
-    if (controller === undefined) return;
-
-    const eligibility = controller.validateUpgradeRequest({
-      package: message.package,
-      target: message.target,
-    });
-    if (!eligibility.ok) {
-      this.sink.postMessage({
-        status: 'upgrade-error',
-        package: message.package,
-        error: describeRejection(eligibility.reason),
-      });
-      return;
-    }
-
-    // One upgrade at a time for the whole panel/project, not one per
-    // package — reserved for the whole confirm-then-run flow, not just the
-    // run, so a flood of forged requests (same package or a different one)
-    // can't each reach (and stack) their own confirmation dialog, and two
-    // npm installs can never race to write the same package.json/lockfile.
-    if (!this.upgradeSession.reserve(eligibility.packageName)) {
-      this.sink.postMessage({
-        status: 'upgrade-error',
-        package: eligibility.packageName,
-        error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
-      });
-      return;
-    }
-
-    try {
-      const ignoreScripts = vscode.workspace
-        .getConfiguration('dependencyDashboard')
-        .get<boolean>('upgrade.ignoreScripts', true);
-
-      const runParams = {
-        packageName: eligibility.packageName,
-        currentVersion: eligibility.currentVersion,
-        target: eligibility.target,
-        classification: eligibility.classification,
-        cwd: controller.root,
-        ignoreScripts,
-      };
-
-      const confirmed = await confirmUpgrade(runParams);
-      if (this.disposed) return; // the confirmation dialog can outlive the panel
-      if (!confirmed) {
-        this.sink.postMessage({
-          status: 'upgrade-error',
-          package: eligibility.packageName,
-          error: { code: 'CANCELLED', message: 'Upgrade cancelled.' },
-        });
-        return;
-      }
-
-      const outcome = await this.upgradeSession.run(runParams);
-      if (this.disposed) return; // dispose() already settled this run; nothing left to post into
-      if (outcome.ok) {
-        // Exit 0: re-resolve the *same selected* project (package.json/the
-        // lockfile the upgrade task itself just rewrote) and force a fresh
-        // scan against that, not the pre-upgrade snapshot — see
-        // reloadAndScan, which defaults to `this.selectedProject`.
-        await this.reloadAndScan();
-      } else {
-        this.sink.postMessage({
-          status: 'upgrade-error',
-          package: eligibility.packageName,
-          error: { code: outcome.code, message: outcome.message },
-        });
-      }
-    } finally {
-      this.upgradeSession.release(eligibility.packageName);
-      // A watcher event that fired *while* the lock was held was deferred,
-      // not dropped (see FileChangeCoordinator) — process it now that the
-      // upgrade is done, success or failure alike, since a failed task can
-      // still have partially rewritten package.json/the lockfile before it
-      // failed. On success this is already a no-op: `reloadAndScan` above
-      // discards anything pending/deferred at its very start, since its own
-      // full reload already supersedes it.
-      await this.fileChangeCoordinator.flushDeferred();
-    }
   }
 
   /**
@@ -388,7 +311,7 @@ export class DashboardPanel {
       // (it isn't itself lock-holding) — re-check right before applying,
       // the same "closest to the effect" placement the multi-candidate
       // branch below already uses for its own picker.
-      if (this.upgradeSession.isBusy()) return;
+      if (this.upgradeCoordinator.isBusy()) return;
       await this.reloadAndScan(candidates[0]);
       return;
     }
@@ -400,7 +323,7 @@ export class DashboardPanel {
     // itself lock-holding); re-check right before applying the pick, the
     // same "closest to the effect" placement the upgrade flow's own
     // Workspace Trust re-check uses.
-    if (this.upgradeSession.isBusy()) return;
+    if (this.upgradeCoordinator.isBusy()) return;
 
     await this.reloadAndScan(picked);
   }
@@ -646,6 +569,9 @@ export class DashboardPanel {
       manifestText: project.manifestText,
       lockfileText: project.lockfileText,
       lockfilePath: project.lockfilePath,
+      packageManager: project.packageManager,
+      importerId: project.importerId,
+      lockfileName: project.lockfileName,
       registry: project.registry,
       httpClient: this.httpClient,
       etagStore: this.etagStore,
@@ -660,7 +586,7 @@ export class DashboardPanel {
 
   /** S6 project identity (stable across scans) plus registry — see deriveProjectCacheKey for why both are needed to avoid cross-registry contamination within the same project. */
   private cacheKeyFor(candidate: DiscoveredProject, project: ResolvedProject): string {
-    return deriveProjectCacheKey(candidate.id, project.registry);
+    return deriveProjectCacheKey(candidate.id, project.registry, project.packageManager);
   }
 
   private readonly ttlMinutesProvider = (): number => {
@@ -671,7 +597,7 @@ export class DashboardPanel {
   };
 
   private onBackgroundTick(): void {
-    if (this.disposed || this.controller === undefined || this.upgradeSession.isBusy()) return;
+    if (this.disposed || this.controller === undefined || this.upgradeCoordinator.isBusy()) return;
     if (!this.controller.needsBackgroundRefresh()) return;
     void this.controller.refreshInBackground(this.sink);
   }
@@ -681,6 +607,8 @@ export class DashboardPanel {
     this.manifestWatcher = undefined;
     for (const watcher of this.lockfileWatchers) watcher.dispose();
     this.lockfileWatchers = [];
+    for (const watcher of this.configurationWatchers) watcher.dispose();
+    this.configurationWatchers = [];
     if (this.invalidationTimer !== undefined) {
       clearTimeout(this.invalidationTimer);
       this.invalidationTimer = undefined;
@@ -694,14 +622,14 @@ export class DashboardPanel {
    * One watcher per ancestor directory `lockfileWatchDirs` returns — every
    * directory `nearestLockfileDir` could ever resolve to for this project,
    * up to the workspace folder root — each watching only the fixed pattern
-   * `{package-lock.json,npm-shrinkwrap.json}`. Deliberately NOT a single
+   * `{package-lock.json,npm-shrinkwrap.json,pnpm-lock.yaml}`. Deliberately NOT a single
    * watcher built by interpolating every ancestor directory *name* into one
    * glob string: a directory name is real filesystem content the workspace
    * happens to contain, and a legal one containing `*`, `?`, `[`, `]`, `{`,
    * `}`, or `,` would be reinterpreted as glob syntax instead of matched
    * literally — see lockfileWatchDirs's own doc. Each directory here is used
    * only as `RelativePattern`'s literal URI base, exactly like the manifest
-   * watcher below already does; only the two hardcoded filenames, which this
+   * watcher below already does; only the hardcoded filenames, which this
    * codebase controls, ever appear in the glob pattern itself.
    */
   private setupFileWatchers(candidate: DiscoveredProject, manifestPath: string): void {
@@ -715,16 +643,33 @@ export class DashboardPanel {
     this.manifestWatcher.onDidCreate(onManifestEvent);
     this.manifestWatcher.onDidDelete(onManifestEvent);
 
+    const onConfigurationEvent = (): void => this.onWatchedFileEvent('configuration');
+    const npmrcWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(vscode.Uri.file(path.dirname(manifestPath)), '.npmrc')
+    );
+    npmrcWatcher.onDidChange(onConfigurationEvent);
+    npmrcWatcher.onDidCreate(onConfigurationEvent);
+    npmrcWatcher.onDidDelete(onConfigurationEvent);
+    this.configurationWatchers.push(npmrcWatcher);
+
     const onLockfileEvent = (): void => this.onWatchedFileEvent('lockfile');
     for (const dir of lockfileWatchDirs(candidate.dir)) {
       const dirUri = vscode.Uri.joinPath(candidate.folder.uri, dir);
       const watcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(dirUri, '{package-lock.json,npm-shrinkwrap.json}')
+        new vscode.RelativePattern(dirUri, '{package-lock.json,npm-shrinkwrap.json,pnpm-lock.yaml}')
       );
       watcher.onDidChange(onLockfileEvent);
       watcher.onDidCreate(onLockfileEvent);
       watcher.onDidDelete(onLockfileEvent);
       this.lockfileWatchers.push(watcher);
+
+      const workspaceConfigWatcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(dirUri, 'pnpm-workspace.yaml')
+      );
+      workspaceConfigWatcher.onDidChange(onConfigurationEvent);
+      workspaceConfigWatcher.onDidCreate(onConfigurationEvent);
+      workspaceConfigWatcher.onDidDelete(onConfigurationEvent);
+      this.configurationWatchers.push(workspaceConfigWatcher);
     }
   }
 

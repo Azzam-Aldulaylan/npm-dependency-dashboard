@@ -16,13 +16,15 @@ import { runNpmAudit, mapFixAvailableToDirectDependencies } from './audit/npmAud
 import { worstSeverity, resolveUpgradeTarget } from './advisories/aggregate.js';
 import { attributeAdvisories } from './advisories/attribution.js';
 import { buildBulkRequestBody, fetchBulkAdvisories } from './advisories/bulk.js';
-import { buildGraph, directNodes } from './lockfile/parse.js';
+import { directNodes } from './lockfile/parse.js';
+import { buildDependencyGraph } from './lockfile/build.js';
 import { parseManifest } from './manifest/parse.js';
 import type { HttpClient } from './registry/http.js';
 import { FetchError } from './registry/http.js';
 import type { EtagStore, VersionRequest } from './registry/versions.js';
 import { fetchAllVersions, fetchPackument } from './registry/versions.js';
 import type { Advisory, AttributedAdvisory, FixAvailable, PackageRow, VersionInfo } from './types.js';
+import type { PackageManagerKind } from './types.js';
 
 export interface BuildPackageRowsOptions {
   /** Absolute path to the directory holding package.json. */
@@ -30,6 +32,8 @@ export interface BuildPackageRowsOptions {
   manifestText: string;
   /** Raw lockfile text, or null when no lockfile exists. */
   lockfileText: string | null;
+  packageManager?: PackageManagerKind;
+  importerId?: string;
   /** Resolved from .npmrc — version data only. Advisories always go to npm. */
   registry: string;
   httpClient: HttpClient;
@@ -69,7 +73,13 @@ export async function buildPackageRows(
   throwIfAborted(signal);
 
   const manifest = parseManifest(manifestText);
-  const graph = buildGraph({ root, manifest, lockfileText });
+  const graph = buildDependencyGraph({
+    root,
+    manifest,
+    lockfileText,
+    packageManager: options.packageManager ?? 'npm',
+    ...(options.importerId === undefined ? {} : { importerId: options.importerId }),
+  });
   const roots = directNodes(graph);
 
   // --- versions -------------------------------------------------------

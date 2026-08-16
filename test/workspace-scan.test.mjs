@@ -19,6 +19,8 @@ import {
   dirOf,
   SHRINKWRAP,
   PACKAGE_LOCK,
+  PNPM_LOCK,
+  packageManagerForLockfile,
   discoverProjectCandidates,
   deriveProjectId,
   isSameProjectReload,
@@ -82,7 +84,17 @@ test('npm-shrinkwrap.json takes precedence over package-lock.json', () => {
   assert.equal(chooseLockfile([PACKAGE_LOCK, SHRINKWRAP]), SHRINKWRAP);
   assert.equal(chooseLockfile([SHRINKWRAP]), SHRINKWRAP);
   assert.equal(chooseLockfile([PACKAGE_LOCK]), PACKAGE_LOCK);
+  assert.equal(chooseLockfile([PNPM_LOCK]), PNPM_LOCK);
+  assert.equal(chooseLockfile([PACKAGE_LOCK, PNPM_LOCK]), PACKAGE_LOCK);
+  assert.equal(chooseLockfile([PACKAGE_LOCK, PNPM_LOCK], 'pnpm'), PNPM_LOCK);
   assert.equal(chooseLockfile(['README.md']), null);
+});
+
+test('lockfile names map to package-manager kinds', () => {
+  assert.equal(packageManagerForLockfile(PACKAGE_LOCK), 'npm');
+  assert.equal(packageManagerForLockfile(SHRINKWRAP), 'npm');
+  assert.equal(packageManagerForLockfile(PNPM_LOCK), 'pnpm');
+  assert.equal(packageManagerForLockfile('yarn.lock'), null);
 });
 
 test('a workspace member finds the root lockfile by walking up', () => {
@@ -97,19 +109,22 @@ test('a lockfile beside the manifest wins over one further up', () => {
 
 // ------------------------------------------------ S7: lockfile topology
 
-test('lockfileWatchPaths covers both filenames in every ancestor directory up to the workspace root', () => {
+test('lockfileWatchPaths covers all supported filenames in every ancestor directory up to the workspace root', () => {
   assert.deepEqual(lockfileWatchPaths('packages/app'), [
     'packages/app/package-lock.json',
     'packages/app/npm-shrinkwrap.json',
+    'packages/app/pnpm-lock.yaml',
     'packages/package-lock.json',
     'packages/npm-shrinkwrap.json',
+    'packages/pnpm-lock.yaml',
     'package-lock.json',
     'npm-shrinkwrap.json',
+    'pnpm-lock.yaml',
   ]);
 });
 
-test('lockfileWatchPaths at the workspace root itself is just the two root-level filenames', () => {
-  assert.deepEqual(lockfileWatchPaths(''), ['package-lock.json', 'npm-shrinkwrap.json']);
+test('lockfileWatchPaths at the workspace root itself is the supported root-level filenames', () => {
+  assert.deepEqual(lockfileWatchPaths(''), ['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml']);
 });
 
 test('lockfileWatchPaths exactly matches every directory nearestLockfileDir would check — a lockfile appearing at any watched path is one nearestLockfileDir would find', () => {

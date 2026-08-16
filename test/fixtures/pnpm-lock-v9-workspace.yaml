@@ -1,0 +1,23 @@
+lockfileVersion: '9.0'
+
+importers:
+  .: {}
+  packages/app:
+    dependencies:
+      '@ws/lib':
+        specifier: workspace:*
+        version: link:../lib
+      lodash:
+        specifier: ^4.17.0
+        version: 4.17.21
+  packages/lib:
+    dependencies:
+      lodash:
+        specifier: ^4.17.0
+        version: 4.17.21
+
+packages:
+  lodash@4.17.21: {}
+
+snapshots:
+  lodash@4.17.21: {}

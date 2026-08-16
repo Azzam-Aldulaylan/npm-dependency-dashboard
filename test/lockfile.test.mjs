@@ -15,6 +15,7 @@ import {
   buildGraph,
   nameFromPackageKey,
   resolveFrom,
+  resolveDependency,
   directNodes,
   UnsupportedLockfileError,
 } from '../out/core/lockfile/parse.js';
@@ -110,11 +111,45 @@ test('v3: flat packages map with a nested duplicate', () => {
   });
 
   assert.equal(graph.lockfileVersion, 3);
+  assert.equal(graph.packageManager, 'npm');
   assert.equal(graph.nodes.get('node_modules/js-tokens').version, '4.0.0');
   assert.equal(
     graph.nodes.get('node_modules/legacy-thing/node_modules/js-tokens').version,
     '3.0.2'
   );
+});
+
+test('npm nodes expose normalized resolved runtime, optional, and peer edges', () => {
+  const manifest = parseManifest(JSON.stringify({ dependencies: { consumer: '^1.0.0', react: '^19.0.0' } }));
+  const graph = buildGraph({
+    root: '/app',
+    manifest,
+    lockfileText: JSON.stringify({
+      lockfileVersion: 3,
+      packages: {
+        '': {},
+        'node_modules/consumer': {
+          version: '1.0.0',
+          dependencies: { helper: '^2.0.0' },
+          optionalDependencies: { optional: '^3.0.0' },
+          peerDependencies: { react: '^18.0.0 || ^19.0.0', missing: '^1.0.0' },
+          peerDependenciesMeta: { missing: { optional: true } },
+        },
+        'node_modules/helper': { version: '2.1.0' },
+        'node_modules/optional': { version: '3.1.0' },
+        'node_modules/react': { version: '19.0.0' },
+      },
+    }),
+  });
+  const consumer = graph.nodes.get('node_modules/consumer');
+  assert.deepEqual(consumer.edges.map(({ name, kind, optional, targetNodeId }) => ({ name, kind, optional, targetNodeId })), [
+    { name: 'helper', kind: 'runtime', optional: false, targetNodeId: 'node_modules/helper' },
+    { name: 'optional', kind: 'optional', optional: true, targetNodeId: 'node_modules/optional' },
+    { name: 'react', kind: 'peer', optional: false, targetNodeId: 'node_modules/react' },
+    { name: 'missing', kind: 'peer', optional: true, targetNodeId: null },
+  ]);
+  assert.equal(resolveDependency(graph, consumer.path, 'helper').version, '2.1.0');
+  assert.equal(resolveDependency(graph, consumer.path, 'missing', ['peer']), null);
 });
 
 test('v3: direct dependencies are flagged and dev is carried through', () => {

@@ -18,7 +18,7 @@
 import semver from 'semver';
 
 import type { AttributedAdvisory, Advisory, DependencyGraph, DependencyNode } from '../types.js';
-import { directNodes, resolveFrom } from '../lockfile/parse.js';
+import { directNodes, resolveDependency } from '../lockfile/parse.js';
 
 /** Advisories keyed by package name, as returned by the bulk endpoint. */
 export type AdvisoriesByName = ReadonlyMap<string, readonly Advisory[]>;
@@ -68,7 +68,7 @@ function attributeFromRoot(
     }
 
     for (const depName of node.deps) {
-      const depNode = resolveFrom(graph, node.path, depName);
+      const depNode = resolveDependency(graph, node.path, depName, ['runtime', 'optional']);
       if (depNode === null || visited.has(depNode.path)) continue;
       visited.add(depNode.path);
       queue.push({ node: depNode, chain: [...chain, depNode.name] });

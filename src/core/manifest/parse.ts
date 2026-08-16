@@ -11,7 +11,13 @@
  * copied key-by-key into fresh objects. Nothing here deep-merges parsed input.
  */
 
-import type { UnresolvableReason } from '../types.js';
+import type { PackageManagerKind, UnresolvableReason } from '../types.js';
+
+export interface PackageManagerDeclaration {
+  name: PackageManagerKind;
+  /** The unmodified version portion after `npm@`/`pnpm@`, or null when absent. */
+  version: string | null;
+}
 
 export interface DeclaredDependency {
   name: string;
@@ -30,7 +36,18 @@ export interface Manifest {
   version: string | null;
   /** Declared workspace globs, when this manifest is an npm-workspaces root. */
   workspaces: string[];
+  /** A recognized package.json `packageManager` declaration. */
+  packageManager: PackageManagerDeclaration | null;
   dependencies: DeclaredDependency[];
+}
+
+function readPackageManager(value: unknown): PackageManagerDeclaration | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(npm|pnpm)(?:@(.+))?$/.exec(value.trim());
+  if (match === null) return null;
+  const name = match[1];
+  if (name !== 'npm' && name !== 'pnpm') return null;
+  return { name, version: match[2] ?? null };
 }
 
 /** Shorthand GitHub form, e.g. "user/repo" or "user/repo#semver:^1.0.0". */
@@ -150,7 +167,7 @@ function readWorkspaces(value: unknown): string[] {
 export function parseManifest(contents: string): Manifest {
   const json: unknown = JSON.parse(contents);
   if (typeof json !== 'object' || json === null) {
-    return { name: null, version: null, workspaces: [], dependencies: [] };
+    return { name: null, version: null, workspaces: [], packageManager: null, dependencies: [] };
   }
 
   const obj = json as Record<string, unknown>;
@@ -165,6 +182,7 @@ export function parseManifest(contents: string): Manifest {
     name: typeof obj['name'] === 'string' ? obj['name'] : null,
     version: typeof obj['version'] === 'string' ? obj['version'] : null,
     workspaces: readWorkspaces(obj['workspaces']),
+    packageManager: readPackageManager(obj['packageManager']),
     dependencies: [...deps.values()],
   };
 }

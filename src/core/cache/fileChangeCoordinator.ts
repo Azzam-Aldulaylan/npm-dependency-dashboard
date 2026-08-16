@@ -30,7 +30,7 @@
  *      until nothing is left — no second external event required.
  */
 
-export type FileChangeKind = 'manifest' | 'lockfile';
+export type FileChangeKind = 'manifest' | 'lockfile' | 'configuration';
 
 function mergeKinds(
   existing: Set<FileChangeKind> | undefined,

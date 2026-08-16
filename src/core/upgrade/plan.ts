@@ -10,6 +10,7 @@
  */
 
 import semver from 'semver';
+import type { PackageManagerKind } from '../types.js';
 
 /** Where a dependency is declared in package.json — decides the npm save flag. */
 export type DependencyClassification = 'prod' | 'dev' | 'optional';
@@ -25,6 +26,22 @@ export interface UpgradeArgsOptions {
   target: string;
   classification: DependencyClassification;
   ignoreScripts: boolean;
+}
+
+export interface CoordinatedUpgradeArgsOptions {
+  changes: readonly Omit<UpgradeArgsOptions, 'ignoreScripts'>[];
+  ignoreScripts: boolean;
+}
+
+export interface ManifestReconciliationArgsOptions {
+  ignoreScripts: boolean;
+}
+
+export function requiresManifestReconciliation(
+  changes: readonly Pick<UpgradeArgsOptions, 'classification'>[]
+): boolean {
+  const first = changes[0]?.classification;
+  return first !== undefined && changes.some((change) => change.classification !== first);
 }
 
 /**
@@ -43,6 +60,65 @@ export function buildNpmInstallArgs(options: UpgradeArgsOptions): string[] {
   const { packageName, target, classification, ignoreScripts } = options;
   const args = ['install', `${packageName}@${target}`, SAVE_FLAG[classification]];
   if (ignoreScripts) args.push('--ignore-scripts');
+  return args;
+}
+
+/** pnpm's equivalent structured argv. The caller still owns host-side validation. */
+export function buildPnpmAddArgs(options: UpgradeArgsOptions): string[] {
+  const { packageName, target, classification, ignoreScripts } = options;
+  const args = ['add', `${packageName}@${target}`, SAVE_FLAG[classification]];
+  if (ignoreScripts) args.push('--ignore-scripts');
+  return args;
+}
+
+/** Manager-neutral dispatch for host orchestration; always returns literal argv. */
+export function buildInstallArgs(
+  packageManager: PackageManagerKind,
+  options: UpgradeArgsOptions
+): string[] {
+  return packageManager === 'pnpm' ? buildPnpmAddArgs(options) : buildNpmInstallArgs(options);
+}
+
+/** Build one atomic package-manager invocation for a same-classification plan. */
+export function buildCoordinatedInstallArgs(
+  packageManager: PackageManagerKind,
+  options: CoordinatedUpgradeArgsOptions
+): string[] {
+  if (options.changes.length === 0) throw new Error('A coordinated upgrade needs at least one change.');
+  const classification = options.changes[0]?.classification;
+  if (classification === undefined || requiresManifestReconciliation(options.changes)) {
+    throw new Error('Coordinated upgrades across dependency classifications cannot be installed atomically.');
+  }
+  const command = packageManager === 'pnpm' ? 'add' : 'install';
+  const args = [
+    command,
+    ...options.changes.map((change) => `${change.packageName}@${change.target}`),
+    SAVE_FLAG[classification],
+  ];
+  if (options.ignoreScripts) args.push('--ignore-scripts');
+  return args;
+}
+
+/**
+ * Reconcile a manifest that the trusted host has already staged.
+ *
+ * Package names, versions, and save classifications deliberately do not
+ * appear in this argv: they are represented by exact host-generated edits to
+ * package.json before this command is run. A bare install lets npm/pnpm update
+ * the active lockfile and installed tree from that single source of truth,
+ * preserving mixed dependencies/devDependencies/optionalDependencies in one
+ * package-manager transaction.
+ */
+export function buildManifestReconciliationArgs(
+  packageManager: PackageManagerKind,
+  options: ManifestReconciliationArgsOptions
+): string[] {
+  const args = ['install'];
+  // pnpm defaults frozen-lockfile on CI. This command intentionally follows a
+  // host-staged manifest change, so the lockfile must be allowed to reconcile
+  // even when the extension host itself is running in a CI-like environment.
+  if (packageManager === 'pnpm') args.push('--no-frozen-lockfile');
+  if (options.ignoreScripts) args.push('--ignore-scripts');
   return args;
 }
 

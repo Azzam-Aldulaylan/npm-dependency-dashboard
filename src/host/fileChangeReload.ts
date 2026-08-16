@@ -22,12 +22,15 @@ export interface ReloadedProject {
   lockfileText: string | null;
   lockfilePath: string | null;
   registry: string;
+  packageManager?: 'npm' | 'pnpm';
+  importerId?: string;
+  lockfileName?: 'package-lock.json' | 'npm-shrinkwrap.json' | 'pnpm-lock.yaml' | null;
 }
 
 export interface ReloadSource<TCandidate> {
   loadProject(candidate: TCandidate): Promise<ReloadedProject>;
   toProjectInfo(candidate: TCandidate): SelectedProjectInfo;
-  cacheKeyFor(candidate: TCandidate, registry: string): string;
+  cacheKeyFor(candidate: TCandidate, registry: string, packageManager?: 'npm' | 'pnpm'): string;
 }
 
 export interface ReloadControllerFromDiskParams<TCandidate> {
@@ -74,7 +77,7 @@ export async function reloadControllerFromDisk<TCandidate>(
   }
 
   const projectInfo = params.source.toProjectInfo(params.candidate);
-  const cacheKey = params.source.cacheKeyFor(params.candidate, project.registry);
+  const cacheKey = params.source.cacheKeyFor(params.candidate, project.registry, project.packageManager);
 
   params.controller.invalidateCache();
   params.controller.updateProjectSnapshot(
@@ -84,6 +87,9 @@ export async function reloadControllerFromDisk<TCandidate>(
       lockfileText: project.lockfileText,
       lockfilePath: project.lockfilePath,
       registry: project.registry,
+      packageManager: project.packageManager ?? 'npm',
+      importerId: project.importerId ?? '.',
+      lockfileName: project.lockfileName ?? null,
       projectInfo,
       canChangeProject: params.canChangeProject,
       cacheKey,

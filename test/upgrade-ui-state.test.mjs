@@ -31,6 +31,9 @@ test('a real terminal outcome clears the active state', () => {
     'NO_SCAN_RESULT',
     'NOT_DECLARED',
     'UNSAFE_IDENTIFIER',
+    'ROLLBACK_CONFLICT',
+    'ROLLBACK_FAILED',
+    'MANIFEST_STAGE_FAILED',
   ]) {
     assert.equal(upgradeErrorClearsActiveState(code), true, `${code} should clear active state`);
   }
@@ -48,7 +51,15 @@ test('CANCELLED and UPGRADE_IN_PROGRESS are quiet — no banner', () => {
 });
 
 test('every other code is user-visible', () => {
-  for (const code of ['TASK_FAILED', 'NPM_NOT_FOUND', 'UNTRUSTED_WORKSPACE', 'STALE_TARGET']) {
+  for (const code of [
+    'TASK_FAILED',
+    'NPM_NOT_FOUND',
+    'UNTRUSTED_WORKSPACE',
+    'STALE_TARGET',
+    'ROLLBACK_CONFLICT',
+    'ROLLBACK_FAILED',
+    'MANIFEST_STAGE_FAILED',
+  ]) {
     assert.equal(upgradeErrorIsUserVisible(code), true, `${code} should be visible`);
   }
 });

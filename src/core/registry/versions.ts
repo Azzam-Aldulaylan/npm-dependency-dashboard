@@ -23,6 +23,7 @@ import semver from 'semver';
 
 import type { VersionInfo } from '../types.js';
 import { resolveWanted, resolveLatest, isPrerelease } from '../version/resolve.js';
+import { isSafeNpmPackageName, isSafeSemverVersion } from '../upgrade/plan.js';
 import type { HttpClient } from './http.js';
 import { FetchError, errorForStatus } from './http.js';
 import { runPool, DEFAULT_CONCURRENCY } from './pool.js';
@@ -139,6 +140,93 @@ export async function fetchLatest(
 export interface PackumentDoc {
   versions: string[];
   distTags: Record<string, string>;
+}
+
+/**
+ * The small, resolver-relevant subset of one published package manifest.
+ *
+ * This is deliberately separate from `VersionInfo`: the dashboard's normal
+ * version scan only needs a version number, while compatibility preflight
+ * needs dependency relationships for exactly the version being considered.
+ * Fetching this document is therefore an explicit, lazy operation and is
+ * never part of `fetchAllVersions`.
+ */
+export interface PackageVersionMetadata {
+  name: string;
+  version: string;
+  dependencies: Record<string, string>;
+  optionalDependencies: Record<string, string>;
+  peerDependencies: Record<string, string>;
+  peerDependenciesMeta: Record<string, { optional: boolean }>;
+}
+
+function readStringMap(value: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (typeof value !== 'object' || value === null) return out;
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+    if (typeof raw === 'string') out[key] = raw;
+  }
+  return out;
+}
+
+function readPeerMeta(value: unknown): Record<string, { optional: boolean }> {
+  const out: Record<string, { optional: boolean }> = {};
+  if (typeof value !== 'object' || value === null) return out;
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+    if (typeof raw !== 'object' || raw === null) continue;
+    const optional = (raw as Record<string, unknown>)['optional'];
+    if (typeof optional === 'boolean') out[key] = { optional };
+  }
+  return out;
+}
+
+/**
+ * Fetch resolver metadata for one exact version.
+ *
+ * The exact-version endpoint is intentionally used instead of downloading a
+ * full packument merely to inspect one proposed release. Both the package name
+ * and version remain literal URL path components; callers are still expected
+ * to validate them as host-owned npm identifiers before calling this function.
+ */
+export async function fetchPackageVersionMetadata(
+  client: HttpClient,
+  store: EtagStore,
+  registry: string,
+  name: string,
+  version: string,
+  signal?: AbortSignal
+): Promise<PackageVersionMetadata> {
+  // Defense in depth: unlike the dashboard's broad version lookup, this
+  // endpoint is intended only for an exact, host-owned upgrade candidate.
+  // Refuse anything that could alter URL path structure before touching the
+  // network, even if a future caller forgets the preflight boundary's check.
+  if (!isSafeNpmPackageName(name) || !isSafeSemverVersion(version)) {
+    throw new FetchError('BAD_URL', 'invalid package name or exact version for metadata lookup');
+  }
+  const url = joinUrl(registry, `${encodePackageName(name)}/${encodeURIComponent(version)}`);
+  const { body } = await getConditional(client, store, url, 'application/json', signal);
+  const json = parseJson(body, url);
+
+  const publishedVersion = json['version'];
+  if (typeof publishedVersion !== 'string' || publishedVersion !== version) {
+    throw new FetchError('PARSE_ERROR', `registry metadata version mismatch from ${url}`);
+  }
+
+  const publishedName = json['name'];
+  if (publishedName !== name) {
+    throw new FetchError('PARSE_ERROR', `registry metadata package mismatch from ${url}`);
+  }
+
+  return {
+    name,
+    version,
+    dependencies: readStringMap(json['dependencies']),
+    optionalDependencies: readStringMap(json['optionalDependencies']),
+    peerDependencies: readStringMap(json['peerDependencies']),
+    peerDependenciesMeta: readPeerMeta(json['peerDependenciesMeta']),
+  };
 }
 
 /** GET /<pkg> with the abbreviated Accept header — the escalation path. */

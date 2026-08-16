@@ -14,6 +14,9 @@ Initial feature set, not yet published:
   isolated package-manager resolver verification, bounded coordinated upgrade
   plans, transactional snapshots, optional explicit verification scripts, and
   compare-and-swap rollback.
+- Coordinated plans can span production, development, and optional dependency
+  blocks through host-generated manifest staging and one npm/pnpm reconciliation
+  install.
 - pnpm lockfile v9, workspace importer, advisory graph, watching, preflight,
   and structured upgrade execution support alongside the existing npm flow.
 

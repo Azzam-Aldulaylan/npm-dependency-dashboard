@@ -5,7 +5,8 @@
  * filesystem, install, verification, and user-decision adapters, while this
  * state machine owns the safety-sensitive ordering:
  *
- *   snapshot -> install -> verify -> keep or compare-and-swap rollback
+ *   snapshot -> optional manifest stage -> install -> verify -> keep or
+ *   compare-and-swap rollback
  *
  * Paths are an allowlist resolved by the trusted host. Nothing in this module
  * accepts a path, command, script, package, or argument from the webview.
@@ -22,9 +23,11 @@ export interface UpgradeTransactionFileAdapter {
   read(path: string): Promise<FileState>;
   /**
    * Atomically, or with the strongest equivalent protection the host can
-   * provide, replace `expected` with `replacement`. A mismatch must return
-   * `conflict` without modifying the file. This prevents rollback from
-   * overwriting an edit made after the install completed.
+   * provide, replace `expected` with `replacement`. The transaction assumes
+   * `restored` means the replacement is committed before this promise settles.
+   * A mismatch must return `conflict` without modifying the file. This is the
+   * safety boundary used both for pre-install manifest staging and rollback;
+   * adapters must never report `restored` for an observed mismatch.
    */
   compareAndSwap(
     path: string,
@@ -85,12 +88,31 @@ export type SnapshotResult =
   | { status: 'succeeded'; paths: readonly string[] }
   | { status: 'failed'; path: string; message: string };
 
+export type ManifestStageFailureCode =
+  | 'PATH_NOT_ALLOWLISTED'
+  | 'MANIFEST_NOT_FOUND'
+  | 'CONFLICT'
+  | 'WRITE_FAILED';
+
+export type ManifestStageResult =
+  | { status: 'not-run' }
+  | { status: 'succeeded'; path: string }
+  | {
+      status: 'failed';
+      path: string;
+      code: ManifestStageFailureCode;
+      message: string;
+    };
+
 export type InstallResult =
   | { status: 'not-run' }
   | InstallExecutionResult;
 
 export type VerificationResult =
-  | { status: 'not-run'; reason: 'not-configured' | 'install-failed' | 'cancelled' }
+  | {
+      status: 'not-run';
+      reason: 'not-configured' | 'manifest-stage-failed' | 'install-failed' | 'cancelled';
+    }
   | VerificationExecutionResult;
 
 export interface RollbackFileResult {
@@ -114,12 +136,14 @@ export type TransactionReason =
   | 'verification-failed'
   | 'install-failed'
   | 'cancelled'
-  | 'snapshot-failed';
+  | 'snapshot-failed'
+  | 'manifest-stage-failed';
 
 export interface UpgradeTransactionResult {
   completion: TransactionCompletion;
   reason: TransactionReason;
   snapshot: SnapshotResult;
+  manifestStage: ManifestStageResult;
   install: InstallResult;
   verification: VerificationResult;
   rollback: RollbackResult;
@@ -131,6 +155,15 @@ export interface UpgradeTransactionOptions {
   /** Canonical, host-resolved files this transaction is allowed to restore. */
   allowlistedPaths: readonly string[];
   files: UpgradeTransactionFileAdapter;
+  /**
+   * Exact host-generated package.json bytes to stage before reconciliation.
+   * The path must be an existing member of `allowlistedPaths`. The state
+   * machine first requires the snapshot to match `expectedContents`, then
+   * performs the write through compare-and-swap. This binds staged bytes to
+   * the exact manifest source from which the host generated them; callers
+   * never receive a general-purpose mutation callback.
+   */
+  manifestStage?: { path: string; expectedContents: Uint8Array; contents: Uint8Array };
   install: UpgradeInstallExecutor;
   verifier?: UpgradeVerifier;
   /** Defaults to rollback when omitted. */
@@ -143,6 +176,17 @@ interface SnapshotEntry {
   before: FileState;
 }
 
+interface SuccessfulManifestStage {
+  ok: true;
+  result: Extract<ManifestStageResult, { status: 'succeeded' }>;
+  expected: ExpectedEntry[];
+}
+
+interface FailedManifestStage {
+  ok: false;
+  result: Extract<ManifestStageResult, { status: 'failed' }>;
+}
+
 type ExpectedEntry =
   | { snapshot: SnapshotEntry; expected: FileState }
   | { snapshot: SnapshotEntry; captureError: string };
@@ -150,6 +194,16 @@ type ExpectedEntry =
 function cloneState(state: FileState): FileState {
   if (!state.exists) return { exists: false };
   return { exists: true, contents: Uint8Array.from(state.contents) };
+}
+
+function statesEqual(left: FileState, right: FileState): boolean {
+  if (left.exists !== right.exists) return false;
+  if (!left.exists || !right.exists) return true;
+  if (left.contents.byteLength !== right.contents.byteLength) return false;
+  for (let index = 0; index < left.contents.byteLength; index += 1) {
+    if (left.contents[index] !== right.contents[index]) return false;
+  }
+  return true;
 }
 
 function errorMessage(cause: unknown): string {
@@ -187,6 +241,94 @@ async function takeSnapshot(
     }
   }
   return { ok: true, entries };
+}
+
+async function stageManifest(
+  stage: NonNullable<UpgradeTransactionOptions['manifestStage']>,
+  entries: readonly SnapshotEntry[],
+  files: UpgradeTransactionFileAdapter
+): Promise<SuccessfulManifestStage | FailedManifestStage> {
+  const manifest = entries.find((entry) => entry.path === stage.path);
+  if (manifest === undefined) {
+    return {
+      ok: false,
+      result: {
+        status: 'failed',
+        path: stage.path,
+        code: 'PATH_NOT_ALLOWLISTED',
+        message: 'The staged manifest is not owned by this upgrade transaction.',
+      },
+    };
+  }
+  if (!manifest.before.exists) {
+    return {
+      ok: false,
+      result: {
+        status: 'failed',
+        path: stage.path,
+        code: 'MANIFEST_NOT_FOUND',
+        message: 'The staged package manifest no longer exists.',
+      },
+    };
+  }
+
+  const expectedSource: FileState = {
+    exists: true,
+    contents: Uint8Array.from(stage.expectedContents),
+  };
+  if (!statesEqual(manifest.before, expectedSource)) {
+    return {
+      ok: false,
+      result: {
+        status: 'failed',
+        path: stage.path,
+        code: 'CONFLICT',
+        message: 'The package manifest changed after the staged upgrade was prepared.',
+      },
+    };
+  }
+
+  const staged: FileState = {
+    exists: true,
+    contents: Uint8Array.from(stage.contents),
+  };
+  try {
+    const result = await files.compareAndSwap(
+      manifest.path,
+      cloneState(expectedSource),
+      cloneState(staged)
+    );
+    if (result === 'conflict') {
+      return {
+        ok: false,
+        result: {
+          status: 'failed',
+          path: stage.path,
+          code: 'CONFLICT',
+          message: 'The package manifest changed after the upgrade snapshot was captured.',
+        },
+      };
+    }
+  } catch (cause) {
+    return {
+      ok: false,
+      result: {
+        status: 'failed',
+        path: stage.path,
+        code: 'WRITE_FAILED',
+        message: errorMessage(cause),
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    result: { status: 'succeeded', path: stage.path },
+    // Before install, the staged manifest is the only file this transaction
+    // owns a mutation to. Do not touch or report conflicts for unrelated
+    // allowlisted files that a developer may edit during this boundary.
+    expected: [{ snapshot: manifest, expected: cloneState(staged) }],
+  };
 }
 
 async function captureExpectedStates(
@@ -318,7 +460,8 @@ export async function runUpgradeTransaction(
   options: UpgradeTransactionOptions
 ): Promise<UpgradeTransactionResult> {
   const paths = stableAllowlist(options.allowlistedPaths);
-  const notRun: Pick<UpgradeTransactionResult, 'install' | 'verification' | 'rollback' | 'retentionDecision'> = {
+  const notRun: Pick<UpgradeTransactionResult, 'manifestStage' | 'install' | 'verification' | 'rollback' | 'retentionDecision'> = {
+    manifestStage: { status: 'not-run' },
     install: { status: 'not-run' },
     verification: { status: 'not-run', reason: 'cancelled' },
     rollback: { status: 'not-needed' },
@@ -356,6 +499,55 @@ export async function runUpgradeTransaction(
     };
   }
 
+  let manifestStage: ManifestStageResult = { status: 'not-run' };
+  let expectedAfterStage: ExpectedEntry[] | undefined;
+  if (options.manifestStage !== undefined) {
+    const staged = await stageManifest(options.manifestStage, snapshot.entries, options.files);
+    manifestStage = staged.result;
+    if (!staged.ok) {
+      return {
+        completion: 'not-started',
+        reason: 'manifest-stage-failed',
+        snapshot: snapshotResult,
+        manifestStage,
+        install: { status: 'not-run' },
+        verification: { status: 'not-run', reason: 'manifest-stage-failed' },
+        rollback: { status: 'not-needed' },
+        retentionDecision: 'not-needed',
+      };
+    }
+    expectedAfterStage = staged.expected;
+  }
+
+  // Staging is itself a mutation boundary. If cancellation lands after a
+  // successful stage, restore only through CAS against the exact staged bytes;
+  // a concurrent user edit is therefore preserved as a rollback conflict.
+  if (cancelled(options.signal)) {
+    if (expectedAfterStage === undefined) {
+      return {
+        completion: 'not-started',
+        reason: 'cancelled',
+        snapshot: snapshotResult,
+        manifestStage,
+        install: { status: 'not-run' },
+        verification: { status: 'not-run', reason: 'cancelled' },
+        rollback: { status: 'not-needed' },
+        retentionDecision: 'not-needed',
+      };
+    }
+    const rolledBack = await rollback(expectedAfterStage, options.files);
+    return {
+      completion: completionAfterRollback(rolledBack),
+      reason: 'cancelled',
+      snapshot: snapshotResult,
+      manifestStage,
+      install: { status: 'not-run' },
+      verification: { status: 'not-run', reason: 'cancelled' },
+      rollback: rolledBack,
+      retentionDecision: 'rollback',
+    };
+  }
+
   // Once install starts it is always awaited. Cancellation is observed only
   // after it reaches this stable boundary, then handled by rollback.
   const install = await executeInstall(options.install);
@@ -367,6 +559,7 @@ export async function runUpgradeTransaction(
       completion: completionAfterRollback(rolledBack),
       reason: install.status === 'cancelled' || cancelled(options.signal) ? 'cancelled' : 'install-failed',
       snapshot: snapshotResult,
+      manifestStage,
       install,
       verification: {
         status: 'not-run',
@@ -383,6 +576,7 @@ export async function runUpgradeTransaction(
       completion: completionAfterRollback(rolledBack),
       reason: 'cancelled',
       snapshot: snapshotResult,
+      manifestStage,
       install,
       verification: { status: 'not-run', reason: 'cancelled' },
       rollback: rolledBack,
@@ -395,6 +589,7 @@ export async function runUpgradeTransaction(
       completion: 'kept',
       reason: 'verification-not-configured',
       snapshot: snapshotResult,
+      manifestStage,
       install,
       verification: { status: 'not-run', reason: 'not-configured' },
       rollback: { status: 'not-needed' },
@@ -412,6 +607,7 @@ export async function runUpgradeTransaction(
       completion: completionAfterRollback(rolledBack),
       reason: 'cancelled',
       snapshot: snapshotResult,
+      manifestStage,
       install,
       verification,
       rollback: rolledBack,
@@ -424,6 +620,7 @@ export async function runUpgradeTransaction(
       completion: 'kept',
       reason: 'verified',
       snapshot: snapshotResult,
+      manifestStage,
       install,
       verification,
       rollback: { status: 'not-needed' },
@@ -441,6 +638,7 @@ export async function runUpgradeTransaction(
       completion: 'kept',
       reason: 'verification-failed',
       snapshot: snapshotResult,
+      manifestStage,
       install,
       verification,
       rollback: { status: 'not-needed' },
@@ -453,6 +651,7 @@ export async function runUpgradeTransaction(
     completion: completionAfterRollback(rolledBack),
     reason: cancelled(options.signal) ? 'cancelled' : 'verification-failed',
     snapshot: snapshotResult,
+    manifestStage,
     install,
     verification,
     rollback: rolledBack,

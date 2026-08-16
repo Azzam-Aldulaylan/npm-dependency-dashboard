@@ -13,6 +13,8 @@ import {
   buildPnpmAddArgs,
   buildInstallArgs,
   buildCoordinatedInstallArgs,
+  buildManifestReconciliationArgs,
+  requiresManifestReconciliation,
   isMajorUpgrade,
   isSafeNpmPackageName,
   isSafeSemverVersion,
@@ -89,6 +91,45 @@ test('coordinated plans refuse mixed manifest classifications instead of silentl
     }),
     /cannot be installed atomically/
   );
+});
+
+test('mixed classifications select manifest reconciliation while same-class plans retain direct install', () => {
+  assert.equal(requiresManifestReconciliation([
+    { classification: 'prod' },
+    { classification: 'dev' },
+  ]), true);
+  assert.equal(requiresManifestReconciliation([
+    { classification: 'optional' },
+    { classification: 'optional' },
+  ]), false);
+  assert.equal(requiresManifestReconciliation([{ classification: 'prod' }]), false);
+});
+
+test('manifest reconciliation uses a bare structured install for npm and pnpm', () => {
+  assert.deepEqual(buildManifestReconciliationArgs('npm', { ignoreScripts: false }), ['install']);
+  assert.deepEqual(buildManifestReconciliationArgs('pnpm', { ignoreScripts: false }), [
+    'install', '--no-frozen-lockfile',
+  ]);
+  assert.deepEqual(buildManifestReconciliationArgs('npm', { ignoreScripts: true }), [
+    'install', '--ignore-scripts',
+  ]);
+  assert.deepEqual(buildManifestReconciliationArgs('pnpm', { ignoreScripts: true }), [
+    'install', '--no-frozen-lockfile', '--ignore-scripts',
+  ]);
+});
+
+test('manifest reconciliation argv never contains package, version, classification, or save arguments', () => {
+  for (const packageManager of ['npm', 'pnpm']) {
+    const args = buildManifestReconciliationArgs(packageManager, { ignoreScripts: true });
+    assert.equal(args.some((arg) => arg.includes('@')), false);
+    assert.equal(args.some((arg) => arg.startsWith('--save')), false);
+    assert.deepEqual(
+      args,
+      packageManager === 'pnpm'
+        ? ['install', '--no-frozen-lockfile', '--ignore-scripts']
+        : ['install', '--ignore-scripts']
+    );
+  }
 });
 
 // ------------------------------------------------------------ ignoreScripts

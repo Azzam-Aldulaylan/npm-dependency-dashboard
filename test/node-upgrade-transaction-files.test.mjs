@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -43,6 +43,46 @@ test('Node adapter reads exact bytes and atomically replaces an expected existin
   await writeFile(manifest, 'installed');
   assert.equal(await adapter.compareAndSwap(manifest, present('installed'), snapshot), 'restored');
   assert.deepEqual(await readFile(manifest), before);
+});
+
+test('Node adapter preserves existing file permission bits when CAS replaces its inode', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Windows does not expose POSIX permission modes');
+    return;
+  }
+
+  const root = await workspaceFixture(t);
+  const manifest = path.join(root, 'package.json');
+  await writeFile(manifest, 'before');
+  await chmod(manifest, 0o640);
+  const adapter = await createNodeUpgradeTransactionFileAdapter({
+    workspaceRoot: root,
+    allowlistedPaths: [manifest],
+  });
+
+  assert.equal(await adapter.compareAndSwap(manifest, present('before'), present('staged')), 'restored');
+  assert.equal((await stat(manifest)).mode & 0o777, 0o640);
+  assert.equal(await readFile(manifest, 'utf8'), 'staged');
+
+  assert.equal(await adapter.compareAndSwap(manifest, present('staged'), present('before')), 'restored');
+  assert.equal((await stat(manifest)).mode & 0o777, 0o640, 'rollback replacement preserves the mode too');
+});
+
+test('Node adapter keeps transaction-created files private when the expected path is absent', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Windows does not expose POSIX permission modes');
+    return;
+  }
+
+  const root = await workspaceFixture(t);
+  const lockfile = path.join(root, 'package-lock.json');
+  const adapter = await createNodeUpgradeTransactionFileAdapter({
+    workspaceRoot: root,
+    allowlistedPaths: [lockfile],
+  });
+
+  assert.equal(await adapter.compareAndSwap(lockfile, missing, present('created')), 'restored');
+  assert.equal((await stat(lockfile)).mode & 0o777, 0o600);
 });
 
 test('Node adapter restores a file expected to be absent without clobbering an existing path', async (t) => {

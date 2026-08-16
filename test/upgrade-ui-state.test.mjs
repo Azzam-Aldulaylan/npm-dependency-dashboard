@@ -33,6 +33,7 @@ test('a real terminal outcome clears the active state', () => {
     'UNSAFE_IDENTIFIER',
     'ROLLBACK_CONFLICT',
     'ROLLBACK_FAILED',
+    'MANIFEST_STAGE_FAILED',
   ]) {
     assert.equal(upgradeErrorClearsActiveState(code), true, `${code} should clear active state`);
   }
@@ -57,6 +58,7 @@ test('every other code is user-visible', () => {
     'STALE_TARGET',
     'ROLLBACK_CONFLICT',
     'ROLLBACK_FAILED',
+    'MANIFEST_STAGE_FAILED',
   ]) {
     assert.equal(upgradeErrorIsUserVisible(code), true, `${code} should be visible`);
   }

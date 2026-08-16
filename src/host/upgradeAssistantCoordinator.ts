@@ -21,6 +21,8 @@ import type { HttpClient } from '../core/registry/http.js';
 import { fetchPackument } from '../core/registry/versions.js';
 import type { EtagStore } from '../core/registry/versions.js';
 import { planSmartUpgrade } from '../core/upgrade/smartPlan.js';
+import { buildStagedManifest } from '../core/upgrade/stagedManifest.js';
+import { requiresManifestReconciliation } from '../core/upgrade/plan.js';
 import { describeRejection } from '../core/upgrade/validate.js';
 import type { DashboardController, MessageSink } from './dashboardController.js';
 import { createNodeNpmResolverDeps, resolveNpmInvocation } from './npmResolver.js';
@@ -255,14 +257,7 @@ export class UpgradeAssistantCoordinator {
           policy: preflightProject.peerPolicy,
           ...(resolverVerifier === undefined ? {} : { resolverVerifier }),
         });
-        const atomicPlan =
-          planned.outcome === 'found' &&
-          planned.plan.proposal.changes.every(
-            (change) => change.classification === planned.plan.proposal.changes[0]?.classification
-          )
-            ? planned.plan
-            : null;
-        if (atomicPlan === null) {
+        if (planned.outcome !== 'found') {
           const summary = compatibilitySummary(analysis).join('\n');
           void vscode.window.showErrorMessage(
             `Upgrade blocked by dependency compatibility conflicts. Smart-plan result: ${planned.outcome}.\n${summary}`,
@@ -275,7 +270,7 @@ export class UpgradeAssistantCoordinator {
           });
           return;
         }
-        const coordinated = atomicPlan.proposal.changes
+        const coordinated = planned.plan.proposal.changes
           .map((change) => `${change.packageName} → ${change.targetVersion}`)
           .join('\n');
         const choice = await vscode.window.showWarningMessage(
@@ -291,8 +286,8 @@ export class UpgradeAssistantCoordinator {
           });
           return;
         }
-        proposal = atomicPlan.proposal;
-        analysis = atomicPlan.compatibility;
+        proposal = planned.plan.proposal;
+        analysis = planned.plan.compatibility;
       }
 
       const ignoreScripts = vscode.workspace
@@ -363,17 +358,58 @@ export class UpgradeAssistantCoordinator {
         source.lockfilePath ??
         path.join(controller.root, source.packageManager === 'pnpm' ? 'pnpm-lock.yaml' : 'package-lock.json');
       const allowlistedPaths = [manifestPath, expectedLockfilePath];
+      const usesStagedManifest = requiresManifestReconciliation(proposal.changes);
+      const stagedManifest = usesStagedManifest
+        ? buildStagedManifest(
+            disk.manifestText,
+            proposal.changes.map((change) => ({
+              packageName: change.packageName,
+              target: change.targetVersion,
+              classification: change.classification,
+            }))
+          )
+        : null;
+
       const files = await createNodeUpgradeTransactionFileAdapter({
         workspaceRoot: selected.folder.uri.fsPath,
         allowlistedPaths,
       });
 
+      let executeInstall: () => Promise<Awaited<ReturnType<UpgradeExecutionSession['run']>>>;
+      if (usesStagedManifest) {
+        const prepared = this.session.prepareManifestReconciliation({
+          cwd: controller.root,
+          ignoreScripts,
+          packageManager: source.packageManager,
+        });
+        if (!prepared.ok) {
+          this.options.sink.postMessage({
+            status: 'upgrade-error',
+            package: eligibility.packageName,
+            error: { code: prepared.code, message: prepared.message },
+          });
+          return;
+        }
+        executeInstall = prepared.execute;
+      } else {
+        executeInstall = () => this.session.run(runParams);
+      }
+
       const transaction = await runUpgradeTransaction({
         allowlistedPaths,
         files,
+        ...(stagedManifest === null
+          ? {}
+          : {
+              manifestStage: {
+                path: manifestPath,
+                expectedContents: Buffer.from(disk.manifestText, 'utf8'),
+                contents: Buffer.from(stagedManifest, 'utf8'),
+              },
+            }),
         install: {
           execute: async () => {
-            const outcome = await this.session.run(runParams);
+            const outcome = await executeInstall();
             return outcome.ok
               ? { status: 'succeeded' as const }
               : { status: 'failed' as const, code: outcome.code, message: outcome.message };

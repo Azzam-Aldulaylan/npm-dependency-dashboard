@@ -19,6 +19,7 @@ import type {
   UpgradeProposal,
 } from '../core/compatibility/types.js';
 import type { PeerResolutionPolicy } from '../core/compatibility/types.js';
+import { buildStagedManifest } from '../core/upgrade/stagedManifest.js';
 
 export interface PackageManagerInvocation {
   executable: string;
@@ -99,28 +100,6 @@ export interface IsolatedResolverVerifierOptions {
   runner?: ResolverProcessRunner;
 }
 
-function parseManifestObject(text: string): Record<string, unknown> {
-  const parsed: unknown = JSON.parse(text);
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('package.json is not an object');
-  }
-  return parsed as Record<string, unknown>;
-}
-
-function applyProposal(manifest: Record<string, unknown>, proposal: UpgradeProposal): void {
-  for (const change of proposal.changes) {
-    let matched = false;
-    for (const field of ['dependencies', 'devDependencies', 'optionalDependencies']) {
-      const block = manifest[field];
-      if (typeof block !== 'object' || block === null || Array.isArray(block)) continue;
-      if (!Object.hasOwn(block, change.packageName)) continue;
-      (block as Record<string, unknown>)[change.packageName] = change.targetVersion;
-      matched = true;
-    }
-    if (!matched) throw new Error(`${change.packageName} is not declared in package.json`);
-  }
-}
-
 export function buildResolverArgs(
   manager: SupportedPackageManager,
   registry: string,
@@ -198,11 +177,17 @@ export class IsolatedResolverVerifier implements ResolverVerifier {
   }
 
   async verify(proposal: UpgradeProposal, signal?: AbortSignal): Promise<ResolverVerification> {
-    const manifest = parseManifestObject(this.options.manifestText);
-    applyProposal(manifest, proposal);
+    const stagedManifest = buildStagedManifest(
+      this.options.manifestText,
+      proposal.changes.map((change) => ({
+        packageName: change.packageName,
+        target: change.targetVersion,
+        classification: change.classification,
+      }))
+    );
     const tempRoot = await mkdtemp(path.join(tmpdir(), 'dependency-dashboard-preflight-'));
     try {
-      await writeFile(path.join(tempRoot, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+      await writeFile(path.join(tempRoot, 'package.json'), stagedManifest, 'utf8');
       if (this.options.lockfile !== undefined) {
         await writeFile(path.join(tempRoot, this.options.lockfile.name), this.options.lockfile.text, 'utf8');
       }

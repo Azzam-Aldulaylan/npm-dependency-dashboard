@@ -45,6 +45,24 @@ export function describeUpgradeTransactionOutcome(
     };
   }
 
+  if (transaction.reason === 'manifest-stage-failed' && transaction.manifestStage.status === 'failed') {
+    return transaction.manifestStage.code === 'CONFLICT'
+      ? {
+          kind: 'error',
+          error: {
+            code: 'STALE_SOURCE',
+            message: 'package.json changed before the coordinated upgrade could start. No upgrade files were modified; refresh and try again.',
+          },
+        }
+      : {
+          kind: 'error',
+          error: {
+            code: 'MANIFEST_STAGE_FAILED',
+            message: 'The coordinated package.json changes could not be staged, so the package-manager install was not started.',
+          },
+        };
+  }
+
   if (transaction.completion === 'kept' && transaction.reason === 'verified') {
     return { kind: 'verified', message: `Upgraded ${packageName}; verification passed.` };
   }

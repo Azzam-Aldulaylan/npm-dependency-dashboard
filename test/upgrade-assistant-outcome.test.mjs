@@ -11,6 +11,7 @@ function result(overrides = {}) {
     completion: 'kept',
     reason: 'verified',
     snapshot: succeededSnapshot,
+    manifestStage: { status: 'not-run' },
     install: succeededInstall,
     verification: { status: 'passed', checks: [] },
     rollback: { status: 'not-needed' },
@@ -130,4 +131,44 @@ test('snapshot and other non-rollback failures retain the generic transaction co
       message: 'The upgrade transaction did not reach a verified or fully restored state. Review package.json and the lockfile.',
     },
   });
+});
+
+test('manifest stage conflicts are clean stale-source failures and hide host file details', () => {
+  const presentation = describeUpgradeTransactionOutcome('react', 'npm', result({
+    completion: 'not-started',
+    reason: 'manifest-stage-failed',
+    manifestStage: {
+      status: 'failed',
+      path: '/sensitive/workspace/package.json',
+      code: 'CONFLICT',
+      message: 'raw compare detail',
+    },
+    install: { status: 'not-run' },
+    verification: { status: 'not-run', reason: 'manifest-stage-failed' },
+  }));
+
+  assert.equal(presentation.kind, 'error');
+  assert.equal(presentation.error.code, 'STALE_SOURCE');
+  assert.match(presentation.error.message, /No upgrade files were modified/);
+  assert.doesNotMatch(presentation.error.message, /sensitive|raw compare detail/);
+});
+
+test('manifest stage write failures are distinct and do not claim an install ran', () => {
+  const presentation = describeUpgradeTransactionOutcome('react', 'pnpm', result({
+    completion: 'not-started',
+    reason: 'manifest-stage-failed',
+    manifestStage: {
+      status: 'failed',
+      path: '/workspace/package.json',
+      code: 'WRITE_FAILED',
+      message: 'permission denied',
+    },
+    install: { status: 'not-run' },
+    verification: { status: 'not-run', reason: 'manifest-stage-failed' },
+  }));
+
+  assert.equal(presentation.kind, 'error');
+  assert.equal(presentation.error.code, 'MANIFEST_STAGE_FAILED');
+  assert.match(presentation.error.message, /install was not started/);
+  assert.doesNotMatch(presentation.error.message, /permission denied/);
 });

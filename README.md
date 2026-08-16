@@ -42,10 +42,10 @@ Vulnerability data comes primarily from npm's bulk advisories endpoint (see [Pri
 Clicking Upgrade on a row now runs a safe-assistant lifecycle:
 
 1. Runs an on-demand compatibility preflight over peer dependencies, optional/missing peers, relevant graph paths, package-manager peer policy, exact target metadata, and—when a secure package-manager invocation is available—an isolated resolver check in a temporary project.
-2. When a peer conflict is found, performs a bounded search for a coordinated direct-dependency upgrade plan. Same-classification plans can be accepted and installed atomically; otherwise the conflict remains blocked.
+2. When a peer conflict is found, performs a bounded search for a coordinated direct-dependency upgrade plan. Plans can span production, development, and optional dependencies while preserving each package's existing manifest classification.
 3. Shows a modal confirmation naming the requested and coordinated changes, compatibility findings, lifecycle-script policy, and configured verification scripts.
-4. Re-reads the project and repeats host-side eligibility validation after the modal, then snapshots `package.json` and the active npm/pnpm lockfile.
-5. Runs `npm install` or `pnpm add` as a visible VS Code Task using structured arguments and an explicit save classification.
+4. Re-reads the project and repeats host-side eligibility validation after the modal, then snapshots `package.json` and the active npm/pnpm lockfile. Mixed-classification plans stage exact, host-generated manifest changes through compare-and-swap protection.
+5. Runs one visible VS Code Task with structured arguments: a classified `npm install`/`pnpm add` for ordinary plans, or a bare manifest-reconciliation install for mixed-classification plans.
 6. Runs only verification scripts explicitly listed in `dependencyDashboard.upgrade.verificationScripts`. No application scripts run by default, and install success alone is reported as unverified.
 7. On install failure, or when the user chooses Rollback after failed verification, restores only the transaction-owned files. Rollback refuses to overwrite concurrent edits.
 
@@ -119,7 +119,6 @@ npm run package    # runs vscode:prepublish (a production build) automatically, 
 
 - Yarn is not supported.
 - pnpm lockfile support currently targets lockfile format v9. Catalog/alias protocols and pnpm-specific audit enrichment are not yet supported; bulk advisory attribution still works over the normalized pnpm graph.
-- Coordinated plans spanning different manifest classifications (for example a production dependency plus a dev dependency) are reported but not auto-executed, because one atomic add/install command cannot preserve both save classifications.
 - Workspace-linked packages are identified but their member manifests are not traversed as registry packages during compatibility analysis.
 - Private-registry authentication is left to the package manager; the extension never reads or persists auth keys.
 - The table is direct-dependency-level: transitive vulnerabilities are attributed to the direct dependency that pulls them in, not listed as their own rows.

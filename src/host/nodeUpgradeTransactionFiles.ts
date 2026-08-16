@@ -10,7 +10,9 @@
  * Node does not expose a general filesystem compare-and-swap primitive for an
  * existing pathname. We therefore use the strongest practical construction:
  * read/compare, prepare exact replacement bytes in the same directory,
- * read/compare again immediately before an atomic rename. Restoring a file
+ * read/compare again immediately before an atomic rename. The transaction
+ * relies on that compare-and-swap contract for host-generated manifest staging
+ * as well as rollback. Restoring a file
  * that is expected to be absent uses `link`, which is atomically no-clobber;
  * deleting a transaction-created file similarly performs a second comparison
  * immediately before unlink. Callers must still serialize dashboard-owned
@@ -176,20 +178,32 @@ class NodeUpgradeTransactionFileAdapter implements UpgradeTransactionFileAdapter
     return resolved;
   }
 
-  async read(candidate: string): Promise<FileState> {
+  private async readWithMode(
+    candidate: string
+  ): Promise<{ state: FileState; mode?: number }> {
     const resolved = await this.resolveAllowed(candidate);
     let handle;
     try {
       // O_NOFOLLOW closes the leaf-symlink race between the lstat/realpath
       // validation above and opening the file on platforms that support it.
       handle = await open(resolved, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-      return { exists: true, contents: Uint8Array.from(await handle.readFile()) };
+      const metadata = await handle.stat();
+      return {
+        state: { exists: true, contents: Uint8Array.from(await handle.readFile()) },
+        // Preserve ordinary owner/group/other permissions. File-type and
+        // set-id/sticky bits are deliberately not copied to a new inode.
+        mode: metadata.mode & 0o777,
+      };
     } catch (cause) {
-      if (isMissing(cause)) return { exists: false };
+      if (isMissing(cause)) return { state: { exists: false } };
       throw cause;
     } finally {
       await handle?.close();
     }
+  }
+
+  async read(candidate: string): Promise<FileState> {
+    return (await this.readWithMode(candidate)).state;
   }
 
   async compareAndSwap(
@@ -221,18 +235,30 @@ class NodeUpgradeTransactionFileAdapter implements UpgradeTransactionFileAdapter
       `.${path.basename(resolved)}.dependency-dashboard-${randomUUID()}.tmp`
     );
     let temporaryCreated = false;
+    let temporaryHandle;
     try {
-      const handle = await open(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+      temporaryHandle = await open(
+        temporary,
+        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+        0o600
+      );
       temporaryCreated = true;
-      try {
-        await handle.writeFile(replacement.contents);
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
+      await temporaryHandle.writeFile(replacement.contents);
 
-      const justBeforeReplace = await this.read(resolved);
-      if (!stateEquals(justBeforeReplace, expected)) return 'conflict';
+      const justBeforeReplace = await this.readWithMode(resolved);
+      if (!stateEquals(justBeforeReplace.state, expected)) return 'conflict';
+
+      if (expected.exists) {
+        // A same-directory rename installs the temporary inode, so its mode
+        // would otherwise remain the private 0600 creation mode. Apply the
+        // existing target's safely-opened permission bits to that inode before
+        // it becomes visible. chmod on the open handle avoids following a
+        // workspace-controlled pathname.
+        await temporaryHandle.chmod(justBeforeReplace.mode ?? 0o600);
+      }
+      await temporaryHandle.sync();
+      await temporaryHandle.close();
+      temporaryHandle = undefined;
 
       if (!expected.exists) {
         // Unlike rename, link never overwrites a file that appeared after the
@@ -256,6 +282,7 @@ class NodeUpgradeTransactionFileAdapter implements UpgradeTransactionFileAdapter
       temporaryCreated = false;
       return 'restored';
     } finally {
+      await temporaryHandle?.close().catch(() => {});
       if (temporaryCreated) await rm(temporary, { force: true }).catch(() => {});
     }
   }

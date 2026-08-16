@@ -33,6 +33,17 @@ export interface CoordinatedUpgradeArgsOptions {
   ignoreScripts: boolean;
 }
 
+export interface ManifestReconciliationArgsOptions {
+  ignoreScripts: boolean;
+}
+
+export function requiresManifestReconciliation(
+  changes: readonly Pick<UpgradeArgsOptions, 'classification'>[]
+): boolean {
+  const first = changes[0]?.classification;
+  return first !== undefined && changes.some((change) => change.classification !== first);
+}
+
 /**
  * The full `npm install` argv, as an array — never a shell string. Each
  * element is passed to the process directly (see src/host/upgradeRunner.ts's
@@ -75,7 +86,7 @@ export function buildCoordinatedInstallArgs(
 ): string[] {
   if (options.changes.length === 0) throw new Error('A coordinated upgrade needs at least one change.');
   const classification = options.changes[0]?.classification;
-  if (classification === undefined || options.changes.some((change) => change.classification !== classification)) {
+  if (classification === undefined || requiresManifestReconciliation(options.changes)) {
     throw new Error('Coordinated upgrades across dependency classifications cannot be installed atomically.');
   }
   const command = packageManager === 'pnpm' ? 'add' : 'install';
@@ -84,6 +95,29 @@ export function buildCoordinatedInstallArgs(
     ...options.changes.map((change) => `${change.packageName}@${change.target}`),
     SAVE_FLAG[classification],
   ];
+  if (options.ignoreScripts) args.push('--ignore-scripts');
+  return args;
+}
+
+/**
+ * Reconcile a manifest that the trusted host has already staged.
+ *
+ * Package names, versions, and save classifications deliberately do not
+ * appear in this argv: they are represented by exact host-generated edits to
+ * package.json before this command is run. A bare install lets npm/pnpm update
+ * the active lockfile and installed tree from that single source of truth,
+ * preserving mixed dependencies/devDependencies/optionalDependencies in one
+ * package-manager transaction.
+ */
+export function buildManifestReconciliationArgs(
+  packageManager: PackageManagerKind,
+  options: ManifestReconciliationArgsOptions
+): string[] {
+  const args = ['install'];
+  // pnpm defaults frozen-lockfile on CI. This command intentionally follows a
+  // host-staged manifest change, so the lockfile must be allowed to reconcile
+  // even when the extension host itself is running in a CI-like environment.
+  if (packageManager === 'pnpm') args.push('--no-frozen-lockfile');
   if (options.ignoreScripts) args.push('--ignore-scripts');
   return args;
 }

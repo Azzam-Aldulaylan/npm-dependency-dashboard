@@ -17,7 +17,12 @@
 import * as vscode from 'vscode';
 
 import type { DependencyClassification } from '../core/upgrade/plan.js';
-import { buildCoordinatedInstallArgs, buildInstallArgs, isMajorUpgrade } from '../core/upgrade/plan.js';
+import {
+  buildCoordinatedInstallArgs,
+  buildInstallArgs,
+  buildManifestReconciliationArgs,
+  isMajorUpgrade,
+} from '../core/upgrade/plan.js';
 import { createNodeNpmResolverDeps, resolveNpmInvocation } from './npmResolver.js';
 import { resolveInstalledPnpmInvocation } from './pnpmResolver.js';
 import type { PackageManagerInvocation } from './resolverVerifier.js';
@@ -44,6 +49,21 @@ export interface UpgradeRunParams {
 }
 
 export type UpgradeRunOutcome = { ok: true } | { ok: false; code: string; message: string };
+
+/**
+ * Host-owned inputs for reconciling an already-staged package.json. No
+ * package/version/classification input is accepted because those values must
+ * be validated and written by the host before the returned execution runs.
+ */
+export interface UpgradeManifestReconciliationParams {
+  cwd: string;
+  ignoreScripts: boolean;
+  packageManager: 'npm' | 'pnpm';
+}
+
+export type PreparedManifestReconciliation =
+  | { ok: false; code: string; message: string }
+  | { ok: true; execute(): Promise<UpgradeRunOutcome> };
 
 export interface UpgradeVerificationParams {
   packageName: string;
@@ -185,8 +205,72 @@ export class UpgradeExecutionSession {
       params.cwd,
       params.packageName,
       args,
-      `Dependency Dashboard: Upgrade ${params.packageName}`
+      `Dependency Dashboard: Upgrade ${params.packageName}`,
+      `${params.packageManager} ${args[0]}`
     );
+  }
+
+  /**
+   * Authorize and resolve a manifest reconciliation before package.json is
+   * staged. The returned execution captures the trusted JS entrypoint and
+   * literal argv, and may be invoked exactly once after staging. This split
+   * prevents an untrusted workspace or missing package manager from causing
+   * even a transient manifest mutation.
+   */
+  prepareManifestReconciliation(
+    params: UpgradeManifestReconciliationParams
+  ): PreparedManifestReconciliation {
+    if (!vscode.workspace.isTrusted) {
+      return {
+        ok: false,
+        code: 'UNTRUSTED_WORKSPACE',
+        message: 'Upgrades are disabled in untrusted workspaces.',
+      };
+    }
+
+    const { cwd, packageManager, ignoreScripts } = params;
+    const invocation = this.resolveInvocation(cwd, packageManager);
+    if (invocation === null) {
+      void vscode.window.showErrorMessage(
+        `Dependency Dashboard could not locate a working ${packageManager} installation.`
+      );
+      return {
+        ok: false,
+        code: 'PACKAGE_MANAGER_NOT_FOUND',
+        message: `A working ${packageManager} installation could not be located.`,
+      };
+    }
+
+    const args = buildManifestReconciliationArgs(packageManager, { ignoreScripts });
+    let executed = false;
+    return {
+      ok: true,
+      execute: async (): Promise<UpgradeRunOutcome> => {
+        if (executed) {
+          return {
+            ok: false,
+            code: 'RECONCILIATION_ALREADY_EXECUTED',
+            message: 'The prepared manifest reconciliation has already been executed.',
+          };
+        }
+        executed = true;
+        if (!vscode.workspace.isTrusted) {
+          return {
+            ok: false,
+            code: 'UNTRUSTED_WORKSPACE',
+            message: 'Upgrades are disabled in untrusted workspaces.',
+          };
+        }
+        return await this.executeTask(
+          invocation,
+          cwd,
+          'coordinated-upgrade',
+          args,
+          'Dependency Dashboard: Reconcile coordinated dependencies',
+          `${packageManager} ${args[0]}`
+        );
+      },
+    };
   }
 
   /** Runs only host-selected package.json script names, one visible task at a time. */
@@ -206,7 +290,8 @@ export class UpgradeExecutionSession {
         params.cwd,
         params.packageName,
         buildVerificationScriptArgs(params.packageManager, script.scriptName),
-        `Dependency Dashboard: Verify ${script.scriptName}`
+        `Dependency Dashboard: Verify ${script.scriptName}`,
+        `${params.packageManager} run ${script.scriptName}`
       );
       if (!outcome.ok) {
         checks.push({ id: script.id, status: 'failed', message: outcome.message });
@@ -231,7 +316,8 @@ export class UpgradeExecutionSession {
     cwd: string,
     packageName: string,
     args: readonly string[],
-    taskName: string
+    taskName: string,
+    failureCommand: string
   ): Promise<UpgradeRunOutcome> {
     // An argument array, never a shell string: `invocation.node` and every
     // element of `[invocation.npmCliJs, ...args]` reach the process as
@@ -295,7 +381,7 @@ export class UpgradeExecutionSession {
                 : {
                     ok: false,
                     code: 'TASK_FAILED',
-                    message: `npm install exited with code ${event.exitCode ?? 'unknown'}.`,
+                    message: `${failureCommand} exited with code ${event.exitCode ?? 'unknown'}.`,
                   }
             );
           });

@@ -1,4 +1,5 @@
 import type { ReactElement } from 'react';
+import type { ScanProgressStage } from '../../../src/host/webviewProtocol.js';
 
 import { IconPackage } from '../icons.js';
 
@@ -14,6 +15,16 @@ export interface LoadingProgress {
   completed: number;
   total: number;
 }
+
+const STAGE_LABELS: Record<ScanProgressStage, string> = {
+  manifest: 'Reading project dependencies…',
+  'dependency-graph': 'Building the dependency graph…',
+  versions: 'Resolving package versions…',
+  advisories: 'Checking vulnerability advisories…',
+  'patched-versions': 'Resolving patched versions…',
+  'npm-audit': 'Running optional npm audit enrichment…',
+  rows: 'Preparing dependency rows…',
+};
 
 const RING_RADIUS = 15.5;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
@@ -63,9 +74,19 @@ const ROW_NAME_WIDTHS = ['62%', '84%', '48%', '70%', '56%', '90%'];
  * and that the shape on screen already looks like "a dependency dashboard is
  * forming", not an unrelated loading spinner.
  */
-export function DependencyLoadingState({ progress }: { progress?: LoadingProgress }): ReactElement {
+export function DependencyLoadingState({
+  progress,
+  stage,
+}: {
+  progress?: LoadingProgress | undefined;
+  stage?: ScanProgressStage | undefined;
+}): ReactElement {
   const detail =
-    progress !== undefined ? `${progress.completed} of ${progress.total} analyzed` : 'Analyzing package versions and vulnerabilities…';
+    progress !== undefined
+      ? `${progress.completed} of ${progress.total} analyzed`
+      : stage === undefined
+        ? 'Analyzing package versions and vulnerabilities…'
+        : STAGE_LABELS[stage];
 
   return (
     <div className="loading-state" role="status" aria-live="polite">

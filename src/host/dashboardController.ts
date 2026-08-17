@@ -24,6 +24,8 @@ import type { ProjectSourceFingerprint } from '../core/cache/sourceFingerprint.j
 import { computeSourceFingerprint, isSourceFingerprint, sourceFingerprintsMatch } from '../core/cache/sourceFingerprint.js';
 import type { DeclaredDependency } from '../core/manifest/parse.js';
 import { parseManifest } from '../core/manifest/parse.js';
+import type { PerformanceRecorder } from '../core/performance/measurement.js';
+import { createPerformanceSession } from '../core/performance/measurement.js';
 import type { BuildPackageRowsOptions } from '../core/pipeline.js';
 import { buildPackageRows } from '../core/pipeline.js';
 import type { HttpClient } from '../core/registry/http.js';
@@ -69,6 +71,10 @@ export interface DashboardControllerOptions {
   ttlMinutesProvider: () => number;
   /** S7 — injected clock for deterministic freshness tests; defaults to the real clock. */
   now?: () => number;
+  /** Local diagnostic switch; read for each operation so settings changes apply without reopening VS Code. */
+  performanceEnabled?: () => boolean;
+  /** Host panels enable real scan progress; tests/other adapters may omit it. */
+  progressEnabled?: boolean;
 }
 
 function isCancellation(cause: unknown): boolean {
@@ -199,6 +205,10 @@ export class DashboardController {
 
   private now(): number {
     return this.options.now?.() ?? Date.now();
+  }
+
+  private performanceEnabled(): boolean {
+    return this.options.performanceEnabled?.() ?? false;
   }
 
   /** Absolute path to the directory holding package.json — the Upgrade task's cwd. */
@@ -467,10 +477,13 @@ export class DashboardController {
    * failing this same comparison forever, and a real scan follows exactly as
    * if nothing had ever been cached.
    */
-  private hydrateFromPersistedCache(): void {
+  private hydrateFromPersistedCache(performance: PerformanceRecorder): void {
+    const endRead = performance.start('cache read');
     const cached = this.options.projectCacheStore.get(this.options.cacheKey);
+    endRead({ hit: cached !== undefined });
     if (cached === undefined) return;
 
+    const endValidation = performance.start('cache validation');
     // `isSourceFingerprint` here is defense in depth, not the primary
     // control — a real persisted entry already passed schema validation
     // (schema.ts) before ever reaching the store, so `cached.sourceFingerprint`
@@ -481,9 +494,11 @@ export class DashboardController {
       !isSourceFingerprint(cached.sourceFingerprint) ||
       !sourceFingerprintsMatch(cached.sourceFingerprint, this.currentSourceFingerprint())
     ) {
+      endValidation({ valid: false });
       this.options.projectCacheStore.delete(this.options.cacheKey);
       return;
     }
+    endValidation({ valid: true });
 
     // PersistedProjectCache is a structural superset of ScanSnapshot (adds
     // generatedAt/lockfilePath/sourceFingerprint) — assigning it here just
@@ -493,13 +508,15 @@ export class DashboardController {
     this.lastGeneratedAt = cached.generatedAt;
   }
 
-  private persistSnapshot(snapshot: ScanSnapshot, generatedAt: string): void {
+  private persistSnapshot(snapshot: ScanSnapshot, generatedAt: string, performance: PerformanceRecorder): void {
+    const endWrite = performance.start('cache write');
     this.options.projectCacheStore.set(this.options.cacheKey, {
       ...snapshot,
       generatedAt,
       lockfilePath: this.options.lockfilePath,
       sourceFingerprint: this.currentSourceFingerprint(),
     });
+    endWrite({ rows: snapshot.rows.length });
   }
 
   /**
@@ -513,17 +530,22 @@ export class DashboardController {
    * renders immediately as a head start while a real run follows underneath.
    */
   async handleReady(sink: MessageSink): Promise<void> {
+    const cachePerformance = createPerformanceSession('Dependency Dashboard cache', this.performanceEnabled());
     if (this.lastResult === undefined) {
-      this.hydrateFromPersistedCache();
+      this.hydrateFromPersistedCache(cachePerformance);
     }
     const cached = this.lastResult;
     if (cached === undefined) {
+      cachePerformance.finish({ hit: false });
       sink.postMessage({ status: 'loading' });
       await this.run(sink);
       return;
     }
 
+    const endFreshness = cachePerformance.start('cache freshness');
     const freshness = classifyFreshness(this.lastGeneratedAt, this.options.ttlMinutesProvider(), this.now());
+    endFreshness({ freshness });
+    cachePerformance.finish({ hit: true, freshness });
     if (freshness === 'fresh') {
       // Fresh, fingerprint-matching data (hydrateFromPersistedCache already
       // deleted and refused to hydrate anything that didn't match) may
@@ -604,6 +626,7 @@ export class DashboardController {
   }
 
   private async run(sink: MessageSink): Promise<void> {
+    const performance = createPerformanceSession('Dependency Dashboard scan', this.performanceEnabled());
     // Every run — manual, background-timer-triggered, file-change-triggered,
     // or a stale-handleReady follow-up alike — is itself a revalidation
     // attempt: eligibility must not be trusted while it's in flight, however
@@ -658,9 +681,17 @@ export class DashboardController {
       httpClient: this.options.httpClient,
       etagStore: this.options.etagStore,
       signal: controller.signal,
+      performance,
       ...(this.options.auditRunner === undefined || this.options.packageManager === 'pnpm'
         ? {}
         : { auditRunner: this.options.auditRunner }),
+      ...(this.options.progressEnabled === true
+        ? {
+            onProgress: (progress) => {
+              sink.postMessage({ status: 'scan-progress', ...progress });
+            },
+          }
+        : {}),
     };
 
     try {
@@ -675,7 +706,7 @@ export class DashboardController {
       const snapshot = toScanSnapshot(result);
       this.lastResult = snapshot;
       this.lastGeneratedAt = generatedAt;
-      this.persistSnapshot(snapshot, generatedAt);
+      this.persistSnapshot(snapshot, generatedAt, performance);
       // Only a scan whose source didn't change out from under it restores
       // Upgrade eligibility — if `beginRevalidation()` was called again
       // (`revalidationGeneration` has moved) since this run started, the
@@ -730,6 +761,8 @@ export class DashboardController {
       if (this.lastResult === undefined) {
         sink.postMessage({ status: 'fatal-error', error: toProtocolError(cause) });
       }
+    } finally {
+      performance.finish({ cancelled: controller.signal.aborted });
     }
   }
 }

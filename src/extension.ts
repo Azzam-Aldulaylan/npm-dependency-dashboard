@@ -7,14 +7,22 @@
 
 import * as vscode from 'vscode';
 
+import { createPerformanceSession } from './core/performance/measurement.js';
 import { DashboardPanel } from './host/dashboardPanel.js';
 
 export function activate(context: vscode.ExtensionContext): void {
+  const performanceEnabled = vscode.workspace
+    .getConfiguration('dependencyDashboard')
+    .get<boolean>('debug.performance', false);
+  const performance = createPerformanceSession('Dependency Dashboard activation', performanceEnabled);
+  const endActivation = performance.start('command registration');
   // The manifest declares untrustedWorkspaces.supported = false, so VS Code
   // won't activate us in an untrusted workspace at all. This check is a
   // belt-and-braces guard in case that declaration is ever loosened: reading
   // .npmrc and running npm install are both unsafe against untrusted content.
   if (!vscode.workspace.isTrusted) {
+    endActivation({ trusted: false });
+    performance.finish({ trusted: false });
     return;
   }
 
@@ -29,6 +37,8 @@ export function activate(context: vscode.ExtensionContext): void {
       void DashboardPanel.refresh();
     })
   );
+  endActivation({ trusted: true });
+  performance.finish({ trusted: true });
 }
 
 export function deactivate(): void {

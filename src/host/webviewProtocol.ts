@@ -150,6 +150,9 @@ export interface RemediationResult {
 export interface UsageAnalysisResult {
   usageId: string;
   result: DependencyUsageResult;
+  /** ISO timestamp after which this session cache entry must be treated as stale. */
+  cacheExpiresAt: string;
+  fromCache: boolean;
 }
 
 export interface UpgradeAnalysisSmartPlanChange {
@@ -229,8 +232,18 @@ export interface DashboardData {
   hygieneFindings: DependencyFinding[];
 }
 
+export type ScanProgressStage =
+  | 'manifest'
+  | 'dependency-graph'
+  | 'versions'
+  | 'advisories'
+  | 'patched-versions'
+  | 'npm-audit'
+  | 'rows';
+
 export type HostToWebviewMessage =
   | { status: 'loading' }
+  | { status: 'scan-progress'; stage: ScanProgressStage; completed?: number; total?: number }
   | { status: 'empty'; data: DashboardData }
   | { status: 'ready'; data: DashboardData }
   | { status: 'stale'; data: DashboardData }
@@ -271,7 +284,7 @@ export type HostToWebviewMessage =
    * summary itself via the same `summarizeHygieneFindings` the host uses,
    * rather than trusting two independently-computed counts to agree.
    */
-  | { status: 'cleanup-result'; findings: DependencyFinding[] }
+  | { status: 'cleanup-result'; findings: DependencyFinding[]; analyzedAt: string; cacheExpiresAt: string }
   /** The cleanup run failed or was cancelled before producing a result. */
   | { status: 'cleanup-error'; error: ProtocolError };
 
@@ -331,6 +344,8 @@ export type WebviewToHostMessage =
   | { type: 'analyze-remediation'; package: string }
   /** On-demand, single-package usage scan — see src/core/usage/ and src/host/usage/usageAnalyzer.ts. Only ever a package name; the host re-derives everything else (which project, which files) from its own trusted state. */
   | { type: 'where-used'; package: string }
+  /** Explicitly bypasses the session usage cache for one package. */
+  | { type: 'reanalyze-usage'; package: string }
   /** On-demand usage scan across every direct dependency at once — see usageCoordinator.ts's handleAnalyzeCleanup. No payload: there is nothing for the webview to choose here either. */
   | { type: 'analyze-cleanup' }
   /** Cancels whichever usage analysis (a `where-used` or an `analyze-cleanup` run) is currently in progress for this panel. */
@@ -344,6 +359,15 @@ export type WebviewToHostMessage =
   | { type: 'open-usage-reference'; usageId: string; referenceIndex: number };
 
 const DATA_STATUSES: ReadonlySet<string> = new Set(['empty', 'ready', 'stale', 'partial-error']);
+const SCAN_PROGRESS_STAGES: ReadonlySet<string> = new Set<ScanProgressStage>([
+  'manifest',
+  'dependency-graph',
+  'versions',
+  'advisories',
+  'patched-versions',
+  'npm-audit',
+  'rows',
+]);
 
 function isSelectedProjectInfo(value: unknown): value is SelectedProjectInfo {
   return (
@@ -422,7 +446,7 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (type === 'configure-verification') {
     return hasOnlyKeys(value, ['type']);
   }
-  if (type === 'analyze-remediation' || type === 'where-used') {
+  if (type === 'analyze-remediation' || type === 'where-used' || type === 'reanalyze-usage') {
     return hasOnlyKeys(value, ['type', 'package']) && isNonEmptyString(value['package']);
   }
   if (type === 'analyze-cleanup' || type === 'cancel-usage-analysis') {
@@ -719,7 +743,13 @@ function isDependencyUsageResult(value: unknown): value is DependencyUsageResult
 }
 
 function isUsageAnalysisResult(value: unknown): value is UsageAnalysisResult {
-  return isRecord(value) && isNonEmptyString(value['usageId']) && isDependencyUsageResult(value['result']);
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['usageId']) &&
+    isDependencyUsageResult(value['result']) &&
+    typeof value['cacheExpiresAt'] === 'string' &&
+    typeof value['fromCache'] === 'boolean'
+  );
 }
 
 export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMessage {
@@ -729,6 +759,19 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   if (typeof status !== 'string') return false;
 
   if (status === 'loading') return hasOnlyKeys(value, ['status']);
+  if (status === 'scan-progress') {
+    const stage = value['stage'];
+    const completed = value['completed'];
+    const total = value['total'];
+    return (
+      hasOnlyKeys(value, ['status', 'stage', 'completed', 'total']) &&
+      typeof stage === 'string' &&
+      SCAN_PROGRESS_STAGES.has(stage) &&
+      (completed === undefined || (typeof completed === 'number' && Number.isInteger(completed) && completed >= 0)) &&
+      (total === undefined || (typeof total === 'number' && Number.isInteger(total) && total >= 0)) &&
+      (completed === undefined || total === undefined || completed <= total)
+    );
+  }
   if (status === 'fatal-error') {
     return hasOnlyKeys(value, ['status', 'error']) && isProtocolError(value['error']);
   }
@@ -793,7 +836,13 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   }
   if (status === 'cleanup-result') {
     const findings = value['findings'];
-    return hasOnlyKeys(value, ['status', 'findings']) && Array.isArray(findings) && findings.every(isDependencyFinding);
+    return (
+      hasOnlyKeys(value, ['status', 'findings', 'analyzedAt', 'cacheExpiresAt']) &&
+      Array.isArray(findings) &&
+      findings.every(isDependencyFinding) &&
+      typeof value['analyzedAt'] === 'string' &&
+      typeof value['cacheExpiresAt'] === 'string'
+    );
   }
   if (status === 'cleanup-error') {
     return hasOnlyKeys(value, ['status', 'error']) && isProtocolError(value['error']);

@@ -271,6 +271,8 @@ export interface FetchVersionOptions {
   store: EtagStore;
   registry: string;
   signal?: AbortSignal;
+  /** Optional scan-local loader used to share one packument across consumers. */
+  packumentLoader?: (name: string, signal?: AbortSignal) => Promise<PackumentDoc>;
 }
 
 /**
@@ -312,7 +314,8 @@ export async function fetchVersionInfo(
     return info;
   }
 
-  const packument = await fetchPackument(client, store, registry, req.name, signal);
+  const packument = await (options.packumentLoader?.(req.name, signal) ??
+    fetchPackument(client, store, registry, req.name, signal));
 
   // Delegate to the existing selection rules — do not reimplement them here.
   const info: VersionInfo = {
@@ -348,9 +351,13 @@ export async function fetchAllVersions(
     requests,
     (req, signal) =>
       fetchVersionInfo(
-        signal === undefined
-          ? { client: options.client, store: options.store, registry: options.registry }
-          : { client: options.client, store: options.store, registry: options.registry, signal },
+        {
+          client: options.client,
+          store: options.store,
+          registry: options.registry,
+          ...(signal === undefined ? {} : { signal }),
+          ...(options.packumentLoader === undefined ? {} : { packumentLoader: options.packumentLoader }),
+        },
         req
       ),
     poolOptions

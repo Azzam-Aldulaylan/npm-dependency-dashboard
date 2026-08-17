@@ -11,6 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { PerformanceSession } from '../out/core/performance/measurement.js';
 import { buildPackageRows } from '../out/core/pipeline.js';
 import { MemoryEtagStore } from '../out/core/registry/versions.js';
 import { currentVersionDisplay } from '../out/host/versionDisplay.js';
@@ -263,6 +264,11 @@ test('with no audit runner the self-computed fallback still finds a fix', async 
   assert.equal(rowFor(result, 'clean-pkg').upgradeReason, 'update');
 
   assert.ok(client.urls.includes(`${REGISTRY}/minimatch`), 'escalated for the flagged package');
+  assert.equal(
+    client.urls.filter((url) => url === `${REGISTRY}/minimatch`).length,
+    1,
+    'patched-version attribution and self-computed remediation share one scan-local packument'
+  );
   assert.equal(
     client.urls.includes(`${REGISTRY}/clean-pkg`),
     false,
@@ -571,11 +577,12 @@ test('an already-aborted signal rejects immediately, not a result with partial r
   );
 });
 
-test('a signal aborted mid-run stops before later stages run', async () => {
+test('a signal aborted mid-run cancels the overlapped audit and stops before remediation stages', async () => {
   // The abort fires from inside the bulk-advisories POST itself, simulating
   // cancellation racing a call that happens to complete anyway. The stage
-  // boundary check right after must still catch it and stop before audit
-  // ever runs — proving this isn't just a pre-flight check.
+  // boundary check right after must still catch it and stop before patched-
+  // version work. Audit intentionally starts earlier now so its subprocess
+  // latency overlaps registry I/O; the same AbortSignal owns both operations.
   const controller = new AbortController();
   const client = fakeClient(LATEST_ROUTES, () => {
     controller.abort();
@@ -590,5 +597,128 @@ test('a signal aborted mid-run stops before later stages run', async () => {
       return true;
     }
   );
-  assert.deepEqual(runner.calls, [], 'audit never ran — the pipeline stopped before that stage');
+  assert.deepEqual(runner.calls, [ROOT], 'audit started once as independent overlapped enrichment');
+});
+
+test('patched-version packuments respect the configured concurrency limit', async () => {
+  const names = ['flagged-a', 'flagged-b', 'flagged-c', 'flagged-d', 'flagged-e'];
+  const manifestText = JSON.stringify({ dependencies: Object.fromEntries(names.map((name) => [name, '^1.0.0'])) });
+  const lockfileText = JSON.stringify({
+    lockfileVersion: 3,
+    packages: Object.fromEntries([
+      ['', { name: 'app' }],
+      ...names.map((name) => [`node_modules/${name}`, { version: '1.0.0' }]),
+    ]),
+  });
+  let packumentsInFlight = 0;
+  let peakPackuments = 0;
+  const packumentCalls = new Map();
+  const client = {
+    async get(url) {
+      if (url.endsWith('/latest')) return json({ version: '1.2.0' });
+      const name = url.slice(url.lastIndexOf('/') + 1);
+      packumentCalls.set(name, (packumentCalls.get(name) ?? 0) + 1);
+      packumentsInFlight += 1;
+      peakPackuments = Math.max(peakPackuments, packumentsInFlight);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      packumentsInFlight -= 1;
+      return json({ 'dist-tags': { latest: '1.2.0' }, versions: { '1.0.0': {}, '1.0.1': {}, '1.2.0': {} } });
+    },
+    async post() {
+      return json(Object.fromEntries(names.map((name) => [name, [{
+        ...MINIMATCH_ADVISORY,
+        id: name,
+        vulnerable_versions: '<1.0.1',
+      }]])));
+    },
+  };
+
+  const result = await buildPackageRows(
+    baseOptions(client, { manifestText, lockfileText, concurrency: 2 })
+  );
+
+  assert.equal(result.rows.length, names.length);
+  assert.equal(peakPackuments, 2, 'the patched-version pool saturates at, but never exceeds, the limit');
+  assert.deepEqual([...packumentCalls.values()], [1, 1, 1, 1, 1], 'every packument is fetched once per scan');
+});
+
+test('one failed patched-version packument does not fail the batch', async () => {
+  const names = ['good-flagged', 'bad-flagged'];
+  const manifestText = JSON.stringify({ dependencies: { 'good-flagged': '^1.0.0', 'bad-flagged': '^1.0.0' } });
+  const lockfileText = JSON.stringify({
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'app' },
+      'node_modules/good-flagged': { version: '1.0.0' },
+      'node_modules/bad-flagged': { version: '1.0.0' },
+    },
+  });
+  const client = {
+    async get(url) {
+      if (url.endsWith('/latest')) return json({ version: '1.2.0' });
+      if (url.endsWith('/bad-flagged')) return { status: 500, headers: {}, body: '', wireBytes: 0 };
+      return json({ 'dist-tags': { latest: '1.2.0' }, versions: { '1.0.0': {}, '1.0.1': {}, '1.2.0': {} } });
+    },
+    async post() {
+      return json(
+        Object.fromEntries(
+          names.map((name) => [
+            name,
+            [{ ...MINIMATCH_ADVISORY, id: name, vulnerable_versions: '<1.0.1' }],
+          ]),
+        ),
+      );
+    },
+  };
+
+  const result = await buildPackageRows(baseOptions(client, { manifestText, lockfileText }));
+  assert.equal(result.rows.length, 2);
+  assert.equal(rowFor(result, 'good-flagged').advisories[0].patchedVersion.status, 'known');
+  assert.equal(rowFor(result, 'bad-flagged').advisories[0].patchedVersion.status, 'unknown');
+});
+
+test('npm audit starts before version metadata settles so independent work overlaps', async () => {
+  let auditStarted = false;
+  const runner = {
+    async run() {
+      auditStarted = true;
+      return { stdout: JSON.stringify({ vulnerabilities: {} }), exitCode: 0 };
+    },
+  };
+  const client = fakeClient(
+    Object.fromEntries(Object.entries(LATEST_ROUTES).map(([url, route]) => [url, () => {
+      assert.equal(auditStarted, true, 'audit started before the first version response');
+      return route;
+    }])),
+    BULK_RESPONSE
+  );
+
+  await buildPackageRows(baseOptions(client, { auditRunner: runner }));
+});
+
+test('scan instrumentation reports request kinds and scan-local packument reuse without sensitive values', async () => {
+  let report;
+  const performance = new PerformanceSession('test scan', {
+    enabled: true,
+    output: (value) => {
+      report = value;
+    },
+  });
+  const client = fakeClient(
+    { ...LATEST_ROUTES, [`${REGISTRY}/minimatch`]: MINIMATCH_PACKUMENT },
+    BULK_RESPONSE
+  );
+
+  await buildPackageRows(baseOptions(client, { performance }));
+  performance.finish();
+
+  assert.equal(report.metadata['direct dependencies'], 2);
+  assert.equal(report.metadata['graph nodes'], 2);
+  assert.equal(report.metadata['registry requests'], 4);
+  assert.equal(report.metadata['/latest requests'], 2);
+  assert.equal(report.metadata['packument requests'], 1);
+  assert.equal(report.metadata['bulk advisory requests'], 1);
+  assert.equal(report.metadata['advisory packages'], 1);
+  assert.equal(report.metadata['scan-local packument hits'], 1);
+  assert.equal(Object.values(report.metadata).some((value) => String(value).includes(REGISTRY)), false);
 });

@@ -14,7 +14,7 @@ import type { SortColumn, TableSortState } from '../../src/host/tableSort.js';
 import { nextColumnSortState, sortRows } from '../../src/host/tableSort.js';
 import type { TransitiveRemediationUiState } from '../../src/host/upgradeAction.js';
 import { upgradeErrorClearsActiveState, upgradeErrorIsUserVisible } from '../../src/host/upgradeUiState.js';
-import type { DashboardData, HostToWebviewMessage, UpgradeAnalysisPresentation } from '../../src/host/webviewProtocol.js';
+import type { DashboardData, HostToWebviewMessage, ScanProgressStage, UpgradeAnalysisPresentation } from '../../src/host/webviewProtocol.js';
 import { isHostToWebviewMessage } from '../../src/host/webviewProtocol.js';
 import { DashboardToolbar } from './components/DashboardToolbar.js';
 import { DependencyDetailsModal } from './components/DependencyDetailsModal.js';
@@ -33,6 +33,16 @@ import { vscode } from './vscodeApi.js';
 function formatTime(iso: string): string {
   const parsed = new Date(iso);
   return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleTimeString();
+}
+
+function formatAnalysisAge(analyzedAt: string, cacheExpiresAt: string, now: number): string {
+  const timestamp = Date.parse(analyzedAt);
+  const expiresAt = Date.parse(cacheExpiresAt);
+  const stale = Number.isFinite(expiresAt) && now >= expiresAt;
+  if (!Number.isFinite(timestamp)) return stale ? 'Previous analysis · stale' : 'Previous analysis';
+  const minutes = Math.max(0, Math.floor((now - timestamp) / 60_000));
+  const age = minutes === 0 ? 'Analyzed just now' : `Analyzed ${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  return stale ? `${age} · stale` : age;
 }
 
 function partialErrorText(data: DashboardData): string | null {
@@ -54,6 +64,13 @@ interface UpgradeErrorState {
 
 export function App(): ReactElement {
   const [message, setMessage] = useState<HostToWebviewMessage | undefined>(undefined);
+  const [scanProgress, setScanProgress] = useState<{
+    stage: ScanProgressStage;
+    completed?: number;
+    total?: number;
+  } | undefined>(undefined);
+  const initialRenderStartedAt = useRef<number | null>(null);
+  const initialRenderMeasured = useRef(false);
   // The one package this webview itself most recently asked to upgrade, or
   // null. The host allows only one upgrade at a time for the whole panel —
   // see UpgradeLock — so this mirrors that as a single value, not a set, and
@@ -121,10 +138,18 @@ export function App(): ReactElement {
   const [detailsPackage, setDetailsPackage] = useState<string | null>(null);
   const [usageByPackage, setUsageByPackage] = useState<ReadonlyMap<string, UsageRequestState>>(() => new Map());
   const [cleanupState, setCleanupState] = useState<
-    { phase: 'idle' } | { phase: 'analyzing'; scanned: number; total: number } | { phase: 'done' }
+    | { phase: 'idle' }
+    | { phase: 'analyzing'; scanned: number; total: number }
+    | { phase: 'done'; analyzedAt: string; cacheExpiresAt: string }
   >({ phase: 'idle' });
   const [cleanupFindings, setCleanupFindings] = useState<DependencyFinding[]>([]);
   const [cleanupError, setCleanupError] = useState<string | null>(null);
+  const [minuteClock, setMinuteClock] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setMinuteClock(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent): void => {
@@ -136,6 +161,15 @@ export function App(): ReactElement {
         return;
       }
       const incoming = event.data;
+
+      if (incoming.status === 'scan-progress') {
+        setScanProgress({
+          stage: incoming.stage,
+          ...(incoming.completed === undefined ? {} : { completed: incoming.completed }),
+          ...(incoming.total === undefined ? {} : { total: incoming.total }),
+        });
+        return;
+      }
 
       if (incoming.status === 'upgrade-error') {
         // Never touches `message` — the rendered table/banners are exactly
@@ -219,6 +253,8 @@ export function App(): ReactElement {
             phase: 'done',
             usageId: incoming.analysis.usageId,
             result: incoming.analysis.result,
+            cacheExpiresAt: incoming.analysis.cacheExpiresAt,
+            fromCache: incoming.analysis.fromCache,
           });
           return next;
         });
@@ -240,7 +276,11 @@ export function App(): ReactElement {
       }
 
       if (incoming.status === 'cleanup-result') {
-        setCleanupState({ phase: 'done' });
+        setCleanupState({
+          phase: 'done',
+          analyzedAt: incoming.analyzedAt,
+          cacheExpiresAt: incoming.cacheExpiresAt,
+        });
         setCleanupFindings(incoming.findings);
         return;
       }
@@ -269,6 +309,14 @@ export function App(): ReactElement {
       setUsageByPackage(new Map());
       setCleanupFindings([]);
       setCleanupError(null);
+      setScanProgress(undefined);
+      if (
+        initialRenderStartedAt.current === null &&
+        'data' in incoming &&
+        document.body.dataset['performanceDebug'] === 'true'
+      ) {
+        initialRenderStartedAt.current = performance.now();
+      }
       setMessage(incoming);
     };
 
@@ -279,6 +327,33 @@ export function App(): ReactElement {
       window.removeEventListener('message', onMessage);
     };
   }, []);
+
+  useEffect(() => {
+    if (
+      initialRenderMeasured.current ||
+      initialRenderStartedAt.current === null ||
+      message === undefined ||
+      !('data' in message)
+    ) {
+      return;
+    }
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        const durationMs = performance.now() - (initialRenderStartedAt.current ?? performance.now());
+        initialRenderMeasured.current = true;
+        console.debug('Dependency Dashboard webview initial render', {
+          operation: 'webview initial render',
+          durationMs,
+          metadata: { rows: message.data.rows.length },
+        });
+      });
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      if (secondFrame !== 0) cancelAnimationFrame(secondFrame);
+    };
+  }, [message]);
 
   const refresh = useCallback(() => {
     vscode.postMessage({ type: 'refresh' });
@@ -395,6 +470,15 @@ export function App(): ReactElement {
     [usageByPackage]
   );
 
+  const requestReanalyzeUsage = useCallback((packageName: string) => {
+    setUsageByPackage((previous) => {
+      const next = new Map(previous);
+      next.set(packageName, { phase: 'analyzing' });
+      return next;
+    });
+    vscode.postMessage({ type: 'reanalyze-usage', package: packageName });
+  }, []);
+
   const requestOpenUsageReference = useCallback((usageId: string, referenceIndex: number) => {
     vscode.postMessage({ type: 'open-usage-reference', usageId, referenceIndex });
   }, []);
@@ -428,7 +512,16 @@ export function App(): ReactElement {
         {data !== undefined ? <DependencySearch value={search} onChange={handleSearchChange} /> : null}
       </header>
 
-      {loading ? <DependencyLoadingState /> : null}
+      {loading ? (
+        <DependencyLoadingState
+          stage={scanProgress?.stage}
+          progress={
+            scanProgress?.completed === undefined || scanProgress.total === undefined
+              ? undefined
+              : { completed: scanProgress.completed, total: scanProgress.total }
+          }
+        />
+      ) : null}
 
       {message !== undefined && message.status === 'fatal-error' ? (
         <div className="banner banner--error" role="alert">
@@ -508,6 +601,8 @@ export function App(): ReactElement {
           actionsDisabled={actionsDisabled}
           cleanupFindings={cleanupFindings}
           cleanupBusy={cleanupState.phase === 'analyzing'}
+          cleanupAnalysis={cleanupState.phase === 'done' ? cleanupState : null}
+          now={minuteClock}
           onAnalyzeCleanup={requestAnalyzeCleanup}
           onOpenDetails={openDetails}
           onWhereUsed={requestWhereUsed}
@@ -539,7 +634,9 @@ export function App(): ReactElement {
               hygieneFindings={[...data.hygieneFindings, ...cleanupFindings]}
               usage={usageByPackage.get(detailsPackage)}
               onRequestUsage={requestWhereUsed}
+              onReanalyzeUsage={requestReanalyzeUsage}
               onOpenUsageReference={requestOpenUsageReference}
+              now={minuteClock}
               onClose={closeDetails}
             />
           );
@@ -575,6 +672,8 @@ function Dashboard({
   actionsDisabled,
   cleanupFindings,
   cleanupBusy,
+  cleanupAnalysis,
+  now,
   onAnalyzeCleanup,
   onOpenDetails,
   onWhereUsed,
@@ -605,6 +704,8 @@ function Dashboard({
   /** Likely-unused findings from the last completed "Analyze cleanup" run this session — see App.tsx. */
   cleanupFindings: readonly DependencyFinding[];
   cleanupBusy: boolean;
+  cleanupAnalysis: { analyzedAt: string; cacheExpiresAt: string } | null;
+  now: number;
   onAnalyzeCleanup: () => void;
   onOpenDetails: (packageName: string) => void;
   onWhereUsed: (packageName: string) => void;
@@ -680,16 +781,23 @@ function Dashboard({
             onRefresh={onRefresh}
             disabled={actionsDisabled}
             trailingActions={
-              <button
-                className="button button--secondary"
-                type="button"
-                onClick={onAnalyzeCleanup}
-                disabled={actionsDisabled || cleanupBusy}
-                title="Scan the workspace for likely-unused direct dependencies"
-              >
-                <IconBroom />
-                {cleanupBusy ? 'Analyzing…' : 'Analyze cleanup'}
-              </button>
+              <div className="toolbar__analysis-actions">
+                {cleanupAnalysis !== null ? (
+                  <span className="toolbar__analysis-age">
+                    {formatAnalysisAge(cleanupAnalysis.analyzedAt, cleanupAnalysis.cacheExpiresAt, now)}
+                  </span>
+                ) : null}
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  onClick={onAnalyzeCleanup}
+                  disabled={actionsDisabled || cleanupBusy}
+                  title="Scan the workspace for likely-unused direct dependencies"
+                >
+                  <IconBroom />
+                  {cleanupBusy ? 'Analyzing…' : cleanupAnalysis === null ? 'Analyze cleanup' : 'Re-analyze'}
+                </button>
+              </div>
             }
           >
             <DependencyTypeFilter value={dependencyType} onChange={onDependencyTypeChange} />

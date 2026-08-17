@@ -409,6 +409,18 @@ button {
   gap: 0.5rem;
 }
 
+.toolbar__analysis-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.toolbar__analysis-age {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
 /* --------------------------------------------------------- type filter */
 
 .type-filter {
@@ -2124,6 +2136,18 @@ button {
   margin: 0 0 0.5rem;
   color: var(--vscode-descriptionForeground);
   font-size: 0.85em;
+}
+
+.dependency-details__usage-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+
+.dependency-details__usage-meta .dependency-details__usage-summary {
+  margin: 0;
 }
 
 .dependency-details__usage-status {

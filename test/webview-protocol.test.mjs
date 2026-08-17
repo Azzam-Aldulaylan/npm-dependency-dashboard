@@ -257,6 +257,7 @@ test('configure-verification carries no payload — extra keys are rejected', ()
 
 test('every host-to-webview variant is accepted', () => {
   assert.equal(isHostToWebviewMessage({ status: 'loading' }), true);
+  assert.equal(isHostToWebviewMessage({ status: 'scan-progress', stage: 'versions', completed: 4, total: 10 }), true);
   assert.equal(isHostToWebviewMessage({ status: 'empty', data: { ...DATA, rows: [] } }), true);
   assert.equal(isHostToWebviewMessage({ status: 'ready', data: DATA }), true);
   assert.equal(isHostToWebviewMessage({ status: 'stale', data: DATA }), true);
@@ -274,6 +275,13 @@ test('every host-to-webview variant is accepted', () => {
     true
   );
   assert.equal(isHostToWebviewMessage({ status: 'upgrade-analysis', analysis: MINIMAL_ANALYSIS }), true);
+});
+
+test('scan progress accepts real stage/count data and rejects fake or inconsistent progress', () => {
+  assert.equal(isHostToWebviewMessage({ status: 'scan-progress', stage: 'advisories' }), true);
+  assert.equal(isHostToWebviewMessage({ status: 'scan-progress', stage: 'made-up', completed: 1, total: 2 }), false);
+  assert.equal(isHostToWebviewMessage({ status: 'scan-progress', stage: 'versions', completed: 3, total: 2 }), false);
+  assert.equal(isHostToWebviewMessage({ status: 'scan-progress', stage: 'versions', percent: 50 }), false);
 });
 
 // ----------------------------------------- host -> webview: upgrade-analyzing
@@ -707,12 +715,15 @@ test('remediation-result rejects an invalid outcome status or a malformed securi
 
 test('a well-formed where-used request is accepted', () => {
   assert.equal(isWebviewToHostMessage({ type: 'where-used', package: 'sockjs-client' }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'reanalyze-usage', package: 'sockjs-client' }), true);
 });
 
 test('where-used requires a non-empty package name and no extra keys', () => {
   assert.equal(isWebviewToHostMessage({ type: 'where-used' }), false);
   assert.equal(isWebviewToHostMessage({ type: 'where-used', package: '' }), false);
   assert.equal(isWebviewToHostMessage({ type: 'where-used', package: 'x', extra: 1 }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'reanalyze-usage', package: '' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'reanalyze-usage', package: 'x', root: '/tmp/forged' }), false);
 });
 
 test('analyze-cleanup and cancel-usage-analysis carry no payload', () => {
@@ -752,6 +763,8 @@ test('usage-analyzing, usage-result, and usage-error are accepted', () => {
       analysis: {
         usageId: 'abc',
         result: { packageName: 'foo', references: [USAGE_REFERENCE], truncated: false, scannedFileCount: 12, scannedAt: '2026-08-01T00:00:00.000Z' },
+        cacheExpiresAt: '2026-08-01T00:10:00.000Z',
+        fromCache: false,
       },
     }),
     true
@@ -768,6 +781,8 @@ test('a script/config reference (no meaningful line) is accepted with line 0', (
       analysis: {
         usageId: 'abc',
         result: { packageName: 'eslint', references: [scriptReference], truncated: false, scannedFileCount: 1, scannedAt: '2026-08-01T00:00:00.000Z' },
+        cacheExpiresAt: '2026-08-01T00:10:00.000Z',
+        fromCache: true,
       },
     }),
     true
@@ -788,6 +803,8 @@ test('an unrecognized reference kind is rejected', () => {
           scannedFileCount: 1,
           scannedAt: '2026-08-01T00:00:00.000Z',
         },
+        cacheExpiresAt: '2026-08-01T00:10:00.000Z',
+        fromCache: false,
       },
     }),
     false
@@ -809,6 +826,8 @@ test('cleanup-analyzing, cleanup-result, and cleanup-error are accepted', () => 
           evidence: { kind: 'likely-unused', reason: 'no references found', scannedFileCount: 42, truncated: false },
         },
       ],
+      analyzedAt: '2026-08-01T00:00:00.000Z',
+      cacheExpiresAt: '2026-08-01T00:10:00.000Z',
     }),
     true
   );
@@ -842,6 +861,8 @@ test('a cleanup-result finding of an unrecognized kind is rejected', () => {
     isHostToWebviewMessage({
       status: 'cleanup-result',
       findings: [{ packageName: 'x', kind: 'not-a-real-kind', severity: 'warning', summary: 's', evidence: { kind: 'likely-unused', reason: 'r', scannedFileCount: 1, truncated: false } }],
+      analyzedAt: '2026-08-01T00:00:00.000Z',
+      cacheExpiresAt: '2026-08-01T00:10:00.000Z',
     }),
     false
   );

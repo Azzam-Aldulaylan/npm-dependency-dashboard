@@ -25,6 +25,8 @@ import * as vscode from 'vscode';
 import { resolvePeerResolutionPolicy, resolveRegistry } from '../core/registry/npmrc.js';
 import type { PeerResolutionPolicy } from '../core/registry/npmrc.js';
 import { parseManifest } from '../core/manifest/parse.js';
+import type { PerformanceRecorder } from '../core/performance/measurement.js';
+import { NOOP_PERFORMANCE_RECORDER } from '../core/performance/measurement.js';
 import type { PackageManagerKind, ResolvedRegistry } from '../core/types.js';
 import type { DiscoveredProjectCandidate, ProjectCandidateSource } from '../core/workspace/scan.js';
 import {
@@ -172,7 +174,10 @@ async function resolveRegistryConfiguration(projectRoot: string): Promise<{
  * is open or none contain a package.json; the caller decides what that
  * means (DashboardPanel reports it as the existing "no project" error).
  */
-export async function discoverProjects(): Promise<DiscoveredProject[]> {
+export async function discoverProjects(
+  performance: PerformanceRecorder = NOOP_PERFORMANCE_RECORDER
+): Promise<DiscoveredProject[]> {
+  const endDiscovery = performance.start('project discovery');
   const folders = vscode.workspace.workspaceFolders ?? [];
   const foldersById = new Map<string, vscode.WorkspaceFolder>();
   const sources: ProjectCandidateSource[] = [];
@@ -190,7 +195,7 @@ export async function discoverProjects(): Promise<DiscoveredProject[]> {
     sources.push({ folderId, folderName: folder.name, manifestPaths });
   }
 
-  return discoverProjectCandidates(sources).map((candidate) => {
+  const candidates = discoverProjectCandidates(sources).map((candidate) => {
     const folder = foldersById.get(candidate.folderId);
     // Every id here was derived from a folderId this same loop just put in
     // the map, so this is always found — the assertion documents that
@@ -198,19 +203,32 @@ export async function discoverProjects(): Promise<DiscoveredProject[]> {
     if (folder === undefined) throw new Error('unreachable: candidate references an unknown workspace folder');
     return { ...candidate, folder };
   });
+  endDiscovery({ 'workspace folders': folders.length, candidates: candidates.length });
+  return candidates;
 }
 
 /** Reads one specific, already-discovered candidate's manifest/lockfile and resolves its registry. Never reads anything not already produced by `discoverProjects`. */
-export async function loadProject(candidate: DiscoveredProject): Promise<ResolvedProject> {
+export async function loadProject(
+  candidate: DiscoveredProject,
+  performance: PerformanceRecorder = NOOP_PERFORMANCE_RECORDER
+): Promise<ResolvedProject> {
   const base = candidate.folder.uri.fsPath;
   const root = candidate.dir === '' ? base : path.join(base, candidate.dir);
+  const endManifestRead = performance.start('manifest read');
   const manifestText = await readFile(path.join(base, candidate.manifestPath), 'utf8');
+  endManifestRead({ bytes: Buffer.byteLength(manifestText) });
+  const endManifestParse = performance.start('manifest parse');
   const manifest = parseManifest(manifestText);
+  endManifestParse({ dependencies: manifest.dependencies.length });
   const preferredPackageManager = manifest.packageManager?.name ?? 'npm';
 
+  const endLockfileDiscovery = performance.start('lockfile discovery');
   const lockfile = await findLockfile(candidate.folder, candidate.dir, preferredPackageManager);
+  endLockfileDiscovery({ found: lockfile !== null });
   const lockfilePath = lockfile === null ? null : path.join(base, lockfile.dir, lockfile.name);
+  const endLockfileRead = performance.start('lockfile read');
   const lockfileText = lockfilePath === null ? null : ((await readIfExists(lockfilePath)) ?? null);
+  endLockfileRead({ bytes: lockfileText === null ? 0 : Buffer.byteLength(lockfileText) });
   const packageManager =
     (lockfile === null ? null : packageManagerForLockfile(lockfile.name)) ?? preferredPackageManager;
   const lockfileRoot = lockfile === null ? root : path.join(base, lockfile.dir);

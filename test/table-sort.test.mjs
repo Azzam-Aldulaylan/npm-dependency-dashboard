@@ -13,6 +13,10 @@ import {
   resolveSortComparator,
   sortRows,
 } from '../out/host/tableSort.js';
+import { paginate } from '../out/host/pagination.js';
+
+/** The dashboard's own initial sortState (see App.tsx) — every "default sort" test below exercises exactly this value, not a stand-in. */
+const INITIAL_SORT_STATE = { column: 'vulnerabilities', direction: 'desc' };
 
 function row(overrides = {}) {
   return {
@@ -248,4 +252,48 @@ test('sortRows never mutates its input array', () => {
   const original = [...rows];
   sortRows(rows, { column: 'package', direction: 'asc' }, 'all');
   assert.deepEqual(rows, original);
+});
+
+// -------------------------------------------------- dashboard initial sort (default desc)
+
+test('initial sort: the dashboard\'s own default state groups safe/high/moderate/critical/safe/low into severity order', () => {
+  const rows = [
+    row({ name: 'a' }), // safe
+    row({ name: 'b', worstSeverity: 'high' }),
+    row({ name: 'c', worstSeverity: 'moderate' }),
+    row({ name: 'd', worstSeverity: 'critical' }),
+    row({ name: 'e' }), // safe
+    row({ name: 'f', worstSeverity: 'low' }),
+  ];
+  assert.deepEqual(names(sortRows(rows, INITIAL_SORT_STATE, 'all')), ['d', 'b', 'c', 'f', 'a', 'e']);
+});
+
+test('initial sort tie-break: two High packages resolve alphabetically, package name ascending', () => {
+  const rows = [row({ name: 'z-package', worstSeverity: 'high' }), row({ name: 'a-package', worstSeverity: 'high' })];
+  assert.deepEqual(names(sortRows(rows, INITIAL_SORT_STATE, 'all')), ['a-package', 'z-package']);
+});
+
+test('sorting happens before pagination: page 1 of a small page size still shows the worst-severity rows first, never a page sorted in isolation', () => {
+  const rows = [
+    row({ name: 'safe-a' }),
+    row({ name: 'safe-b' }),
+    row({ name: 'critical-a', worstSeverity: 'critical' }),
+    row({ name: 'high-a', worstSeverity: 'high' }),
+    row({ name: 'safe-c' }),
+  ];
+  const sorted = sortRows(rows, INITIAL_SORT_STATE, 'all');
+  const page1 = paginate(sorted, 1, 2);
+  const page2 = paginate(sorted, 2, 2);
+  assert.deepEqual(page1.pageRows.map((r) => r.name), ['critical-a', 'high-a']);
+  assert.deepEqual(page2.pageRows.map((r) => r.name), ['safe-a', 'safe-b']);
+});
+
+test('the user can still override the initial default with a manual column sort', () => {
+  const rows = [row({ name: 'zebra' }), row({ name: 'apple', worstSeverity: 'critical' })];
+  // Starting from the dashboard's own default state, a click on "Package"
+  // (see nextColumnSortState) produces a fresh manual sort that no longer
+  // reflects severity at all.
+  const manual = nextColumnSortState(INITIAL_SORT_STATE, 'package');
+  assert.deepEqual(manual, { column: 'package', direction: 'asc' });
+  assert.deepEqual(names(sortRows(rows, manual, 'all')), ['apple', 'zebra']);
 });

@@ -90,7 +90,15 @@ export function App(): ReactElement {
   const [search, setSearch] = useState('');
   const [selectedFilter, setSelectedFilter] = useState<SummaryFilterId>('all');
   const [dependencyType, setDependencyType] = useState<DependencyTypeFilterValue>('all');
-  const [sortState, setSortState] = useState<TableSortState>(null);
+  // The dashboard opens sorted by vulnerability severity, worst first — the
+  // one piece of information most worth seeing before any interaction, even
+  // though the default "all" card's own implied order is alphabetical (see
+  // cardDefaultComparator). A real column sort state, not `null`, so the
+  // Vulnerabilities header shows its descending indicator immediately on
+  // first render rather than only after a manual click. Selecting a summary
+  // card still resets to that card's own default (handleSelectFilter below)
+  // — this initial value only governs the very first render.
+  const [sortState, setSortState] = useState<TableSortState>({ column: 'vulnerabilities', direction: 'desc' });
   const [pageSize, setPageSize] = useState<PageSize>(DEFAULT_PAGE_SIZE);
   const [page, setPage] = useState(1);
 

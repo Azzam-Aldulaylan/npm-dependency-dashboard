@@ -282,3 +282,16 @@ export function IconGear(props: IconProps): ReactElement {
     </Svg>
   );
 }
+
+/** Rollback — a counter-clockwise history/undo arrow, for "restores your files if something fails". */
+export function IconHistory(props: IconProps): ReactElement {
+  return (
+    <Svg {...props}>
+      <>
+        <path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.47" />
+        <path d="M2 3v2.3h2.3" />
+        <path d="M8 5.3V8l1.8 1.1" />
+      </>
+    </Svg>
+  );
+}

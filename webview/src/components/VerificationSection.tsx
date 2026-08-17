@@ -12,9 +12,9 @@ export function VerificationSection({
   onConfigureVerification: () => void;
 }): ReactElement {
   return (
-    <section className="analysis-section" aria-labelledby="analysis-verification-heading">
-      <h3 className="analysis-section__title" id="analysis-verification-heading">
-        <IconListChecks className="analysis-section__title-icon" />
+    <section className="analysis-card" aria-labelledby="analysis-verification-heading">
+      <h3 className="analysis-card__title" id="analysis-verification-heading">
+        <IconListChecks className="analysis-card__title-icon" />
         Verification
       </h3>
       {verification.configured ? (

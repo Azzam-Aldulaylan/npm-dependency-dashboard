@@ -10,12 +10,18 @@ import { IconRoute } from '../icons.js';
  * issued, never plan contents (see webviewProtocol.ts's own doc on
  * use-smart-plan).
  */
-/** Display-only — the "Use coordinated upgrade" action itself lives in the modal footer, so there's exactly one place to trigger it, not two. */
+/**
+ * Rendered full-width, above the Compatibility/Security/Files/Verification
+ * card grid — a call-to-action the modal is steering the user toward, not
+ * another paired status card. Display-only: the "Use coordinated upgrade"
+ * action itself lives in the modal footer, so there's exactly one place to
+ * trigger it, not two.
+ */
 export function SmartPlanSection({ smartPlan }: { smartPlan: UpgradeAnalysisSmartPlan }): ReactElement {
   return (
-    <section className="analysis-section analysis-section--smart-plan" aria-labelledby="analysis-smart-plan-heading">
-      <h3 className="analysis-section__title" id="analysis-smart-plan-heading">
-        <IconRoute className="analysis-section__title-icon" />
+    <section className="smart-plan-banner" aria-labelledby="analysis-smart-plan-heading">
+      <h3 className="smart-plan-banner__title" id="analysis-smart-plan-heading">
+        <IconRoute className="smart-plan-banner__title-icon" />
         Recommended coordinated upgrade
       </h3>
       <ol className="smart-plan__changes">
@@ -28,7 +34,7 @@ export function SmartPlanSection({ smartPlan }: { smartPlan: UpgradeAnalysisSmar
           </li>
         ))}
       </ol>
-      <p className="analysis-section__hint">
+      <p className="smart-plan-banner__hint">
         This upgrade alone conflicts with another dependency. Upgrading these packages together resolves it.
       </p>
     </section>

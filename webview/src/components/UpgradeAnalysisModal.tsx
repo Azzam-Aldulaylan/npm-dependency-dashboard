@@ -28,6 +28,27 @@ function primaryAction(
 }
 
 /**
+ * The one headline the whole modal commits to — everything else (the
+ * Compatibility card's own findings, Security's own vulnerability list)
+ * explains *why*, but never repeats *what the overall answer is*. Compare
+ * CompatibilitySection, which used to render this same large status line a
+ * second time inside its own card; this redesign moves it here instead,
+ * directly under the header, as the one place a 2-second read answers
+ * "is this upgrade OK".
+ */
+function overallStatusDetail(analysis: UpgradeAnalysisPresentation): string | undefined {
+  const { compatibility } = analysis;
+  if (compatibility.completeness === 'partial') return 'Some compatibility checks could not be completed.';
+  const nonCompatible = compatibility.findings.filter((finding) => finding.status !== 'compatible').length;
+  if (compatibility.status === 'compatible') return 'No blocking dependency conflicts were detected.';
+  if (compatibility.status === 'warning') {
+    return `The dependency tree resolves, but ${nonCompatible} issue${nonCompatible === 1 ? '' : 's'} deserve${nonCompatible === 1 ? 's' : ''} review.`;
+  }
+  if (compatibility.status === 'conflict') return 'Another dependency blocks this upgrade.';
+  return undefined;
+}
+
+/**
  * The Upgrade Analysis / confirmation experience — a centered dialog inside
  * the dashboard webview, replacing the native `showWarningMessage` modal.
  * `analysis === null` renders the loading phase; once it arrives, the modal
@@ -107,12 +128,7 @@ export function UpgradeAnalysisModal({
 
   const action = analysis !== null ? primaryAction(analysis) : null;
   const overall = analysis !== null ? compatibilityOutcomeDisplay(analysis.compatibility.status) : null;
-  // Files/Verification always render once an analysis exists, so the
-  // two-column pairing (Compatibility|Security, Files|Verification) is
-  // worthwhile any time there's real content to lay out — not gated on
-  // whether this particular analysis happens to have findings or a security
-  // section.
-  const wide = analysis !== null;
+  const securityNeedsAttention = analysis?.security?.status === 'remains';
 
   return (
     <div className="modal-overlay">
@@ -130,14 +146,15 @@ export function UpgradeAnalysisModal({
               {packageName}
             </h2>
             <p className="modal__version-line">
-              {analysis?.currentVersion ?? '…'} <span aria-hidden="true">→</span> {targetVersion}
+              <span className="modal__version modal__version--from">{analysis?.currentVersion ?? '…'}</span>
+              <span className="modal__version-arrow" aria-hidden="true">
+                →
+              </span>
+              <span className="modal__version modal__version--to">{targetVersion}</span>
             </p>
-            {analysis !== null ? (
+            {analysis?.majorUpdate === true ? (
               <div className="modal__badges">
-                {analysis.majorUpdate ? <span className="status-badge status-badge--warning">Major update</span> : null}
-                {overall !== null && analysis.compatibility.status !== 'compatible' ? (
-                  <span className={`status-badge status-badge--${overall.className}`}>{overall.label}</span>
-                ) : null}
+                <span className="status-badge status-badge--warning">Major update</span>
               </div>
             ) : null}
           </div>
@@ -153,24 +170,39 @@ export function UpgradeAnalysisModal({
           </button>
         </header>
 
-        <div className={`modal__body${wide ? ' modal__body--wide' : ''}`}>
-          {analysis === null ? (
+        {analysis === null ? (
+          <div className="modal__body">
             <UpgradeAnalysisLoading packageName={packageName} targetVersion={targetVersion} phase={analyzingPhase} />
-          ) : (
-            <>
+          </div>
+        ) : (
+          <div className="modal__body">
+            {overall !== null ? (
+              <OutcomeStatus
+                label={overall.label}
+                className={overall.className}
+                detail={overallStatusDetail(analysis)}
+                size="large"
+              />
+            ) : null}
+
+            {analysis.smartPlan !== null ? <SmartPlanSection smartPlan={analysis.smartPlan} /> : null}
+
+            <div className="modal__grid">
               <CompatibilitySection
                 compatibility={analysis.compatibility}
                 context={{ package: analysis.package, currentVersion: analysis.currentVersion }}
               />
-              {analysis.security !== null ? (
-                <SecuritySection security={analysis.security} rootPackageName={analysis.package} onOpenAdvisory={onOpenAdvisory} />
-              ) : null}
-              {analysis.smartPlan !== null ? <SmartPlanSection smartPlan={analysis.smartPlan} /> : null}
+              <SecuritySection
+                security={analysis.security}
+                rootPackageName={analysis.package}
+                onOpenAdvisory={onOpenAdvisory}
+                emphasize={securityNeedsAttention}
+              />
               <FilesSection files={analysis.files} />
               <VerificationSection verification={analysis.verification} onConfigureVerification={onConfigureVerification} />
-            </>
-          )}
-        </div>
+            </div>
+          </div>
+        )}
 
         <footer className="modal__footer">
           <button type="button" className="button button--secondary" onClick={onCancel} disabled={busy}>

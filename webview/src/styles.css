@@ -1383,7 +1383,8 @@ button {
   }
 }
 
-/* ------------------------------------------------- upgrade analysis modal */
+
+/* ---------------------------------------------------- upgrade review modal */
 
 /*
  * A fixed black scrim regardless of theme — the same choice VS Code's own
@@ -1402,12 +1403,17 @@ button {
   animation: dashboard-modal-fade 0.12s ease-out;
 }
 
+/*
+ * Sized to its content, not to a fixed "modal-sized" footprint — 30rem is
+ * enough for the header/banner/footer alone; the grid below only widens the
+ * modal once there's a second column of cards to actually fill.
+ */
 .modal {
   display: flex;
   flex-direction: column;
   width: 100%;
-  max-width: 42rem;
-  max-height: 85vh;
+  max-width: 30rem;
+  max-height: 88vh;
   border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
   border-radius: 6px;
   overflow: hidden;
@@ -1437,12 +1443,15 @@ button {
   }
 }
 
+/* ------------------------------------------------------------------ header */
+
 .modal__header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 0.75rem;
-  padding: 1rem 1.1rem 0.85rem;
+  flex-shrink: 0;
+  padding: 0.95rem 1.1rem 0.9rem;
   border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
 }
 
@@ -1450,51 +1459,78 @@ button {
   min-width: 0;
 }
 
+/* "Review upgrade" — generic, secondary. The package name below it is the
+   real identifier, so this stays small and quiet. */
 .modal__eyebrow {
-  margin: 0 0 0.15rem;
+  margin: 0 0 0.2rem;
   color: var(--vscode-descriptionForeground);
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
 }
 
 .modal__title {
   margin: 0;
   overflow: hidden;
-  font-size: 1.15rem;
+  font-size: 1.05rem;
   font-weight: 600;
   letter-spacing: -0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/*
+ * The one signature moment in this design: the version transition, set in
+ * the editor's own monospace font like a diff hunk rather than the UI font
+ * everything else uses. The "from" version reads as struck-through/muted —
+ * already superseded — while the arrow and "to" version carry the app's own
+ * "update" accent (the same purple the Updates summary card and Analyze
+ * button already use elsewhere, not a new one-off color). This is the
+ * fastest possible answer to "from what version to what version", which is
+ * the header's actual job.
+ */
 .modal__version-line {
-  margin: 0.25rem 0 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.35rem 0 0;
+  font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.modal__version {
+  overflow-wrap: anywhere;
+}
+
+.modal__version--from {
   color: var(--vscode-descriptionForeground);
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.9em;
+  font-weight: 400;
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--vscode-descriptionForeground) 45%, transparent);
+  text-decoration-thickness: 1px;
+}
+
+.modal__version-arrow {
+  color: var(--accent-updates);
+  font-weight: 400;
+}
+
+.modal__version--to {
+  color: var(--accent-updates);
 }
 
 .modal__badges {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
-  margin-top: 0.45rem;
+  margin-top: 0.55rem;
 }
 
 .modal__badges .status-badge {
   margin-left: 0;
-}
-
-.status-badge--conflict {
-  border-color: var(--vscode-editorError-foreground);
-  color: var(--vscode-editorError-foreground);
-}
-
-.status-badge--unknown {
-  border-color: var(--vscode-descriptionForeground);
-  color: var(--vscode-descriptionForeground);
 }
 
 .modal__close {
@@ -1510,6 +1546,7 @@ button {
   color: var(--vscode-descriptionForeground);
   background: none;
   cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease;
 }
 
 .modal__close:hover:not(:disabled) {
@@ -1527,36 +1564,66 @@ button {
   cursor: default;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .modal__close {
+    transition: none;
+  }
+}
+
+/* -------------------------------------------------------------------- body */
+
 .modal__body {
   display: flex;
   flex-direction: column;
-  gap: 1.1rem;
-  padding: 1rem 1.1rem;
+  gap: 0.85rem;
+  padding: 0.95rem 1.1rem 1.05rem;
   overflow-y: auto;
 }
 
 /*
- * Two columns wide enough to hold "Compatibility | Security" and
- * "Files | Verification" — the sections render in exactly that order, so a
- * plain two-column grid pairs them correctly without any extra layout logic.
- * The (optional) smart-plan recommendation spans both columns: it is a
- * call-to-action, not a paired status column.
+ * The one overall status line the whole modal commits to — every card below
+ * explains *why*, but never repeats *what the answer is*. Bounded like a
+ * card so it doesn't read as a generic alert strip bolted onto the top.
  */
-@media (min-width: 46rem) {
+.modal__body > .outcome-status {
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+}
+
+.modal__body > .outcome-status .outcome-status__icon {
+  font-size: 1.15em;
+}
+
+.modal__body > .outcome-status .outcome-status__label {
+  font-size: 1.02em;
+}
+
+/*
+ * Compatibility | Security, then Files | Verification — a plain two-column
+ * grid on anything wide enough to hold it, one column (stacked) otherwise.
+ * Card order in the markup already matches this pairing, so no explicit
+ * grid-column placement is needed.
+ */
+.modal__grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+}
+
+/*
+ * One breakpoint, not two — the modal only widens to 44rem exactly when the
+ * grid switches to two columns, so there is never a window where a
+ * two-column grid is forced into the narrow 30rem modal and each card ends
+ * up too cramped to read.
+ */
+@media (min-width: 36rem) {
   .modal {
-    max-width: 54rem;
+    max-width: 44rem;
   }
 
-  .modal__body--wide {
-    display: grid;
+  .modal__grid {
     grid-template-columns: 1fr 1fr;
-    column-gap: 1.25rem;
-    row-gap: 1.1rem;
-    align-items: start;
-  }
-
-  .modal__body--wide .analysis-section--smart-plan {
-    grid-column: 1 / -1;
   }
 }
 
@@ -1565,51 +1632,88 @@ button {
   align-items: center;
   justify-content: flex-end;
   gap: 0.6rem;
-  padding: 0.85rem 1.1rem;
+  flex-shrink: 0;
+  padding: 0.75rem 1.1rem;
   border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
 }
 
-.analysis-section {
+/* ------------------------------------------------------------ section cards */
+
+/*
+ * Subtle, bounded, but not a heavy nested box — a single hairline border and
+ * the same radius as the modal itself, no separate surface color layered on
+ * top of the modal's own background. This is the one structural device every
+ * Compatibility/Security/Files/Verification card shares.
+ */
+.analysis-card {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
 }
 
-.analysis-section__title {
+/*
+ * The one place a card outranks its neighbors — a vulnerability that
+ * survives the upgrade gets a visibly stronger border and a tinted
+ * background, so Security is never mistaken for just another quiet status
+ * card when there is something the user actually needs to act on.
+ */
+.analysis-card--emphasized {
+  border-color: var(--vscode-editorError-foreground);
+  background: color-mix(in srgb, var(--vscode-editorError-foreground) 6%, transparent);
+}
+
+.analysis-card__title {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  margin: 0 0 0.55rem;
+  margin: 0 0 0.5rem;
   color: var(--vscode-descriptionForeground);
-  font-size: 0.72em;
+  font-size: 0.7em;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
 }
 
-.analysis-section__title-icon {
+.analysis-card--emphasized .analysis-card__title {
+  color: var(--vscode-editorError-foreground);
+}
+
+.analysis-card__title-icon {
   flex-shrink: 0;
 }
 
-.analysis-section__hint {
-  margin: 0.5rem 0 0;
+.analysis-card__hint {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.55rem 0 0;
   color: var(--vscode-descriptionForeground);
-  font-size: 0.85em;
+  font-size: 0.82em;
 }
 
-.analysis-section__more {
-  margin-top: 0.5rem;
+.analysis-card__hint-icon {
+  flex-shrink: 0;
+}
+
+.analysis-card__more {
+  align-self: flex-start;
+  margin-top: 0.55rem;
 }
 
 .finding-list {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  margin: 0.6rem 0 0;
+  gap: 0.45rem;
+  margin: 0.55rem 0 0;
   padding: 0;
   list-style: none;
 }
 
 .finding {
-  padding: 0.5rem 0.6rem;
+  padding: 0.45rem 0.55rem;
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
   border-radius: 4px;
 }
@@ -1617,9 +1721,7 @@ button {
 /*
  * The single icon+colour vocabulary shared by every outcome state in the
  * modal — compatibility's four statuses and security's four statuses both
- * resolve to one of these five classes (see outcomeCopy.ts). `--large` is
- * only the top-of-section summary line; everything else (a single finding,
- * the resolver line, a single vulnerability's status) stays compact.
+ * resolve to one of these five classes (see outcomeCopy.ts).
  */
 .outcome-status {
   display: flex;
@@ -1662,14 +1764,6 @@ button {
   font-size: 0.95em;
 }
 
-.outcome-status--large .outcome-status__icon {
-  font-size: 1.15em;
-}
-
-.outcome-status--large .outcome-status__label {
-  font-size: 1.02em;
-}
-
 .outcome-status--compatible .outcome-status__icon,
 .outcome-status--resolved .outcome-status__icon {
   color: var(--vscode-charts-green, #89d185);
@@ -1689,26 +1783,60 @@ button {
   color: var(--vscode-descriptionForeground);
 }
 
-.analysis-section__vulnerabilities {
-  margin-top: 0.6rem;
-  padding: 0 0 0 0.1rem;
+.analysis-card__vulnerabilities {
+  margin: 0.55rem 0 0;
+  padding: 0;
 }
 
-.analysis-section__vulnerabilities .advisory {
-  padding: 0.6rem 0.7rem;
+.analysis-card__vulnerabilities .advisory {
+  padding: 0.55rem 0.6rem;
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
   border-radius: 4px;
 }
 
-.analysis-section__vulnerabilities .advisory + .advisory {
-  margin-top: 0.6rem;
+.analysis-card__vulnerabilities .advisory + .advisory {
+  margin-top: 0.5rem;
+}
+
+/* ---------------------------------------------------------- smart-plan banner */
+
+/*
+ * Full-width, above the card grid — a call-to-action the modal is steering
+ * the user toward, not another paired status card, so it gets the app's own
+ * accent border rather than the neutral card treatment.
+ */
+.smart-plan-banner {
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--accent-updates);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent-updates) 8%, transparent);
+}
+
+.smart-plan-banner__title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.5rem;
+  font-size: 0.85em;
+  font-weight: 700;
+}
+
+.smart-plan-banner__title-icon {
+  flex-shrink: 0;
+  color: var(--accent-updates);
+}
+
+.smart-plan-banner__hint {
+  margin: 0.5rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
 }
 
 .smart-plan__changes {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  margin: 0.5rem 0 0;
+  margin: 0;
   padding: 0;
   counter-reset: smart-plan-step;
   list-style: none;
@@ -1746,8 +1874,38 @@ button {
   font-size: 0.88em;
 }
 
-.verification__scripts,
+/* -------------------------------------------------------------- files card */
+
 .files__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.85em;
+}
+
+.files__list li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  overflow-wrap: anywhere;
+}
+
+.files__list-icon {
+  flex-shrink: 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.analysis-card__hint--rollback {
+  flex-wrap: wrap;
+}
+
+/* --------------------------------------------------------- verification card */
+
+.verification__scripts {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
@@ -1756,14 +1914,15 @@ button {
   list-style: none;
 }
 
-.verification__scripts code,
-.files__list code {
+.verification__scripts code {
   padding: 0.1rem 0.5rem;
   border-radius: 3px;
   background: var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.15)));
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.88em;
+  font-size: 0.85em;
 }
+
+/* ----------------------------------------------------------------- loading */
 
 .analysis-loading {
   display: flex;
@@ -1783,6 +1942,8 @@ button {
   color: var(--vscode-descriptionForeground);
   font-size: 0.85em;
 }
+
+/* -------------------------------------------------------------- narrow view */
 
 @media (max-width: 460px) {
   .modal-overlay {

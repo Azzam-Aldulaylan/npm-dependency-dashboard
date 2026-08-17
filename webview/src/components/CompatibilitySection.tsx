@@ -4,9 +4,10 @@ import type { ReactElement } from 'react';
 import { findingCopy } from '../../../src/host/findingCopy.js';
 import { compatibilityOutcomeDisplay, resolverOutcomeDisplay } from '../../../src/host/outcomeCopy.js';
 import type { CompatibilityFinding, UpgradeAnalysisCompatibility } from '../../../src/host/webviewProtocol.js';
+import { IconRoute } from '../icons.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
 
-const DEFAULT_VISIBLE_CAP = 4;
+const DEFAULT_VISIBLE_CAP = 3;
 
 function FindingItem({ finding, context }: { finding: CompatibilityFinding; context: { package: string; currentVersion: string } }): ReactElement {
   const copy = findingCopy(finding, context);
@@ -30,6 +31,13 @@ function FindingItem({ finding, context }: { finding: CompatibilityFinding; cont
   );
 }
 
+/**
+ * The Compatibility card — the *reasons* behind whatever the modal's own
+ * overall status banner already announced, never a second announcement of
+ * the same headline. Strongest evidence first: real package-manager
+ * resolver evidence, when available, outranks the static peer-dependency
+ * findings it's meant to corroborate.
+ */
 export function CompatibilitySection({
   compatibility,
   context,
@@ -50,24 +58,12 @@ export function CompatibilitySection({
   const visible = [...conflicts, ...visibleRest, ...visibleCompatible];
   const hiddenCount = compatibility.findings.length - visible.length;
 
-  const overall = compatibilityOutcomeDisplay(compatibility.status);
-  const overallDetail =
-    compatibility.completeness === 'partial'
-      ? 'Some compatibility checks could not be completed.'
-      : compatibility.status === 'compatible'
-        ? 'No blocking dependency conflicts were detected.'
-        : compatibility.status === 'warning'
-          ? `The dependency tree resolves, but ${nonCompatible.length} issue${nonCompatible.length === 1 ? ' deserves' : 's deserve'} review.`
-          : compatibility.status === 'conflict'
-            ? 'This upgrade conflicts with another dependency.'
-            : undefined;
-
   return (
-    <section className="analysis-section" aria-labelledby="analysis-compatibility-heading">
-      <h3 className="analysis-section__title" id="analysis-compatibility-heading">
+    <section className="analysis-card" aria-labelledby="analysis-compatibility-heading">
+      <h3 className="analysis-card__title" id="analysis-compatibility-heading">
+        <IconRoute className="analysis-card__title-icon" />
         Compatibility
       </h3>
-      <OutcomeStatus label={overall.label} className={overall.className} detail={overallDetail} size="large" />
 
       {compatibility.resolverVerification !== undefined ? (
         <OutcomeStatus
@@ -75,8 +71,8 @@ export function CompatibilitySection({
           className={resolverOutcomeDisplay(compatibility.resolverVerification.status).className}
           detail={
             compatibility.resolverVerification.status === 'unknown'
-              ? 'Static compatibility checks completed, but npm/pnpm verification was unavailable.'
-              : `${compatibility.resolverVerification.packageManager} resolved the proposed dependency tree in an isolated temporary project.`
+              ? 'Static checks completed, but npm/pnpm verification was unavailable.'
+              : `${compatibility.resolverVerification.packageManager} resolved the proposed dependency tree.`
           }
         />
       ) : null}
@@ -89,8 +85,12 @@ export function CompatibilitySection({
         </ul>
       ) : null}
 
+      {compatibility.resolverVerification === undefined && visible.length === 0 ? (
+        <p className="analysis-card__hint">No peer-dependency or resolver signals were available to check for this package.</p>
+      ) : null}
+
       {hiddenCount > 0 ? (
-        <button type="button" className="button button--subtle analysis-section__more" onClick={() => setExpanded(true)}>
+        <button type="button" className="button button--subtle analysis-card__more" onClick={() => setExpanded(true)}>
           Show {hiddenCount} more finding{hiddenCount === 1 ? '' : 's'}
         </button>
       ) : null}

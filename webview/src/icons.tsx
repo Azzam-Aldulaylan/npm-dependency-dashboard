@@ -295,3 +295,43 @@ export function IconHistory(props: IconProps): ReactElement {
     </Svg>
   );
 }
+
+/** The per-row secondary-actions menu trigger — "Where is this used?", "Dependency details". */
+export function IconMoreHorizontal(props: IconProps): ReactElement {
+  return (
+    <Svg {...props} fill="currentColor" stroke="none">
+      <>
+        <circle cx="3.25" cy="8" r="1.15" />
+        <circle cx="8" cy="8" r="1.15" />
+        <circle cx="12.75" cy="8" r="1.15" />
+      </>
+    </Svg>
+  );
+}
+
+/** "Where is this used?" and the usage-analysis / cleanup results. */
+export function IconTarget(props: IconProps): ReactElement {
+  return (
+    <Svg {...props}>
+      <>
+        <circle cx="8" cy="8" r="6.25" />
+        <circle cx="8" cy="8" r="3" />
+        <circle cx="8" cy="8" r="0.6" fill="currentColor" />
+      </>
+    </Svg>
+  );
+}
+
+/** "Analyze cleanup" — a broom/sweep glyph for the dependency-hygiene scan. */
+export function IconBroom(props: IconProps): ReactElement {
+  return (
+    <Svg {...props}>
+      <>
+        <path d="M9.5 2.5 4 12.5" />
+        <path d="M2 13.5 4 9.8" />
+        <path d="M9.5 2.5c1.4-.5 3 .1 3.6 1.4.6 1.3.1 2.8-1.1 3.6L7.8 9.8" />
+        <path d="M4 9.8h6" />
+      </>
+    </Svg>
+  );
+}

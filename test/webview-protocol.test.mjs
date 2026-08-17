@@ -65,6 +65,7 @@ const DATA = {
   generatedAt: '2026-08-01T12:00:00.000Z',
   project: PROJECT,
   canChangeProject: false,
+  hygieneFindings: [],
 };
 
 const MINIMAL_ANALYSIS = {
@@ -698,6 +699,150 @@ test('remediation-result rejects an invalid outcome status or a malformed securi
   );
   assert.equal(
     isHostToWebviewMessage({ status: 'remediation-result', package: 'sockjs-client' }),
+    false
+  );
+});
+
+// ---------------------------------------------- webview -> host: usage analysis
+
+test('a well-formed where-used request is accepted', () => {
+  assert.equal(isWebviewToHostMessage({ type: 'where-used', package: 'sockjs-client' }), true);
+});
+
+test('where-used requires a non-empty package name and no extra keys', () => {
+  assert.equal(isWebviewToHostMessage({ type: 'where-used' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'where-used', package: '' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'where-used', package: 'x', extra: 1 }), false);
+});
+
+test('analyze-cleanup and cancel-usage-analysis carry no payload', () => {
+  assert.equal(isWebviewToHostMessage({ type: 'analyze-cleanup' }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'cancel-usage-analysis' }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'analyze-cleanup', extra: 1 }), false);
+});
+
+test('a well-formed open-usage-reference request is accepted', () => {
+  assert.equal(isWebviewToHostMessage({ type: 'open-usage-reference', usageId: 'abc', referenceIndex: 0 }), true);
+});
+
+test('open-usage-reference rejects a negative, non-integer, missing, or forged-shape index/id', () => {
+  const bad = [
+    { type: 'open-usage-reference', usageId: 'abc', referenceIndex: -1 },
+    { type: 'open-usage-reference', usageId: 'abc', referenceIndex: 1.5 },
+    { type: 'open-usage-reference', usageId: 'abc' },
+    { type: 'open-usage-reference', usageId: '', referenceIndex: 0 },
+    { type: 'open-usage-reference', usageId: 'abc', referenceIndex: '0' },
+    { type: 'open-usage-reference', usageId: 'abc', referenceIndex: 0, path: '/etc/passwd' },
+  ];
+  for (const value of bad) {
+    assert.equal(isWebviewToHostMessage(value), false, `${JSON.stringify(value)} accepted`);
+  }
+});
+
+// ---------------------------------------------- host -> webview: usage analysis
+
+const USAGE_REFERENCE = { filePath: 'src/app.ts', line: 4, column: 1, snippet: `import x from 'foo';`, kind: 'import' };
+
+test('usage-analyzing, usage-result, and usage-error are accepted', () => {
+  assert.equal(isHostToWebviewMessage({ status: 'usage-analyzing', package: 'foo' }), true);
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'usage-result',
+      package: 'foo',
+      analysis: {
+        usageId: 'abc',
+        result: { packageName: 'foo', references: [USAGE_REFERENCE], truncated: false, scannedFileCount: 12, scannedAt: '2026-08-01T00:00:00.000Z' },
+      },
+    }),
+    true
+  );
+  assert.equal(isHostToWebviewMessage({ status: 'usage-error', package: 'foo', error: { code: 'X', message: 'Y' } }), true);
+});
+
+test('a script/config reference (no meaningful line) is accepted with line 0', () => {
+  const scriptReference = { filePath: 'package.json', line: 0, column: 0, snippet: '"lint": "eslint ."', kind: 'script', context: 'lint' };
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'usage-result',
+      package: 'eslint',
+      analysis: {
+        usageId: 'abc',
+        result: { packageName: 'eslint', references: [scriptReference], truncated: false, scannedFileCount: 1, scannedAt: '2026-08-01T00:00:00.000Z' },
+      },
+    }),
+    true
+  );
+});
+
+test('an unrecognized reference kind is rejected', () => {
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'usage-result',
+      package: 'foo',
+      analysis: {
+        usageId: 'abc',
+        result: {
+          packageName: 'foo',
+          references: [{ ...USAGE_REFERENCE, kind: 'not-a-real-kind' }],
+          truncated: false,
+          scannedFileCount: 1,
+          scannedAt: '2026-08-01T00:00:00.000Z',
+        },
+      },
+    }),
+    false
+  );
+});
+
+test('cleanup-analyzing, cleanup-result, and cleanup-error are accepted', () => {
+  assert.equal(isHostToWebviewMessage({ status: 'cleanup-analyzing', scanned: 3, total: 10 }), true);
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'cleanup-result',
+      findings: [
+        {
+          packageName: 'left-pad',
+          kind: 'likely-unused',
+          confidence: 'high',
+          severity: 'warning',
+          summary: 'left-pad appears unused',
+          evidence: { kind: 'likely-unused', reason: 'no references found', scannedFileCount: 42, truncated: false },
+        },
+      ],
+    }),
+    true
+  );
+  assert.equal(isHostToWebviewMessage({ status: 'cleanup-error', error: { code: 'X', message: 'Y' } }), true);
+});
+
+test('DashboardData with a well-formed hygieneFindings entry is accepted', () => {
+  const data = {
+    ...DATA,
+    hygieneFindings: [
+      {
+        packageName: 'left-pad',
+        kind: 'deprecated',
+        confidence: 'high',
+        severity: 'attention',
+        summary: 'left-pad is deprecated',
+        evidence: { kind: 'deprecated', message: 'no longer maintained', suggestedReplacement: 'left-pad-2' },
+      },
+    ],
+  };
+  assert.equal(isHostToWebviewMessage({ status: 'ready', data }), true);
+});
+
+test('DashboardData missing hygieneFindings entirely is rejected', () => {
+  const { hygieneFindings, ...withoutHygieneFindings } = DATA;
+  assert.equal(isHostToWebviewMessage({ status: 'ready', data: withoutHygieneFindings }), false);
+});
+
+test('a cleanup-result finding of an unrecognized kind is rejected', () => {
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'cleanup-result',
+      findings: [{ packageName: 'x', kind: 'not-a-real-kind', severity: 'warning', summary: 's', evidence: { kind: 'likely-unused', reason: 'r', scannedFileCount: 1, truncated: false } }],
+    }),
     false
   );
 });

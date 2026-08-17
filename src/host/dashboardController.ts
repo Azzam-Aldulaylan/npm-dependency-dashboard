@@ -87,12 +87,18 @@ function toProtocolError(cause: unknown): ProtocolError {
  * itself, whose `advisoriesError` is a `FetchError` instance carrying a stack
  * trace and other fields that have no business on disk.
  */
-function toScanSnapshot(result: { rows: ScanSnapshot['rows']; advisoriesError?: ProtocolError; auditUnavailable?: boolean }): ScanSnapshot {
+function toScanSnapshot(result: {
+  rows: ScanSnapshot['rows'];
+  advisoriesError?: ProtocolError;
+  auditUnavailable?: boolean;
+  hygieneFindings?: ScanSnapshot['hygieneFindings'];
+}): ScanSnapshot {
   const snapshot: ScanSnapshot = { rows: result.rows };
   if (result.advisoriesError !== undefined) {
     snapshot.advisoriesError = { code: result.advisoriesError.code, message: result.advisoriesError.message };
   }
   if (result.auditUnavailable === true) snapshot.auditUnavailable = true;
+  if (result.hygieneFindings !== undefined) snapshot.hygieneFindings = result.hygieneFindings;
   return snapshot;
 }
 

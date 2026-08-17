@@ -20,10 +20,13 @@
  */
 
 import type { Advisory, AttributedAdvisory, PackageRow, PatchedVersionResult } from '../core/types.js';
+import type { DependencyFinding } from '../core/hygiene/types.js';
+import type { DependencyReference, DependencyUsageResult } from '../core/usage/types.js';
 import {
   isAbsentOr,
   isAdvisory,
   isAttributedAdvisory,
+  isDependencyFinding,
   isPackageRow,
   isPatchedVersionResult,
   isProtocolError,
@@ -136,6 +139,19 @@ export interface RemediationResult {
   security: SecurityOutcome;
 }
 
+/**
+ * The on-demand usage-analysis result for one package, plus the opaque
+ * `usageId` future `open-usage-reference` requests must present — see
+ * src/host/usage/usageReferenceStore.ts for the trust boundary this exists
+ * for. `result.references` carry a display-only `filePath`/`line`/`column`;
+ * the actual "Open file" action never trusts those directly (see
+ * `open-usage-reference` below).
+ */
+export interface UsageAnalysisResult {
+  usageId: string;
+  result: DependencyUsageResult;
+}
+
 export interface UpgradeAnalysisSmartPlanChange {
   packageName: string;
   currentVersion: string;
@@ -209,6 +225,8 @@ export interface DashboardData {
   advisoriesError?: ProtocolError;
   /** `npm audit` enrichment was skipped or failed; upgrade targets are self-computed. */
   auditUnavailable?: boolean;
+  /** Deprecated + duplicate-version findings, computed fresh with every scan — see src/core/hygiene/index.ts. Likely-unused findings are never included here; see 'cleanup-result' below. */
+  hygieneFindings: DependencyFinding[];
 }
 
 export type HostToWebviewMessage =
@@ -237,7 +255,25 @@ export type HostToWebviewMessage =
   /** The host-owned remediation analysis result for `package`, ready for the Action cell to render. */
   | { status: 'remediation-result'; package: string; result: RemediationResult }
   /** `package` could not be analyzed — an ineligible/forged request, a stale project snapshot, or a resolver failure that still deserves a user-visible reason rather than silently falling back to "unknown". */
-  | { status: 'remediation-error'; package: string; error: ProtocolError };
+  | { status: 'remediation-error'; package: string; error: ProtocolError }
+  /** "Where is this used?" (or the per-package half of an "Analyze cleanup" run) has started for `package`. */
+  | { status: 'usage-analyzing'; package: string }
+  /** The host-owned usage-analysis result for `package`, ready to render as a reference list. */
+  | { status: 'usage-result'; package: string; analysis: UsageAnalysisResult }
+  /** `package`'s usage analysis failed or was cancelled. */
+  | { status: 'usage-error'; package: string; error: ProtocolError }
+  /** A full "Analyze cleanup" run (every direct dependency) is in progress — the only genuinely-observable progress signal this produces is files scanned so far. */
+  | { status: 'cleanup-analyzing'; scanned: number; total: number }
+  /**
+   * Likely-unused findings from a completed "Analyze cleanup" run — the
+   * webview merges these with the deprecated/duplicate-version findings it
+   * already has (`DashboardData.hygieneFindings`) and re-derives the
+   * summary itself via the same `summarizeHygieneFindings` the host uses,
+   * rather than trusting two independently-computed counts to agree.
+   */
+  | { status: 'cleanup-result'; findings: DependencyFinding[] }
+  /** The cleanup run failed or was cancelled before producing a result. */
+  | { status: 'cleanup-error'; error: ProtocolError };
 
 /**
  * `package` and `target` are the smallest request that lets the host verify
@@ -292,7 +328,20 @@ export type WebviewToHostMessage =
    * webview could forge into a different analysis than the one its own row
    * actually shows.
    */
-  | { type: 'analyze-remediation'; package: string };
+  | { type: 'analyze-remediation'; package: string }
+  /** On-demand, single-package usage scan — see src/core/usage/ and src/host/usage/usageAnalyzer.ts. Only ever a package name; the host re-derives everything else (which project, which files) from its own trusted state. */
+  | { type: 'where-used'; package: string }
+  /** On-demand usage scan across every direct dependency at once — see usageCoordinator.ts's handleAnalyzeCleanup. No payload: there is nothing for the webview to choose here either. */
+  | { type: 'analyze-cleanup' }
+  /** Cancels whichever usage analysis (a `where-used` or an `analyze-cleanup` run) is currently in progress for this panel. */
+  | { type: 'cancel-usage-analysis' }
+  /**
+   * The one place a usage-analysis reference is ever opened. `usageId` and
+   * `referenceIndex` are opaque, host-issued values — never a filesystem
+   * path or line number the webview constructed itself. See
+   * src/host/usage/usageReferenceStore.ts for the trust boundary.
+   */
+  | { type: 'open-usage-reference'; usageId: string; referenceIndex: number };
 
 const DATA_STATUSES: ReadonlySet<string> = new Set(['empty', 'ready', 'stale', 'partial-error']);
 
@@ -308,6 +357,7 @@ function isSelectedProjectInfo(value: unknown): value is SelectedProjectInfo {
 function isDashboardData(value: unknown): value is DashboardData {
   if (!isRecord(value)) return false;
   const rows = value['rows'];
+  const hygieneFindings = value['hygieneFindings'];
   return (
     Array.isArray(rows) &&
     rows.every(isPackageRow) &&
@@ -315,7 +365,9 @@ function isDashboardData(value: unknown): value is DashboardData {
     isSelectedProjectInfo(value['project']) &&
     typeof value['canChangeProject'] === 'boolean' &&
     isAbsentOr(value['advisoriesError'], isProtocolError) &&
-    isAbsentOr(value['auditUnavailable'], (v) => typeof v === 'boolean')
+    isAbsentOr(value['auditUnavailable'], (v) => typeof v === 'boolean') &&
+    Array.isArray(hygieneFindings) &&
+    hygieneFindings.every(isDependencyFinding)
   );
 }
 
@@ -370,8 +422,21 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (type === 'configure-verification') {
     return hasOnlyKeys(value, ['type']);
   }
-  if (type === 'analyze-remediation') {
+  if (type === 'analyze-remediation' || type === 'where-used') {
     return hasOnlyKeys(value, ['type', 'package']) && isNonEmptyString(value['package']);
+  }
+  if (type === 'analyze-cleanup' || type === 'cancel-usage-analysis') {
+    return hasOnlyKeys(value, ['type']);
+  }
+  if (type === 'open-usage-reference') {
+    const referenceIndex = value['referenceIndex'];
+    return (
+      hasOnlyKeys(value, ['type', 'usageId', 'referenceIndex']) &&
+      isNonEmptyString(value['usageId']) &&
+      typeof referenceIndex === 'number' &&
+      Number.isInteger(referenceIndex) &&
+      referenceIndex >= 0
+    );
   }
   return false;
 }
@@ -625,6 +690,38 @@ function isRemediationResult(value: unknown): value is RemediationResult {
   return typeof status === 'string' && REMEDIATION_OUTCOME_STATUSES.has(status) && isSecurityOutcome(value['security']);
 }
 
+const REFERENCE_KINDS: ReadonlySet<string> = new Set(['import', 'require', 'dynamic-import', 'script', 'config']);
+
+function isDependencyReference(value: unknown): value is DependencyReference {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value['filePath'] === 'string' &&
+    typeof value['line'] === 'number' &&
+    typeof value['column'] === 'number' &&
+    typeof value['snippet'] === 'string' &&
+    typeof value['kind'] === 'string' &&
+    REFERENCE_KINDS.has(value['kind']) &&
+    isAbsentOr(value['context'], (v) => typeof v === 'string')
+  );
+}
+
+function isDependencyUsageResult(value: unknown): value is DependencyUsageResult {
+  if (!isRecord(value)) return false;
+  const references = value['references'];
+  return (
+    typeof value['packageName'] === 'string' &&
+    Array.isArray(references) &&
+    references.every(isDependencyReference) &&
+    typeof value['truncated'] === 'boolean' &&
+    typeof value['scannedFileCount'] === 'number' &&
+    typeof value['scannedAt'] === 'string'
+  );
+}
+
+function isUsageAnalysisResult(value: unknown): value is UsageAnalysisResult {
+  return isRecord(value) && isNonEmptyString(value['usageId']) && isDependencyUsageResult(value['result']);
+}
+
 export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMessage {
   if (!isRecord(value)) return false;
 
@@ -669,6 +766,37 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
       isNonEmptyString(value['package']) &&
       isProtocolError(value['error'])
     );
+  }
+  if (status === 'usage-analyzing') {
+    return hasOnlyKeys(value, ['status', 'package']) && isNonEmptyString(value['package']);
+  }
+  if (status === 'usage-result') {
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'analysis']) &&
+      isNonEmptyString(value['package']) &&
+      isUsageAnalysisResult(value['analysis'])
+    );
+  }
+  if (status === 'usage-error') {
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'error']) &&
+      isNonEmptyString(value['package']) &&
+      isProtocolError(value['error'])
+    );
+  }
+  if (status === 'cleanup-analyzing') {
+    return (
+      hasOnlyKeys(value, ['status', 'scanned', 'total']) &&
+      typeof value['scanned'] === 'number' &&
+      typeof value['total'] === 'number'
+    );
+  }
+  if (status === 'cleanup-result') {
+    const findings = value['findings'];
+    return hasOnlyKeys(value, ['status', 'findings']) && Array.isArray(findings) && findings.every(isDependencyFinding);
+  }
+  if (status === 'cleanup-error') {
+    return hasOnlyKeys(value, ['status', 'error']) && isProtocolError(value['error']);
   }
   if (DATA_STATUSES.has(status)) {
     return hasOnlyKeys(value, ['status', 'data']) && isDashboardData(value['data']);

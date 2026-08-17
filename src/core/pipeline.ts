@@ -19,6 +19,8 @@ import { attachPatchedVersions, distinctFlaggedPackages } from './advisories/rem
 import { buildBulkRequestBody, fetchBulkAdvisories } from './advisories/bulk.js';
 import { directNodes } from './lockfile/parse.js';
 import { buildDependencyGraph } from './lockfile/build.js';
+import { computeGraphHygieneFindings } from './hygiene/index.js';
+import type { DependencyFinding } from './hygiene/index.js';
 import { parseManifest } from './manifest/parse.js';
 import type { HttpClient } from './registry/http.js';
 import { FetchError } from './registry/http.js';
@@ -52,6 +54,13 @@ export interface BuildPackageRowsResult {
   advisoriesError?: FetchError;
   /** True when no runner was given, or audit failed / returned unparseable output. */
   auditUnavailable?: boolean;
+  /**
+   * Deprecated + duplicate-version findings — graph-only, deterministic, and
+   * therefore cheap enough to compute on every scan (see
+   * src/core/hygiene/index.ts). Likely-unused findings are never included
+   * here; they require an on-demand workspace scan (see src/core/usage/).
+   */
+  hygieneFindings: DependencyFinding[];
 }
 
 /**
@@ -236,7 +245,9 @@ export async function buildPackageRows(
     return row;
   });
 
-  const result: BuildPackageRowsResult = { rows };
+  const hygieneFindings = computeGraphHygieneFindings(rows, graph, manifest.dependencies);
+
+  const result: BuildPackageRowsResult = { rows, hygieneFindings };
   if (advisoriesError !== undefined) result.advisoriesError = advisoriesError;
   if (auditUnavailable) result.auditUnavailable = true;
   return result;

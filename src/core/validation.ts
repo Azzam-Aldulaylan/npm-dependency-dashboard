@@ -19,6 +19,8 @@ import type {
   Severity,
   UnresolvableReason,
 } from './types.js';
+import type { DependencyFinding, FindingConfidence, FindingSeverity, InstallPathVersionEntry } from './hygiene/types.js';
+import type { DependencyClassification } from './upgrade/plan.js';
 
 /** A failure flattened for transport or persistence. Never a live Error instance. */
 export interface ProtocolError {
@@ -128,4 +130,71 @@ export function isPackageRow(value: unknown): value is PackageRow {
       (v) => typeof v === 'string' && UNRESOLVABLE_REASONS.has(v)
     )
   );
+}
+
+// ------------------------------------------------------- hygiene findings
+
+const FINDING_KINDS: ReadonlySet<string> = new Set(['deprecated', 'duplicate-version', 'likely-unused']);
+const FINDING_CONFIDENCES: ReadonlySet<string> = new Set<FindingConfidence>(['high', 'medium', 'low']);
+const FINDING_SEVERITIES: ReadonlySet<string> = new Set<FindingSeverity>(['info', 'warning', 'attention']);
+const DEPENDENCY_CLASSIFICATIONS: ReadonlySet<string> = new Set<DependencyClassification>(['prod', 'dev', 'optional']);
+
+function isDependencyClassification(value: unknown): value is DependencyClassification {
+  return typeof value === 'string' && DEPENDENCY_CLASSIFICATIONS.has(value);
+}
+
+function isDirectMarker(value: unknown): value is { classification: DependencyClassification } | null {
+  if (value === null) return true;
+  return isRecord(value) && Object.keys(value).length === 1 && isDependencyClassification(value['classification']);
+}
+
+export function isInstallPathVersionEntry(value: unknown): value is InstallPathVersionEntry {
+  if (!isRecord(value)) return false;
+  const paths = value['paths'];
+  return (
+    typeof value['version'] === 'string' &&
+    isDirectMarker(value['direct']) &&
+    Array.isArray(paths) &&
+    paths.every((path) => Array.isArray(path) && path.every((segment) => typeof segment === 'string')) &&
+    typeof value['totalPaths'] === 'number' &&
+    typeof value['truncated'] === 'boolean'
+  );
+}
+
+function isDeprecatedEvidence(value: Record<string, unknown>): boolean {
+  return (
+    value['kind'] === 'deprecated' &&
+    typeof value['message'] === 'string' &&
+    isAbsentOr(value['suggestedReplacement'], (v) => typeof v === 'string')
+  );
+}
+
+function isDuplicateVersionEvidence(value: Record<string, unknown>): boolean {
+  const versions = value['versions'];
+  return value['kind'] === 'duplicate-version' && Array.isArray(versions) && versions.every(isInstallPathVersionEntry);
+}
+
+function isLikelyUnusedEvidence(value: Record<string, unknown>): boolean {
+  return (
+    value['kind'] === 'likely-unused' &&
+    typeof value['reason'] === 'string' &&
+    typeof value['scannedFileCount'] === 'number' &&
+    typeof value['truncated'] === 'boolean'
+  );
+}
+
+export function isDependencyFinding(value: unknown): value is DependencyFinding {
+  if (!isRecord(value)) return false;
+  const kind = value['kind'];
+  if (typeof kind !== 'string' || !FINDING_KINDS.has(kind)) return false;
+  if (typeof value['packageName'] !== 'string') return false;
+  if (typeof value['summary'] !== 'string') return false;
+  if (!isAbsentOr(value['confidence'], (v) => typeof v === 'string' && FINDING_CONFIDENCES.has(v))) return false;
+  if (typeof value['severity'] !== 'string' || !FINDING_SEVERITIES.has(value['severity'])) return false;
+
+  const evidence = value['evidence'];
+  if (!isRecord(evidence)) return false;
+  if (kind === 'deprecated') return isDeprecatedEvidence(evidence);
+  if (kind === 'duplicate-version') return isDuplicateVersionEvidence(evidence);
+  return isLikelyUnusedEvidence(evidence);
 }

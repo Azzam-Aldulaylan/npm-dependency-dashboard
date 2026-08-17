@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 
+import type { DependencyFinding } from '../../src/core/hygiene/types.js';
 import type { DependencyTypeFilter as DependencyTypeFilterValue } from '../../src/host/dependencyTypeFilter.js';
 import { dependencyTypeFilterPredicate } from '../../src/host/dependencyTypeFilter.js';
 import { dependencyCountLabel } from '../../src/host/dependencySummary.js';
@@ -16,6 +17,8 @@ import { upgradeErrorClearsActiveState, upgradeErrorIsUserVisible } from '../../
 import type { DashboardData, HostToWebviewMessage, UpgradeAnalysisPresentation } from '../../src/host/webviewProtocol.js';
 import { isHostToWebviewMessage } from '../../src/host/webviewProtocol.js';
 import { DashboardToolbar } from './components/DashboardToolbar.js';
+import { DependencyDetailsModal } from './components/DependencyDetailsModal.js';
+import type { UsageRequestState } from './components/DependencyDetailsModal.js';
 import { DependencyEmptyState } from './components/DependencyEmptyState.js';
 import { DependencyLoadingState } from './components/DependencyLoadingState.js';
 import { DependencySearch } from './components/DependencySearch.js';
@@ -24,7 +27,7 @@ import { Pagination } from './components/Pagination.js';
 import { PackageTable } from './components/PackageTable.js';
 import { SummaryCards } from './components/SummaryCards.js';
 import { UpgradeAnalysisModal } from './components/UpgradeAnalysisModal.js';
-import { IconAlertTriangle, IconRefresh } from './icons.js';
+import { IconAlertTriangle, IconBroom, IconRefresh } from './icons.js';
 import { vscode } from './vscodeApi.js';
 
 function formatTime(iso: string): string {
@@ -112,6 +115,17 @@ export function App(): ReactElement {
   );
   const [remediationError, setRemediationError] = useState<{ package: string; message: string } | null>(null);
 
+  // The row this webview session currently has "Dependency details" open
+  // for, and its own on-demand usage-analysis state per package — see
+  // DependencyDetailsModal.tsx. Never a fact from the host's own scan.
+  const [detailsPackage, setDetailsPackage] = useState<string | null>(null);
+  const [usageByPackage, setUsageByPackage] = useState<ReadonlyMap<string, UsageRequestState>>(() => new Map());
+  const [cleanupState, setCleanupState] = useState<
+    { phase: 'idle' } | { phase: 'analyzing'; scanned: number; total: number } | { phase: 'done' }
+  >({ phase: 'idle' });
+  const [cleanupFindings, setCleanupFindings] = useState<DependencyFinding[]>([]);
+  const [cleanupError, setCleanupError] = useState<string | null>(null);
+
   useEffect(() => {
     const onMessage = (event: MessageEvent): void => {
       // The webview is its own security context and `message` events are not
@@ -189,6 +203,54 @@ export function App(): ReactElement {
         return;
       }
 
+      if (incoming.status === 'usage-analyzing') {
+        setUsageByPackage((previous) => {
+          const next = new Map(previous);
+          next.set(incoming.package, { phase: 'analyzing' });
+          return next;
+        });
+        return;
+      }
+
+      if (incoming.status === 'usage-result') {
+        setUsageByPackage((previous) => {
+          const next = new Map(previous);
+          next.set(incoming.package, {
+            phase: 'done',
+            usageId: incoming.analysis.usageId,
+            result: incoming.analysis.result,
+          });
+          return next;
+        });
+        return;
+      }
+
+      if (incoming.status === 'usage-error') {
+        setUsageByPackage((previous) => {
+          const next = new Map(previous);
+          next.set(incoming.package, { phase: 'error', message: incoming.error.message });
+          return next;
+        });
+        return;
+      }
+
+      if (incoming.status === 'cleanup-analyzing') {
+        setCleanupState({ phase: 'analyzing', scanned: incoming.scanned, total: incoming.total });
+        return;
+      }
+
+      if (incoming.status === 'cleanup-result') {
+        setCleanupState({ phase: 'done' });
+        setCleanupFindings(incoming.findings);
+        return;
+      }
+
+      if (incoming.status === 'cleanup-error') {
+        setCleanupState({ phase: 'idle' });
+        setCleanupError(incoming.error.message);
+        return;
+      }
+
       // Any other message is a fresh snapshot that supersedes whatever
       // optimistic upgrade state was showing.
       setActiveUpgrade(null);
@@ -199,6 +261,14 @@ export function App(): ReactElement {
       setUpgradeError(null);
       setRemediationByPackage(new Map());
       setRemediationError(null);
+      // Usage-analysis results and unused findings are relative to the rows
+      // a scan just replaced — never carried forward as if they still
+      // describe the current dependency set. `cleanupState` itself is left
+      // alone: a running "Analyze cleanup" scan is independent host-side
+      // work this message doesn't affect.
+      setUsageByPackage(new Map());
+      setCleanupFindings([]);
+      setCleanupError(null);
       setMessage(incoming);
     };
 
@@ -304,6 +374,40 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'analyze-remediation', package: packageName });
   }, []);
 
+  const openDetails = useCallback((packageName: string) => {
+    setDetailsPackage(packageName);
+  }, []);
+
+  const closeDetails = useCallback(() => {
+    setDetailsPackage(null);
+  }, []);
+
+  // Shared by the row menu's "Where is this used?" and the details modal's
+  // own "Scan workspace" button — both send the identical, package-name-only
+  // request (see webviewProtocol.ts's own doc on 'where-used'). Never
+  // re-requested once a result already exists for this package this session.
+  const requestWhereUsed = useCallback(
+    (packageName: string) => {
+      setDetailsPackage(packageName);
+      if (usageByPackage.get(packageName)?.phase === 'done') return;
+      vscode.postMessage({ type: 'where-used', package: packageName });
+    },
+    [usageByPackage]
+  );
+
+  const requestOpenUsageReference = useCallback((usageId: string, referenceIndex: number) => {
+    vscode.postMessage({ type: 'open-usage-reference', usageId, referenceIndex });
+  }, []);
+
+  const requestAnalyzeCleanup = useCallback(() => {
+    setCleanupError(null);
+    vscode.postMessage({ type: 'analyze-cleanup' });
+  }, []);
+
+  const requestCancelCleanup = useCallback(() => {
+    vscode.postMessage({ type: 'cancel-usage-analysis' });
+  }, []);
+
   // No message yet is the same user-visible state as an explicit loading one.
   const loading = message === undefined || message.status === 'loading';
   const data = message !== undefined && 'data' in message ? message.data : undefined;
@@ -357,6 +461,26 @@ export function App(): ReactElement {
         </div>
       ) : null}
 
+      {cleanupError !== null ? (
+        <div className="banner banner--error" role="alert">
+          <IconAlertTriangle className="banner__icon" />
+          <p className="banner__text">Couldn't analyze dependency usage: {cleanupError}</p>
+        </div>
+      ) : null}
+
+      {cleanupState.phase === 'analyzing' ? (
+        <div className="banner banner--info">
+          <IconRefresh className="banner__icon banner__icon--spin" />
+          <p className="banner__text">
+            Analyzing dependency usage
+            {cleanupState.total > 0 ? ` — ${cleanupState.scanned} of ${cleanupState.total} files checked` : '…'}
+          </p>
+          <button className="button button--secondary" type="button" onClick={requestCancelCleanup}>
+            Cancel
+          </button>
+        </div>
+      ) : null}
+
       {message !== undefined && 'data' in message ? (
         <Dashboard
           status={message.status}
@@ -382,6 +506,11 @@ export function App(): ReactElement {
           onChangeProject={changeProject}
           onRefresh={refresh}
           actionsDisabled={actionsDisabled}
+          cleanupFindings={cleanupFindings}
+          cleanupBusy={cleanupState.phase === 'analyzing'}
+          onAnalyzeCleanup={requestAnalyzeCleanup}
+          onOpenDetails={openDetails}
+          onWhereUsed={requestWhereUsed}
         />
       ) : null}
 
@@ -398,6 +527,23 @@ export function App(): ReactElement {
           onConfigureVerification={requestConfigureVerification}
           onOpenAdvisory={requestOpenAdvisory}
         />
+      ) : null}
+
+      {detailsPackage !== null && data !== undefined ? (
+        (() => {
+          const row = data.rows.find((candidate) => candidate.name === detailsPackage);
+          if (row === undefined) return null;
+          return (
+            <DependencyDetailsModal
+              row={row}
+              hygieneFindings={[...data.hygieneFindings, ...cleanupFindings]}
+              usage={usageByPackage.get(detailsPackage)}
+              onRequestUsage={requestWhereUsed}
+              onOpenUsageReference={requestOpenUsageReference}
+              onClose={closeDetails}
+            />
+          );
+        })()
       ) : null}
     </main>
   );
@@ -427,6 +573,11 @@ function Dashboard({
   onChangeProject,
   onRefresh,
   actionsDisabled,
+  cleanupFindings,
+  cleanupBusy,
+  onAnalyzeCleanup,
+  onOpenDetails,
+  onWhereUsed,
 }: {
   status: 'empty' | 'ready' | 'stale' | 'partial-error';
   data: DashboardData;
@@ -451,6 +602,12 @@ function Dashboard({
   onChangeProject: () => void;
   onRefresh: () => void;
   actionsDisabled: boolean;
+  /** Likely-unused findings from the last completed "Analyze cleanup" run this session — see App.tsx. */
+  cleanupFindings: readonly DependencyFinding[];
+  cleanupBusy: boolean;
+  onAnalyzeCleanup: () => void;
+  onOpenDetails: (packageName: string) => void;
+  onWhereUsed: (packageName: string) => void;
 }): ReactElement {
   const degraded = status === 'partial-error' ? partialErrorText(data) : null;
   // A UX nicety only — the host independently rejects any upgrade request
@@ -480,6 +637,11 @@ function Dashboard({
   const pageResult = useMemo(
     () => paginate(filteredRows, page, pageSize),
     [filteredRows, page, pageSize]
+  );
+
+  const hygieneFindings = useMemo(
+    () => [...data.hygieneFindings, ...cleanupFindings],
+    [data.hygieneFindings, cleanupFindings]
   );
 
   return (
@@ -517,6 +679,18 @@ function Dashboard({
             onChangeProject={onChangeProject}
             onRefresh={onRefresh}
             disabled={actionsDisabled}
+            trailingActions={
+              <button
+                className="button button--secondary"
+                type="button"
+                onClick={onAnalyzeCleanup}
+                disabled={actionsDisabled || cleanupBusy}
+                title="Scan the workspace for likely-unused direct dependencies"
+              >
+                <IconBroom />
+                {cleanupBusy ? 'Analyzing…' : 'Analyze cleanup'}
+              </button>
+            }
           >
             <DependencyTypeFilter value={dependencyType} onChange={onDependencyTypeChange} />
           </DashboardToolbar>
@@ -550,6 +724,9 @@ function Dashboard({
                 upgradesDisabled={upgradesDisabled}
                 sortState={sortState}
                 onSort={onSort}
+                hygieneFindings={hygieneFindings}
+                onOpenDetails={onOpenDetails}
+                onWhereUsed={onWhereUsed}
               />
               <Pagination
                 currentPage={pageResult.currentPage}

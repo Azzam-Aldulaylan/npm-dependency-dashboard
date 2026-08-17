@@ -15,9 +15,10 @@
  */
 
 import type { CachedResponse } from '../registry/versions.js';
+import type { DependencyFinding } from '../hygiene/types.js';
 import type { PackageRow } from '../types.js';
 import type { ProtocolError } from '../validation.js';
-import { isAbsentOr, isPackageRow, isProtocolError, isRecord, isStringOrNull } from '../validation.js';
+import { isAbsentOr, isDependencyFinding, isPackageRow, isProtocolError, isRecord, isStringOrNull } from '../validation.js';
 import type { ProjectSourceFingerprint } from './sourceFingerprint.js';
 import { isSourceFingerprint } from './sourceFingerprint.js';
 
@@ -57,6 +58,8 @@ export interface ScanSnapshot {
   rows: PackageRow[];
   advisoriesError?: ProtocolError;
   auditUnavailable?: boolean;
+  /** Deprecated + duplicate-version findings — see src/core/hygiene/index.ts. Optional so a pre-existing persisted entry (written before this field existed) still passes validation as "no findings computed yet" rather than being rejected outright. */
+  hygieneFindings?: DependencyFinding[];
 }
 
 /**
@@ -86,7 +89,8 @@ export function isPersistedProjectCache(value: unknown): value is PersistedProje
     Array.isArray(rows) &&
     rows.every(isPackageRow) &&
     isAbsentOr(value['advisoriesError'], isProtocolError) &&
-    isAbsentOr(value['auditUnavailable'], (v) => typeof v === 'boolean')
+    isAbsentOr(value['auditUnavailable'], (v) => typeof v === 'boolean') &&
+    isAbsentOr(value['hygieneFindings'], (v) => Array.isArray(v) && v.every(isDependencyFinding))
   );
 }
 

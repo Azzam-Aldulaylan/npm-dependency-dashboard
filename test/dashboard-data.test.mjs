@@ -38,6 +38,7 @@ test('a clean result carries rows, project info, and nothing else', () => {
     generatedAt: AT,
     project: PROJECT,
     canChangeProject: CAN_CHANGE_PROJECT,
+    hygieneFindings: [],
   });
 });
 

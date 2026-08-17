@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 
 import type { PackageRow } from '../../../src/core/types.js';
+import type { DependencyFinding } from '../../../src/core/hygiene/types.js';
+import { ownDuplicateFinding } from '../../../src/host/dependencyDetailsCopy.js';
 import type { SortColumn, TableSortState } from '../../../src/host/tableSort.js';
 import { resolveActionState } from '../../../src/host/upgradeAction.js';
 import type { TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
@@ -14,9 +16,11 @@ import {
   IconRoute,
   IconSortArrow,
   IconSortNeutral,
+  IconTarget,
 } from '../icons.js';
 import { AdvisoryDetails } from './AdvisoryDetails.js';
 import { PackageIcon } from './PackageIcon.js';
+import { RowActionsMenu } from './RowActionsMenu.js';
 import { SeverityBadge } from './SeverityBadge.js';
 import { StatusBadge } from './StatusBadge.js';
 import { InfoTooltip } from './Tooltip.js';
@@ -244,6 +248,9 @@ export function PackageTable({
   onOpenAdvisory,
   remediationByPackage,
   onAnalyzeRemediation,
+  hygieneFindings,
+  onOpenDetails,
+  onWhereUsed,
 }: {
   rows: readonly PackageRow[];
   activeUpgrade: string | null;
@@ -261,6 +268,10 @@ export function PackageTable({
   /** This webview session's own "Analyze remediation" phase/result per package — see App.tsx; never persisted, never a fact from the host's own scan. */
   remediationByPackage: ReadonlyMap<string, TransitiveRemediationUiState>;
   onAnalyzeRemediation: (packageName: string) => void;
+  /** Deprecated + duplicate-version findings from the current scan, plus any likely-unused findings from a completed "Analyze cleanup" run — see App.tsx. */
+  hygieneFindings: readonly DependencyFinding[];
+  onOpenDetails: (packageName: string) => void;
+  onWhereUsed: (packageName: string) => void;
 }): ReactElement {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -282,6 +293,7 @@ export function PackageTable({
           <col className="col-available" />
           <col className="col-vulnerabilities" />
           <col className="col-action" />
+          <col className="col-row-menu" />
         </colgroup>
         <thead>
           <tr>
@@ -297,11 +309,18 @@ export function PackageTable({
             />
             <SortableHeader column="vulnerabilities" label="Vulnerabilities" sortState={sortState} onSort={onSort} />
             <th scope="col">Action</th>
+            <th scope="col" className="packages__row-menu-header">
+              <span className="sr-only">More actions</span>
+            </th>
           </tr>
         </thead>
         {rows.map((row) => {
           const expandable = row.advisories.length > 0;
           const isOpen = expandable && expanded.has(row.name);
+          const duplicateFinding = ownDuplicateFinding(hygieneFindings, row.name);
+          const unusedFinding = hygieneFindings.find(
+            (finding) => finding.kind === 'likely-unused' && finding.packageName === row.name
+          );
           return (
             <tbody key={row.name}>
               <tr>
@@ -328,6 +347,16 @@ export function PackageTable({
                   {row.deprecated !== undefined ? (
                     <StatusBadge label="Deprecated" tone="warning" title={row.deprecated} />
                   ) : null}
+                  {duplicateFinding !== undefined ? (
+                    <StatusBadge label="Duplicate versions" tone="warning" title={duplicateFinding.summary} />
+                  ) : null}
+                  {unusedFinding?.evidence.kind === 'likely-unused' ? (
+                    <StatusBadge
+                      label={unusedFinding.confidence === 'high' ? 'Likely unused' : 'Possibly unused'}
+                      tone="warning"
+                      title={unusedFinding.evidence.reason}
+                    />
+                  ) : null}
                 </th>
                 <td className="packages__wrap">
                   <CurrentVersionCell row={row} />
@@ -348,10 +377,32 @@ export function PackageTable({
                     onAnalyzeRemediation={onAnalyzeRemediation}
                   />
                 </td>
+                <td className="packages__row-menu">
+                  <RowActionsMenu
+                    label={`More actions for ${row.name}`}
+                    items={[
+                      {
+                        key: 'where-used',
+                        label: 'Where is this used?',
+                        icon: <IconTarget />,
+                        onSelect: () => {
+                          onWhereUsed(row.name);
+                        },
+                      },
+                      {
+                        key: 'details',
+                        label: 'Dependency details',
+                        onSelect: () => {
+                          onOpenDetails(row.name);
+                        },
+                      },
+                    ]}
+                  />
+                </td>
               </tr>
               {isOpen ? (
                 <tr className="packages__details">
-                  <td colSpan={6}>
+                  <td colSpan={7}>
                     <AdvisoryDetails packageName={row.name} advisories={row.advisories} onOpenAdvisory={onOpenAdvisory} />
                   </td>
                 </tr>

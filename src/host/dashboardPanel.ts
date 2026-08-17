@@ -48,6 +48,7 @@ import { pickProject } from './projectPicker.js';
 import type { DiscoveredProject, ResolvedProject } from './projectResolution.js';
 import { discoverProjects, loadProject } from './projectResolution.js';
 import { UpgradeAssistantCoordinator } from './upgradeAssistantCoordinator.js';
+import { UsageAnalysisCoordinator } from './usage/usageCoordinator.js';
 import type { ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
 import type { WebviewToHostMessage } from './webviewProtocol.js';
 import { isWebviewToHostMessage } from './webviewProtocol.js';
@@ -107,6 +108,8 @@ export class DashboardPanel {
   private pending: Promise<DashboardController | undefined> | undefined;
   /** Owns preflight, confirmation, transaction, verification, and completion. */
   private readonly upgradeCoordinator: UpgradeAssistantCoordinator;
+  /** Owns on-demand "Where is this used?" / "Analyze cleanup" usage analysis — see src/host/usage/usageCoordinator.ts. */
+  private readonly usageCoordinator: UsageAnalysisCoordinator;
   /**
    * Shared across every controller this panel ever builds (initial open and
    * every reload) so ETag caching survives a reload — only the project
@@ -176,6 +179,12 @@ export class DashboardPanel {
       reloadFinalState: () => this.reloadAndScan(),
       flushDeferredChanges: () => this.fileChangeCoordinator.flushDeferred(),
     });
+    this.usageCoordinator = new UsageAnalysisCoordinator({
+      sink: this.sink,
+      ensureController: () => this.ensureController(),
+      getSelectedProject: () => this.selectedProject,
+      isDisposed: () => this.disposed,
+    });
     this.backgroundTimer = new BackgroundRefreshTimer(realTimerScheduler, BACKGROUND_REFRESH_INTERVAL_MS, () => {
       this.onBackgroundTick();
     });
@@ -203,6 +212,7 @@ export class DashboardPanel {
         // even after its panel closes. The transaction's async owner keeps the
         // session alive until install/verification/rollback completes.
         this.upgradeCoordinator.disposeWhenIdle();
+        this.usageCoordinator.dispose();
         this.disposeWatchers();
         this.fileChangeCoordinator.dispose();
         this.backgroundTimer.dispose();
@@ -273,6 +283,39 @@ export class DashboardPanel {
         return;
       }
       await this.upgradeCoordinator.handleAnalyzeRemediation(message);
+      return;
+    }
+    if (message.type === 'where-used') {
+      // Same rule as analyze-remediation: read-only, but a concurrent read
+      // could still race an in-flight upgrade's file writes.
+      if (this.upgradeCoordinator.isBusy()) {
+        this.sink.postMessage({
+          status: 'usage-error',
+          package: message.package,
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+        });
+        return;
+      }
+      await this.usageCoordinator.handleWhereUsed(message);
+      return;
+    }
+    if (message.type === 'analyze-cleanup') {
+      if (this.upgradeCoordinator.isBusy()) {
+        this.sink.postMessage({
+          status: 'cleanup-error',
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+        });
+        return;
+      }
+      await this.usageCoordinator.handleAnalyzeCleanup();
+      return;
+    }
+    if (message.type === 'cancel-usage-analysis') {
+      this.usageCoordinator.handleCancel();
+      return;
+    }
+    if (message.type === 'open-usage-reference') {
+      this.usageCoordinator.handleOpenReference(message);
       return;
     }
     if (message.type === 'change-project') {

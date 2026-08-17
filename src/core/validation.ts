@@ -11,7 +11,14 @@
  * No `vscode` import, ever — see webviewProtocol.ts's own rule for why.
  */
 
-import type { AttributedAdvisory, Advisory, PackageRow, Severity, UnresolvableReason } from './types.js';
+import type {
+  AttributedAdvisory,
+  Advisory,
+  PackageRow,
+  PatchedVersionResult,
+  Severity,
+  UnresolvableReason,
+} from './types.js';
 
 /** A failure flattened for transport or persistence. Never a live Error instance. */
 export interface ProtocolError {
@@ -71,6 +78,16 @@ export function isAdvisory(value: unknown): value is Advisory {
   );
 }
 
+export function isPatchedVersionResult(value: unknown): value is PatchedVersionResult {
+  if (!isRecord(value)) return false;
+  const status = value['status'];
+  if (status === 'none' || status === 'unknown') return Object.keys(value).length === 1;
+  if (status === 'known') {
+    return Object.keys(value).length === 2 && typeof value['version'] === 'string';
+  }
+  return false;
+}
+
 export function isAttributedAdvisory(value: unknown): value is AttributedAdvisory {
   if (!isRecord(value)) return false;
   const path = value['path'];
@@ -78,14 +95,19 @@ export function isAttributedAdvisory(value: unknown): value is AttributedAdvisor
     isAdvisory(value['advisory']) &&
     typeof value['flaggedPackage'] === 'string' &&
     Array.isArray(path) &&
-    path.every((segment) => typeof segment === 'string')
+    path.every((segment) => typeof segment === 'string') &&
+    isPatchedVersionResult(value['patchedVersion'])
   );
 }
+
+const UPGRADE_REASONS: ReadonlySet<string> = new Set(['security-fix', 'update']);
 
 export function isPackageRow(value: unknown): value is PackageRow {
   if (!isRecord(value)) return false;
   const advisories = value['advisories'];
   const worstSeverity = value['worstSeverity'];
+  const upgradeTo = value['upgradeTo'];
+  const upgradeReason = value['upgradeReason'];
   return (
     typeof value['name'] === 'string' &&
     isStringOrNull(value['current']) &&
@@ -93,7 +115,9 @@ export function isPackageRow(value: unknown): value is PackageRow {
     isStringOrNull(value['latest']) &&
     typeof value['dev'] === 'boolean' &&
     typeof value['range'] === 'string' &&
-    isStringOrNull(value['upgradeTo']) &&
+    isStringOrNull(upgradeTo) &&
+    // `upgradeReason` is null exactly when `upgradeTo` is — see PackageRow's own doc.
+    (upgradeTo === null ? upgradeReason === null : typeof upgradeReason === 'string' && UPGRADE_REASONS.has(upgradeReason)) &&
     (worstSeverity === null ||
       (typeof worstSeverity === 'string' && SEVERITIES.has(worstSeverity))) &&
     Array.isArray(advisories) &&

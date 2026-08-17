@@ -1,77 +1,129 @@
 import { useState } from 'react';
-import type { ReactElement } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 
 import type { PackageRow } from '../../../src/core/types.js';
-import { upgradeActionDisplay } from '../../../src/host/upgradeAction.js';
-import type { CurrentVersionTag } from '../../../src/host/versionDisplay.js';
-import { currentVersionDisplay, versionDisplay } from '../../../src/host/versionDisplay.js';
+import type { SortColumn, TableSortState } from '../../../src/host/tableSort.js';
+import { resolveActionState } from '../../../src/host/upgradeAction.js';
+import type { TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
+import {
+  IconAlertTriangle,
+  IconChevronRight,
+  IconCheck,
+  IconHelpCircle,
+  IconRefresh,
+  IconRoute,
+  IconSortArrow,
+  IconSortNeutral,
+} from '../icons.js';
 import { AdvisoryDetails } from './AdvisoryDetails.js';
+import { PackageIcon } from './PackageIcon.js';
 import { SeverityBadge } from './SeverityBadge.js';
-
-const TAG_LABELS: Record<CurrentVersionTag, string> = {
-  'workspace-link': 'workspace',
-  file: 'file:',
-  git: 'git',
-  alias: 'alias',
-  tarball: 'tarball',
-  'no-lockfile': 'unresolved',
-  unresolved: 'unresolved',
-};
+import { StatusBadge } from './StatusBadge.js';
+import { InfoTooltip } from './Tooltip.js';
+import {
+  AvailableHeaderInfo,
+  AvailableHeaderLabel,
+  AvailableVersionCell,
+  CurrentHeaderLabel,
+  CurrentVersionCell,
+} from './VersionCell.js';
 
 /**
- * Same terminology `npm outdated` uses for its own Current/Wanted/Latest
- * columns, so the meanings carry over for anyone already familiar with it.
+ * A `<th>` whose label doubles as a sort trigger — `none -> asc -> desc ->
+ * none` on click, `aria-sort` kept in lockstep. `extra` renders as the
+ * button's *sibling*, never its child: a `<button>` cannot legally contain
+ * another interactive element (see VersionCell's AvailableHeaderInfo doc),
+ * which the Available column's info trigger needs to be.
  */
-const CURRENT_EXPLANATION = 'Version installed according to the lockfile.';
-const WANTED_EXPLANATION = 'Newest version allowed by the range in package.json.';
-const LATEST_EXPLANATION = 'Newest stable version published to npm.';
-
-function AvailableVersion({ row }: { row: PackageRow }): ReactElement {
-  const display = versionDisplay(row.wanted, row.latest);
-  if (display.kind === 'dash') return <span aria-hidden="true">—</span>;
-  if (display.kind === 'single') return <span className="version-value">{display.value}</span>;
+function SortableHeader({
+  column,
+  label,
+  extra,
+  sortState,
+  onSort,
+}: {
+  column: SortColumn;
+  label: ReactNode;
+  extra?: ReactNode;
+  sortState: TableSortState;
+  onSort: (column: SortColumn) => void;
+}): ReactElement {
+  const direction = sortState !== null && sortState.column === column ? sortState.direction : null;
+  const ariaSort = direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : 'none';
   return (
-    <span className="version-lines">
-      <span className="version-line">
-        <span
-          className="version-label"
-          title={WANTED_EXPLANATION}
-          aria-label={`Wanted: ${WANTED_EXPLANATION}`}
+    <th scope="col" aria-sort={ariaSort} className="sortable-header">
+      <span className="sortable-header__row">
+        <button
+          type="button"
+          className="sort-header"
+          onClick={() => {
+            onSort(column);
+          }}
         >
-          Wanted
-        </span>
-        <span className="version-value">{display.wanted}</span>
+          <span>{label}</span>
+          {direction === null ? (
+            <IconSortNeutral className="sort-header__icon sort-header__icon--neutral" />
+          ) : (
+            <IconSortArrow className={`sort-header__icon${direction === 'desc' ? ' sort-header__icon--desc' : ''}`} />
+          )}
+        </button>
+        {extra}
       </span>
-      <span className="version-line">
-        <span
-          className="version-label"
-          title={LATEST_EXPLANATION}
-          aria-label={`Latest: ${LATEST_EXPLANATION}`}
-        >
-          Latest
-        </span>
-        <span className="version-value">{display.latest}</span>
-      </span>
+    </th>
+  );
+}
+
+/**
+ * The Action cell's quiet, non-clickable states — Up to date, Unavailable,
+ * and every transitive-remediation result — share one layout: an icon, a
+ * label, and (except Up to date, which needs no further explanation) an
+ * InfoTooltip carrying the host-computed reason. Structured this way rather
+ * than a `title` attribute so the reason is reachable by hover, focus, and
+ * click alike — see Tooltip.tsx's own doc.
+ */
+function QuietAction({
+  icon,
+  label,
+  tooltipLabel,
+  tooltip,
+  muted,
+  tone,
+}: {
+  icon?: ReactNode;
+  label: string;
+  /** Omitted only for Up to date, which is self-explanatory without a popover. */
+  tooltipLabel?: string;
+  tooltip?: string;
+  muted?: boolean;
+  tone?: 'resolved';
+}): ReactElement {
+  return (
+    <span className={`action-quiet${muted === true ? ' action-quiet--muted' : ''}${tone === 'resolved' ? ' action-quiet--resolved' : ''}`}>
+      {icon}
+      {label}
+      {tooltipLabel !== undefined && tooltip !== undefined ? (
+        <InfoTooltip label={tooltipLabel} content={<p>{tooltip}</p>} />
+      ) : null}
     </span>
   );
 }
 
-function CurrentVersion({ row }: { row: PackageRow }): ReactElement {
-  const display = currentVersionDisplay(row.current, row.range, row.unresolvable);
-  const text = display.kind === 'dash' ? '—' : display.value;
-  if (display.tag === null) return <>{text}</>;
-  return (
-    <>
-      {text} <span className="tag">{TAG_LABELS[display.tag]}</span>
-    </>
-  );
-}
-
+/**
+ * Every clickable branch here sends the identical `{ package, target }`
+ * upgrade message through the identical host-owned validate/preflight/
+ * confirm/install pipeline (see resolveActionState's own doc) — only the
+ * label, tooltip, and visual weight change with what the host has already
+ * decided is on offer. "Analyze remediation" is the one exception: it sends
+ * only a package name (see analyze-remediation's own doc in
+ * webviewProtocol.ts) through an entirely separate, read-only host flow.
+ */
 function UpgradeAction({
   row,
   activeUpgrade,
   onUpgrade,
   upgradesDisabled,
+  remediation,
+  onAnalyzeRemediation,
 }: {
   row: PackageRow;
   /** The one package this webview asked to upgrade, or null. The host allows only one upgrade at a time for the whole panel, so every button is disabled while this is set — not just the row it names. */
@@ -79,16 +131,91 @@ function UpgradeAction({
   onUpgrade: (packageName: string, target: string) => void;
   /** UX only — the host rejects the request either way (see PackageTable's own doc). */
   upgradesDisabled: boolean;
+  /** This row's own remediation-analysis phase/result, if any has been requested this session — see App.tsx. */
+  remediation: TransitiveRemediationUiState | undefined;
+  onAnalyzeRemediation: (packageName: string) => void;
 }): ReactElement {
-  const { upgradeTo } = row;
-  if (upgradeTo === null) return <span aria-hidden="true">—</span>;
-  const action = upgradeActionDisplay(upgradeTo);
-  if (action === null) return <span aria-hidden="true">—</span>;
+  const state = resolveActionState(row, remediation);
+
+  if (state.kind === 'up-to-date') {
+    return <QuietAction icon={<IconCheck className="action-quiet__icon" />} label="Up to date" />;
+  }
+  if (state.kind === 'unavailable') {
+    return (
+      <QuietAction label="Unavailable" muted tooltipLabel="Why this dependency has no upgrade action" tooltip={state.tooltip} />
+    );
+  }
+  if (state.kind === 'no-direct-fix') {
+    return (
+      <QuietAction
+        icon={<IconAlertTriangle className="action-quiet__icon action-quiet__icon--warning" />}
+        label="No direct fix"
+        muted
+        tooltipLabel="Why there is no direct fix"
+        tooltip={state.tooltip}
+      />
+    );
+  }
+  if (state.kind === 'remediation-unknown') {
+    return (
+      <QuietAction
+        icon={<IconHelpCircle className="action-quiet__icon" />}
+        label="Remediation unknown"
+        muted
+        tooltipLabel="Why remediation is unknown"
+        tooltip={state.tooltip}
+      />
+    );
+  }
+  if (state.kind === 'remediation-resolved') {
+    return (
+      <QuietAction
+        icon={<IconCheck className="action-quiet__icon action-quiet__icon--resolved" />}
+        label="Fix available"
+        tone="resolved"
+        tooltipLabel="How this fix works"
+        tooltip={state.tooltip}
+      />
+    );
+  }
+  if (state.kind === 'remediation-analyzing') {
+    return (
+      <QuietAction
+        icon={<IconRefresh className="action-quiet__icon action-quiet__icon--spin" />}
+        label="Analyzing…"
+        muted
+      />
+    );
+  }
+
   const isThisRowUpgrading = activeUpgrade === row.name;
   const disabled = activeUpgrade !== null || upgradesDisabled;
+
+  if (state.kind === 'transitive-remediation') {
+    return (
+      <button
+        className="button button--analyze"
+        type="button"
+        disabled={disabled}
+        title={
+          upgradesDisabled ? 'Dependency data is being refreshed — try again once it finishes.' : state.tooltip
+        }
+        onClick={() => {
+          onAnalyzeRemediation(row.name);
+        }}
+      >
+        <IconRoute />
+        {state.label}
+      </button>
+    );
+  }
+
+  const tone =
+    state.kind === 'security-fix' ? 'button--security' : state.updateKind === 'major' ? 'button--analyze' : 'button--subtle';
+
   return (
     <button
-      className="button"
+      className={`button ${tone}`}
       type="button"
       disabled={disabled}
       title={
@@ -96,13 +223,13 @@ function UpgradeAction({
           ? 'Upgrade in progress…'
           : upgradesDisabled
             ? 'Dependency data is being refreshed — try again once it finishes.'
-            : action.tooltip
+            : state.tooltip
       }
       onClick={() => {
-        onUpgrade(row.name, upgradeTo);
+        onUpgrade(row.name, state.target);
       }}
     >
-      {isThisRowUpgrading ? 'Upgrading…' : action.label}
+      {isThisRowUpgrading ? 'Upgrading…' : state.label}
     </button>
   );
 }
@@ -112,6 +239,11 @@ export function PackageTable({
   activeUpgrade,
   onUpgrade,
   upgradesDisabled,
+  sortState,
+  onSort,
+  onOpenAdvisory,
+  remediationByPackage,
+  onAnalyzeRemediation,
 }: {
   rows: readonly PackageRow[];
   activeUpgrade: string | null;
@@ -123,6 +255,12 @@ export function PackageTable({
    * stale, regardless of what this prop says.
    */
   upgradesDisabled: boolean;
+  sortState: TableSortState;
+  onSort: (column: SortColumn) => void;
+  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  /** This webview session's own "Analyze remediation" phase/result per package — see App.tsx; never persisted, never a fact from the host's own scan. */
+  remediationByPackage: ReadonlyMap<string, TransitiveRemediationUiState>;
+  onAnalyzeRemediation: (packageName: string) => void;
 }): ReactElement {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -148,12 +286,16 @@ export function PackageTable({
         <thead>
           <tr>
             <th scope="col" className="packages__disclosure" />
-            <th scope="col">Package</th>
-            <th scope="col" title={CURRENT_EXPLANATION} aria-label={`Current: ${CURRENT_EXPLANATION}`}>
-              Current
-            </th>
-            <th scope="col">Available</th>
-            <th scope="col">Vulnerabilities</th>
+            <SortableHeader column="package" label="Package" sortState={sortState} onSort={onSort} />
+            <SortableHeader column="current" label={<CurrentHeaderLabel />} sortState={sortState} onSort={onSort} />
+            <SortableHeader
+              column="available"
+              label={<AvailableHeaderLabel />}
+              extra={<AvailableHeaderInfo />}
+              sortState={sortState}
+              onSort={onSort}
+            />
+            <SortableHeader column="vulnerabilities" label="Vulnerabilities" sortState={sortState} onSort={onSort} />
             <th scope="col">Action</th>
           </tr>
         </thead>
@@ -168,25 +310,30 @@ export function PackageTable({
                     <button
                       className="disclosure"
                       type="button"
+                      data-open={isOpen ? 'true' : undefined}
                       aria-expanded={isOpen}
                       aria-label={`${isOpen ? 'Hide' : 'Show'} advisories for ${row.name}`}
                       onClick={() => {
                         toggle(row.name);
                       }}
                     >
-                      {isOpen ? '▾' : '▸'}
+                      <IconChevronRight />
                     </button>
                   ) : null}
                 </td>
                 <th scope="row" className="packages__name">
+                  <PackageIcon name={row.name} />
                   <span className="packages__name-text">{row.name}</span>
-                  {row.dev ? <span className="dev-badge">Dev</span> : null}
+                  {row.dev ? <StatusBadge label="Dev" /> : null}
+                  {row.deprecated !== undefined ? (
+                    <StatusBadge label="Deprecated" tone="warning" title={row.deprecated} />
+                  ) : null}
                 </th>
                 <td className="packages__wrap">
-                  <CurrentVersion row={row} />
+                  <CurrentVersionCell row={row} />
                 </td>
                 <td className="packages__wrap">
-                  <AvailableVersion row={row} />
+                  <AvailableVersionCell row={row} />
                 </td>
                 <td>
                   <SeverityBadge severity={row.worstSeverity} />
@@ -197,13 +344,15 @@ export function PackageTable({
                     activeUpgrade={activeUpgrade}
                     onUpgrade={onUpgrade}
                     upgradesDisabled={upgradesDisabled}
+                    remediation={remediationByPackage.get(row.name)}
+                    onAnalyzeRemediation={onAnalyzeRemediation}
                   />
                 </td>
               </tr>
               {isOpen ? (
                 <tr className="packages__details">
                   <td colSpan={6}>
-                    <AdvisoryDetails advisories={row.advisories} />
+                    <AdvisoryDetails packageName={row.name} advisories={row.advisories} onOpenAdvisory={onOpenAdvisory} />
                   </td>
                 </tr>
               ) : null}

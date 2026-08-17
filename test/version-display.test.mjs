@@ -7,37 +7,65 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { currentVersionDisplay, versionDisplay } from '../out/host/versionDisplay.js';
+import { currentVersionDisplay, availableVersionDisplay } from '../out/host/versionDisplay.js';
 
 test('neither value present renders an em dash', () => {
-  assert.deepEqual(versionDisplay(null, null), { kind: 'dash' });
+  assert.deepEqual(availableVersionDisplay('1.0.0', null, null), { kind: 'dash' });
 });
 
-test('identical wanted and latest collapse to a single value', () => {
-  assert.deepEqual(versionDisplay('20.19.43', '20.19.43'), {
+test('identical wanted and latest, matching current, collapse to a single value with no update', () => {
+  assert.deepEqual(availableVersionDisplay('20.19.43', '20.19.43', '20.19.43'), {
     kind: 'single',
     value: '20.19.43',
+    hasUpdate: false,
+    updateKind: null,
   });
 });
 
-test('differing wanted and latest split into two lines', () => {
-  assert.deepEqual(versionDisplay('20.19.43', '26.1.2'), {
+test('identical wanted and latest, ahead of current, collapse to a single value flagged as an update', () => {
+  assert.deepEqual(availableVersionDisplay('20.0.0', '20.19.43', '20.19.43'), {
+    kind: 'single',
+    value: '20.19.43',
+    hasUpdate: true,
+    updateKind: 'minor',
+  });
+});
+
+test('a single-value update is classified major/minor/patch relative to current', () => {
+  assert.equal(availableVersionDisplay('1.0.0', '2.0.0', '2.0.0').updateKind, 'major');
+  assert.equal(availableVersionDisplay('1.0.0', '1.0.1', '1.0.1').updateKind, 'patch');
+});
+
+test('no resolved current version never classifies an update, even when wanted/latest differ from nothing', () => {
+  assert.deepEqual(availableVersionDisplay(null, '20.19.43', '20.19.43'), {
+    kind: 'single',
+    value: '20.19.43',
+    hasUpdate: false,
+    updateKind: null,
+  });
+});
+
+test('differing wanted and latest split: latest is the primary value, wanted is the in-range fallback', () => {
+  assert.deepEqual(availableVersionDisplay('20.19.43', '20.19.43', '26.1.2'), {
     kind: 'split',
-    wanted: '20.19.43',
-    latest: '26.1.2',
+    value: '26.1.2',
+    withinRange: '20.19.43',
+    updateKind: 'major',
   });
 });
 
 test('a missing side of a differing pair falls back to an em dash for that side', () => {
-  assert.deepEqual(versionDisplay(null, '26.1.2'), {
+  assert.deepEqual(availableVersionDisplay('1.0.0', null, '26.1.2'), {
     kind: 'split',
-    wanted: '—',
-    latest: '26.1.2',
+    value: '26.1.2',
+    withinRange: '—',
+    updateKind: 'major',
   });
-  assert.deepEqual(versionDisplay('20.19.43', null), {
+  assert.deepEqual(availableVersionDisplay('20.19.43', '20.19.43', null), {
     kind: 'split',
-    wanted: '20.19.43',
-    latest: '—',
+    value: '20.19.43',
+    withinRange: '20.19.43',
+    updateKind: null,
   });
 });
 

@@ -125,3 +125,95 @@ test('non-peer process failures remain unknown rather than fabricated conflicts'
   });
   assert.equal((await verifier.verify(proposal)).status, 'unknown');
 });
+
+// -------------------------------------------- materializeResolvedGraph (transitive remediation)
+
+test('materializeResolvedGraph with an empty changes proposal stages the manifest completely unchanged — the "fresh resolve, no version bump" analysis case', async () => {
+  const manifestText = JSON.stringify({ dependencies: { 'sockjs-client': '^1.6.1' } }, null, 2);
+  let observedManifestText;
+  const verifier = new IsolatedResolverVerifier({
+    packageManager: 'npm', packageManagerVersion: '10.0.0',
+    invocation: { executable: '/trusted/node', prefixArgs: ['/trusted/npm-cli.js'] },
+    manifestText,
+    registry: 'https://registry.npmjs.org', policy: { strictPeerDeps: false, legacyPeerDeps: false },
+    runner: {
+      async run(_invocation, args, cwd) {
+        const { readFile, writeFile } = await import('node:fs/promises');
+        observedManifestText = await readFile(`${cwd}/package.json`, 'utf8');
+        if (args.includes('--package-lock-only')) {
+          await writeFile(
+            `${cwd}/package-lock.json`,
+            JSON.stringify({ lockfileVersion: 3, packages: { '': {}, 'node_modules/sockjs-client': { version: '1.6.1' } } })
+          );
+        }
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    },
+  });
+
+  const emptyProposal = {
+    requested: { packageName: 'sockjs-client', currentVersion: '1.6.1', targetVersion: '1.6.1', classification: 'prod' },
+    changes: [],
+  };
+  const result = await verifier.materializeResolvedGraph(emptyProposal);
+  assert.equal(result.ok, true);
+  // Byte-identical — buildStagedManifest (which always reformats/pins) was never invoked.
+  assert.equal(observedManifestText, manifestText);
+  assert.equal(result.graph.nodes.get('node_modules/sockjs-client').version, '1.6.1');
+});
+
+test('materializeResolvedGraph with real changes still stages the pinned manifest, same as verify()', async () => {
+  let observedManifest;
+  const verifier = new IsolatedResolverVerifier({
+    packageManager: 'npm', packageManagerVersion: '10.0.0',
+    invocation: { executable: '/trusted/node', prefixArgs: ['/trusted/npm-cli.js'] },
+    manifestText: JSON.stringify({ dependencies: { react: '^18.0.0' } }),
+    registry: 'https://registry.npmjs.org', policy: { strictPeerDeps: false, legacyPeerDeps: false },
+    runner: {
+      async run(_invocation, args, cwd) {
+        const { readFile, writeFile } = await import('node:fs/promises');
+        observedManifest = JSON.parse(await readFile(`${cwd}/package.json`, 'utf8'));
+        if (args.includes('--package-lock-only')) {
+          await writeFile(`${cwd}/package-lock.json`, JSON.stringify({ lockfileVersion: 3, packages: { '': {} } }));
+        }
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    },
+  });
+
+  const result = await verifier.materializeResolvedGraph(proposal);
+  assert.equal(result.ok, true);
+  assert.equal(observedManifest.dependencies.react, '19.0.0');
+});
+
+test('materializeResolvedGraph degrades to ok:false on a non-zero resolver exit — never a fabricated graph', async () => {
+  const verifier = new IsolatedResolverVerifier({
+    packageManager: 'npm', packageManagerVersion: null,
+    invocation: { executable: '/trusted/node', prefixArgs: ['/trusted/npm-cli.js'] },
+    manifestText: JSON.stringify({ dependencies: { react: '18.0.0' } }),
+    registry: 'https://registry.npmjs.org', policy: { strictPeerDeps: false, legacyPeerDeps: false },
+    runner: { async run() { return { exitCode: 1, stdout: '', stderr: 'ENETUNREACH' }; } },
+  });
+  const emptyProposal = {
+    requested: { packageName: 'react', currentVersion: '18.0.0', targetVersion: '18.0.0', classification: 'prod' },
+    changes: [],
+  };
+  const result = await verifier.materializeResolvedGraph(emptyProposal);
+  assert.deepEqual(result, { ok: false });
+});
+
+test('materializeResolvedGraph degrades to ok:false when the resolver exits cleanly but writes no parseable lockfile', async () => {
+  const verifier = new IsolatedResolverVerifier({
+    packageManager: 'npm', packageManagerVersion: null,
+    invocation: { executable: '/trusted/node', prefixArgs: ['/trusted/npm-cli.js'] },
+    manifestText: JSON.stringify({ dependencies: { react: '18.0.0' } }),
+    registry: 'https://registry.npmjs.org', policy: { strictPeerDeps: false, legacyPeerDeps: false },
+    runner: { async run() { return { exitCode: 0, stdout: '', stderr: '' }; } }, // no lockfile ever written
+  });
+  const emptyProposal = {
+    requested: { packageName: 'react', currentVersion: '18.0.0', targetVersion: '18.0.0', classification: 'prod' },
+    changes: [],
+  };
+  const result = await verifier.materializeResolvedGraph(emptyProposal);
+  assert.deepEqual(result, { ok: false });
+});

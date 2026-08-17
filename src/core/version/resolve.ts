@@ -108,6 +108,52 @@ export function buildVersionInfo(
 }
 
 /**
+ * The provable "first patched version" for an advisory: the lowest published,
+ * stable version that does NOT satisfy the advisory's own vulnerable range.
+ *
+ * Three distinct results, deliberately not collapsed into `string | null`:
+ *  - `known`   — a real published version proves the fix.
+ *  - `none`    — every published version was checked and every one still
+ *                matches the vulnerable range. Proven, not a fallback.
+ *  - `unknown` — the range couldn't be parsed, or no version list was
+ *                available to check against. Never guessed as `none` or
+ *                `known` from incomplete data.
+ *
+ * Deliberately does not stop at the declared package.json range or at
+ * "highest safe version" (see `resolveUpgradeTarget` in
+ * advisories/aggregate.ts, which answers a different question: the best
+ * version to *offer*, not the first version that was ever fixed).
+ */
+export type PatchedVersionResult =
+  | { status: 'known'; version: string }
+  | { status: 'none' }
+  | { status: 'unknown' };
+
+export function resolveFirstPatchedVersion(
+  versions: readonly string[],
+  vulnerableVersions: string,
+  installed: string | null
+): PatchedVersionResult {
+  if (semver.validRange(vulnerableVersions) === null) return { status: 'unknown' };
+
+  const valid = versions.filter((v) => semver.valid(v) !== null);
+  if (valid.length === 0) return { status: 'unknown' };
+
+  const includePrerelease = installed !== null && isPrerelease(installed);
+  const unaffected = valid.filter((v) => {
+    if (semver.satisfies(v, vulnerableVersions, { includePrerelease: true })) return false;
+    if (!includePrerelease && isPrerelease(v)) return false;
+    return true;
+  });
+
+  if (unaffected.length === 0) return { status: 'none' };
+
+  const sorted = [...unaffected].sort(semver.compare);
+  const first = sorted[0];
+  return first === undefined ? { status: 'none' } : { status: 'known', version: first };
+}
+
+/**
  * Guard against the downgrade trap: an advisory fix can name a version LOWER
  * than what's installed, which would silently downgrade the user. Never offer
  * an upgrade that isn't strictly ahead.

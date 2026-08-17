@@ -1,27 +1,52 @@
 /**
- * Pure display decision for the Available column: whether Wanted and Latest
- * collapse to one line or need to be shown separately.
+ * Pure display decision for the Available column.
+ *
+ * Wanted and Latest are the same value for most packages — the version list
+ * is only fetched when they can differ — so the common case is a single
+ * compact line. They diverge exactly when a newer release exists *outside*
+ * the declared range: Latest becomes the strong, primary value (it is what
+ * the user would actually get by widening the range or running an
+ * out-of-range install) and Wanted survives as "the most a plain install
+ * gets you today."
  *
  * See severityDisplay.ts for why this lives under src/host rather than
  * webview/src.
  */
 
 import type { UnresolvableReason } from '../core/types.js';
+import type { UpdateKind } from './updateClassification.js';
+import { classifyUpdate } from './updateClassification.js';
 
-export type VersionDisplay =
+export type AvailableVersionDisplay =
   | { kind: 'dash' }
-  | { kind: 'single'; value: string }
-  | { kind: 'split'; wanted: string; latest: string };
+  /** Wanted === Latest: nothing outside the current range to call out. */
+  | { kind: 'single'; value: string; hasUpdate: boolean; updateKind: UpdateKind | null }
+  /** Wanted !== Latest: a real release exists past what the declared range allows. */
+  | { kind: 'split'; value: string; withinRange: string; updateKind: UpdateKind | null };
 
-/**
- * Wanted and Latest are the same value for most packages — the version list
- * is only fetched when they can differ — so they collapse to one number
- * unless they actually disagree.
- */
-export function versionDisplay(wanted: string | null, latest: string | null): VersionDisplay {
+function classifyAgainst(current: string | null, target: string): UpdateKind | null {
+  return current === null ? null : classifyUpdate(current, target);
+}
+
+export function availableVersionDisplay(
+  current: string | null,
+  wanted: string | null,
+  latest: string | null
+): AvailableVersionDisplay {
   if (wanted === null && latest === null) return { kind: 'dash' };
-  if (wanted === latest) return { kind: 'single', value: wanted ?? latest ?? '—' };
-  return { kind: 'split', wanted: wanted ?? '—', latest: latest ?? '—' };
+
+  if (wanted === latest) {
+    // Both null is excluded above, and equal values can't be "one null, one
+    // not" — so whichever local variable is read below is the shared,
+    // non-null value itself.
+    const value = wanted ?? latest ?? '—';
+    const hasUpdate = current !== null && value !== current;
+    return { kind: 'single', value, hasUpdate, updateKind: hasUpdate ? classifyAgainst(current, value) : null };
+  }
+
+  const value = latest ?? wanted ?? '—';
+  const withinRange = wanted ?? '—';
+  return { kind: 'split', value, withinRange, updateKind: classifyAgainst(current, value) };
 }
 
 /**

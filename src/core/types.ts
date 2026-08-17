@@ -86,6 +86,18 @@ export interface Advisory {
   vulnerableVersions: string;
 }
 
+/**
+ * The provable "first patched version" for one advisory — see
+ * `resolveFirstPatchedVersion` in src/core/version/resolve.ts for how each
+ * variant is derived. Never collapsed to `string | null`: `none` (proven,
+ * every published version still matches the vulnerable range) and `unknown`
+ * (couldn't be determined) are different facts, not the same absence.
+ */
+export type PatchedVersionResult =
+  | { status: 'known'; version: string }
+  | { status: 'none' }
+  | { status: 'unknown' };
+
 /** An advisory attributed to a direct dependency, with the path we derived. */
 export interface AttributedAdvisory {
   advisory: Advisory;
@@ -93,6 +105,8 @@ export interface AttributedAdvisory {
   flaggedPackage: string;
   /** Chain from the direct dependency down to flaggedPackage. */
   path: string[];
+  /** The first published version of `flaggedPackage` that fixes this advisory, if provable. */
+  patchedVersion: PatchedVersionResult;
 }
 
 /**
@@ -102,6 +116,18 @@ export interface AttributedAdvisory {
  * object naming the version a fix requires (possibly a major bump).
  */
 export type FixAvailable = true | false | { name: string; version: string; isSemVerMajor: boolean };
+
+/**
+ * Why `upgradeTo` is offered, not just that it is. `'security-fix'` means the
+ * target came from resolveUpgradeTarget's advisory-driven, fixAvailable-gated
+ * logic (src/core/advisories/aggregate.ts) — the one path this codebase has
+ * actually verified doesn't carry the row's own known advisory forward.
+ * `'update'` means no such verification applies; the target is simply the
+ * newest version ahead of Current (see src/core/upgrade/candidate.ts). Both
+ * are equally real, executable upgrades — the distinction is about what the
+ * Action column should tell the user it will do, not about eligibility.
+ */
+export type UpgradeReason = 'security-fix' | 'update';
 
 export interface PackageRow {
   name: string;
@@ -124,6 +150,8 @@ export interface PackageRow {
   worstSeverity: Severity | null;
   /** Target version for the upgrade action, or null when not offerable. */
   upgradeTo: string | null;
+  /** Why `upgradeTo` is offered — null exactly when `upgradeTo` is null. */
+  upgradeReason: UpgradeReason | null;
 }
 
 /** Registry origin, surfaced in the UI so a redirect is never silent. */

@@ -67,7 +67,12 @@ test('an advisory against a direct dependency itself has a single-element path',
   const result = attributeAdvisories(graph(), byName);
 
   assert.deepEqual(result.get('react'), [
-    { advisory: byName.get('react')[0], flaggedPackage: 'react', path: ['react'] },
+    {
+      advisory: byName.get('react')[0],
+      flaggedPackage: 'react',
+      path: ['react'],
+      patchedVersion: { status: 'unknown' },
+    },
   ]);
 });
 

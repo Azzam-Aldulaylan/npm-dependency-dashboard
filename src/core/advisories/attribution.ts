@@ -17,7 +17,7 @@
 
 import semver from 'semver';
 
-import type { AttributedAdvisory, Advisory, DependencyGraph, DependencyNode } from '../types.js';
+import type { AttributedAdvisory, Advisory, DependencyGraph, DependencyNode, PackageRow } from '../types.js';
 import { directNodes, resolveDependency } from '../lockfile/parse.js';
 
 /** Advisories keyed by package name, as returned by the bulk endpoint. */
@@ -64,7 +64,11 @@ function attributeFromRoot(
     const { node, chain } = current;
 
     for (const advisory of applicableAdvisories(node, byName)) {
-      out.push({ advisory, flaggedPackage: node.name, path: [...chain] });
+      // `patchedVersion` starts as the safe placeholder here — attribution has
+      // no registry access and can't compute it. `attachPatchedVersions` (see
+      // advisories/remediation.ts) is the only place that fills it in, once
+      // per unique flagged package, after this map is built.
+      out.push({ advisory, flaggedPackage: node.name, path: [...chain], patchedVersion: { status: 'unknown' } });
     }
 
     for (const depName of node.deps) {
@@ -93,4 +97,30 @@ export function attributeAdvisories(
     if (attributed.length > 0) result.set(root.name, attributed);
   }
   return result;
+}
+
+/**
+ * Reconstructs an `AdvisoriesByName` map from the host's already-attributed
+ * scan results, for re-attributing against a *different* graph (a proposed
+ * post-upgrade tree — see evaluateSecurityOutcome in securityOutcome.ts)
+ * without a second bulk-advisory fetch. This only knows about advisories the
+ * last scan actually saw somewhere in the tree; a package newly introduced by
+ * the proposed upgrade and never seen before simply has no entry, same
+ * caveat as the rest of this codebase's "we only flag what we can prove"
+ * posture — never a reason to claim a version is safe, only a reason a
+ * security outcome can come back `unknown` instead of `resolved`.
+ */
+export function advisoriesByNameFromRows(rows: readonly PackageRow[]): AdvisoriesByName {
+  const byName = new Map<string, Advisory[]>();
+  for (const row of rows) {
+    for (const entry of row.advisories) {
+      const existing = byName.get(entry.flaggedPackage);
+      if (existing === undefined) {
+        byName.set(entry.flaggedPackage, [entry.advisory]);
+      } else if (!existing.some((a) => a.id === entry.advisory.id)) {
+        existing.push(entry.advisory);
+      }
+    }
+  }
+  return byName;
 }

@@ -241,7 +241,38 @@ export class DashboardPanel {
 
   private async handle(message: WebviewToHostMessage): Promise<void> {
     if (message.type === 'upgrade') {
-      await this.upgradeCoordinator.handleUpgrade(message);
+      await this.upgradeCoordinator.handleAnalyzeUpgrade(message);
+      return;
+    }
+    if (message.type === 'confirm-upgrade') {
+      await this.upgradeCoordinator.handleConfirmUpgrade(message);
+      return;
+    }
+    if (message.type === 'use-smart-plan') {
+      await this.upgradeCoordinator.handleUseSmartPlan(message);
+      return;
+    }
+    if (message.type === 'cancel-upgrade') {
+      this.upgradeCoordinator.handleCancelUpgrade(message);
+      return;
+    }
+    if (message.type === 'configure-verification') {
+      this.upgradeCoordinator.handleConfigureVerification();
+      return;
+    }
+    if (message.type === 'analyze-remediation') {
+      // Read-only, but a concurrent disk read could still race an in-flight
+      // upgrade's file writes — same rule refresh/change-project already
+      // follow below, not a new one invented for this message.
+      if (this.upgradeCoordinator.isBusy()) {
+        this.sink.postMessage({
+          status: 'remediation-error',
+          package: message.package,
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+        });
+        return;
+      }
+      await this.upgradeCoordinator.handleAnalyzeRemediation(message);
       return;
     }
     if (message.type === 'change-project') {
@@ -267,9 +298,27 @@ export class DashboardPanel {
       await this.reloadAndScan();
       return;
     }
+    if (message.type === 'open-advisory') {
+      this.openAdvisory(message);
+      return;
+    }
     const controller = await this.ensureController();
     if (controller === undefined) return; // ensureController already posted the failure.
     await controller.handleReady(this.sink);
+  }
+
+  /**
+   * The webview names an advisory, never a URL — see
+   * webviewProtocol.ts's own doc on `open-advisory` and
+   * DashboardController.resolveAdvisoryUrl for the actual trust boundary.
+   * A miss (unknown package/advisory, or a URL that failed the `https:`
+   * check) is silently a no-op: there is nothing unsafe about it, so there
+   * is nothing worth surfacing as an error either.
+   */
+  private openAdvisory(message: { package: string; advisoryId: string | number; path: string[] }): void {
+    const url = this.controller?.resolveAdvisoryUrl(message);
+    if (url === null || url === undefined) return;
+    void vscode.env.openExternal(vscode.Uri.parse(url));
   }
 
   /**

@@ -29,8 +29,10 @@ import { buildPackageRows } from '../core/pipeline.js';
 import type { HttpClient } from '../core/registry/http.js';
 import { FetchError } from '../core/registry/http.js';
 import type { EtagStore } from '../core/registry/versions.js';
+import type { AdvisoryLookupRequest } from '../core/advisories/resolve.js';
+import { resolveTrustedAdvisoryUrl } from '../core/advisories/resolve.js';
 import type { UpgradeEligibility, UpgradeRequestInput } from '../core/upgrade/validate.js';
-import type { PackageManagerKind } from '../core/types.js';
+import type { PackageManagerKind, PackageRow } from '../core/types.js';
 import { validateUpgradeRequest } from '../core/upgrade/validate.js';
 import { toHostToWebviewMessage } from './dashboardData.js';
 import type { HostToWebviewMessage, ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
@@ -394,6 +396,35 @@ export class DashboardController {
     if (this.lastResult === undefined) return { ok: false, reason: 'no-scan-result' };
     if (!this.isEligible()) return { ok: false, reason: 'revalidating' };
     return validateUpgradeRequest(this.lastResult.rows, this.declaredDependencies, request);
+  }
+
+  /**
+   * The security boundary for "open advisory source" (Problem 4): the
+   * webview names an advisory, never a URL — this resolves that name
+   * against `lastResult`, the host's own last completed scan, and returns
+   * the URL *that scan itself recorded*, or `null` for any reason at all
+   * (unknown package/advisory, or a URL that isn't `https:`). Staleness
+   * (`isEligible()`) is deliberately not checked here — unlike an Upgrade
+   * request, opening a browser tab to an advisory mutates nothing, so a
+   * revalidation in flight is not a reason to refuse it.
+   */
+  resolveAdvisoryUrl(request: AdvisoryLookupRequest): string | null {
+    if (this.lastResult === undefined) return null;
+    return resolveTrustedAdvisoryUrl(this.lastResult.rows, request);
+  }
+
+  /**
+   * The host's own last completed scan rows — the "before" side of
+   * security-outcome evaluation (see evaluateSecurityOutcome in
+   * src/core/advisories/securityOutcome.ts) and the source
+   * `advisoriesByNameFromRows` (attribution.ts) reconstructs an advisory
+   * lookup map from, to re-attribute against a proposed post-upgrade graph
+   * without a second bulk-advisory fetch. Deliberately not gated by
+   * `isEligible()`: the upgrade-eligibility re-checks that already surround
+   * every call site cover staleness, and this alone mutates nothing.
+   */
+  lastResultRows(): readonly PackageRow[] {
+    return this.lastResult?.rows ?? [];
   }
 
   /**

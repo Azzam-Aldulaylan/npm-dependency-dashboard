@@ -15,6 +15,7 @@ import type { AuditRunner } from './audit/npmAudit.js';
 import { runNpmAudit, mapFixAvailableToDirectDependencies } from './audit/npmAudit.js';
 import { worstSeverity, resolveUpgradeTarget } from './advisories/aggregate.js';
 import { attributeAdvisories } from './advisories/attribution.js';
+import { attachPatchedVersions, distinctFlaggedPackages } from './advisories/remediation.js';
 import { buildBulkRequestBody, fetchBulkAdvisories } from './advisories/bulk.js';
 import { directNodes } from './lockfile/parse.js';
 import { buildDependencyGraph } from './lockfile/build.js';
@@ -23,6 +24,7 @@ import type { HttpClient } from './registry/http.js';
 import { FetchError } from './registry/http.js';
 import type { EtagStore, VersionRequest } from './registry/versions.js';
 import { fetchAllVersions, fetchPackument } from './registry/versions.js';
+import { resolveUpgradeCandidate } from './upgrade/candidate.js';
 import type { Advisory, AttributedAdvisory, FixAvailable, PackageRow, VersionInfo } from './types.js';
 import type { PackageManagerKind } from './types.js';
 
@@ -121,7 +123,30 @@ export async function buildPackageRows(
   }
   throwIfAborted(signal);
 
-  const attributed = attributeAdvisories(graph, advisoriesByName);
+  let attributed = attributeAdvisories(graph, advisoriesByName);
+
+  // --- patched-version remediation ---------------------------------------
+  // One packument fetch per distinct *flagged* package (not per row — a
+  // transitive advisory's flagged package is rarely a direct dependency), so
+  // this scales with how many packages actually carry a vulnerability, never
+  // with the size of the dependency tree. Cached through the same EtagStore
+  // as every other registry call; a failed fetch simply leaves that
+  // package's advisories at the `unknown` placeholder attribution already set.
+  const flaggedPackages = distinctFlaggedPackages(attributed);
+  if (flaggedPackages.size > 0) {
+    const packumentsByPackage = new Map<string, string[]>();
+    for (const name of flaggedPackages) {
+      throwIfAborted(signal);
+      try {
+        const packument = await fetchPackument(httpClient, etagStore, registry, name, signal);
+        packumentsByPackage.set(name, packument.versions);
+      } catch {
+        // Left unset — attachPatchedVersions treats a missing entry as unknown.
+      }
+    }
+    attributed = attachPatchedVersions(attributed, packumentsByPackage);
+  }
+  throwIfAborted(signal);
 
   // --- audit enrichment (optional) -------------------------------------
   let fixes = new Map<string, FixAvailable>();
@@ -180,6 +205,20 @@ export async function buildPackageRows(
     const advisories: AttributedAdvisory[] = attributed.get(node.name) ?? [];
     const fixAvailable = fixes.get(node.name);
 
+    const securityTarget = resolveUpgradeTarget({
+      installed: node.version,
+      range: node.range,
+      availableVersions: availableVersions.get(node.name) ?? [],
+      advisories,
+      ...(fixAvailable === undefined ? {} : { fixAvailable }),
+    });
+    const candidate = resolveUpgradeCandidate({
+      securityTarget,
+      current: node.version,
+      wanted: info?.wanted ?? null,
+      latest: info?.latest ?? null,
+    });
+
     const row: PackageRow = {
       name: node.name,
       current: node.version,
@@ -189,13 +228,8 @@ export async function buildPackageRows(
       range: node.range,
       advisories,
       worstSeverity: worstSeverity(advisories),
-      upgradeTo: resolveUpgradeTarget({
-        installed: node.version,
-        range: node.range,
-        availableVersions: availableVersions.get(node.name) ?? [],
-        advisories,
-        ...(fixAvailable === undefined ? {} : { fixAvailable }),
-      }),
+      upgradeTo: candidate?.target ?? null,
+      upgradeReason: candidate?.reason ?? null,
     };
     if (info?.deprecated !== undefined) row.deprecated = info.deprecated;
     if (node.unresolvable !== undefined) row.unresolvable = node.unresolvable;

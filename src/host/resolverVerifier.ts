@@ -8,7 +8,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
@@ -19,7 +19,10 @@ import type {
   UpgradeProposal,
 } from '../core/compatibility/types.js';
 import type { PeerResolutionPolicy } from '../core/compatibility/types.js';
+import { buildDependencyGraph } from '../core/lockfile/build.js';
+import { parseManifest } from '../core/manifest/parse.js';
 import { buildStagedManifest } from '../core/upgrade/stagedManifest.js';
+import type { DependencyGraph } from '../core/types.js';
 
 export interface PackageManagerInvocation {
   executable: string;
@@ -134,6 +137,47 @@ export function buildResolverArgs(
   ];
 }
 
+/**
+ * Argv for the "materialize a real lockfile" step used by
+ * `materializeResolvedGraph` — `--package-lock-only`/`--lockfile-only` runs
+ * the real resolver and writes a real lockfile without downloading
+ * `node_modules` content. This is deliberately a separate argv builder from
+ * `buildResolverArgs`: that one is a dry-run that writes nothing, this one
+ * must actually produce a lockfile to parse.
+ */
+export function buildLockfileMaterializationArgs(
+  manager: SupportedPackageManager,
+  registry: string,
+  policy: PeerResolutionPolicy
+): string[] {
+  const policyArgs: string[] = [];
+  if (policy.legacyPeerDeps && manager === 'npm') policyArgs.push('--legacy-peer-deps');
+  else if (policy.strictPeerDeps) {
+    policyArgs.push(manager === 'pnpm' ? '--strict-peer-dependencies' : '--strict-peer-deps');
+  }
+
+  if (manager === 'npm') {
+    return [
+      'install',
+      '--package-lock-only',
+      '--ignore-scripts',
+      '--audit=false',
+      '--fund=false',
+      '--json',
+      `--registry=${registry}`,
+      ...policyArgs,
+    ];
+  }
+  return [
+    'install',
+    '--lockfile-only',
+    '--ignore-scripts',
+    '--reporter=silent',
+    `--registry=${registry}`,
+    ...policyArgs,
+  ];
+}
+
 function diagnostic(result: ResolverProcessResult, tempRoot: string): string {
   const combined = `${result.stderr}\n${result.stdout}`
     .replaceAll(tempRoot, '<temporary-project>')
@@ -203,6 +247,71 @@ export class IsolatedResolverVerifier implements ResolverVerifier {
         result,
         tempRoot
       );
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Best-effort: materializes the real, proposed post-upgrade dependency tree
+   * by running the real package manager's own resolver in the same isolated
+   * temp-dir pattern as `verify()`, then parsing its output lockfile with the
+   * existing lockfile parser — never a second, hand-rolled resolver. Used
+   * only to answer "does a transitive vulnerability remain" (see
+   * evaluateSecurityOutcome in src/core/advisories/securityOutcome.ts); any
+   * failure here degrades that answer to `unknown`, never a wrong guess.
+   *
+   * `proposal.changes` may be empty — this is the "no direct-dependency
+   * version change proposed at all" case a transitive-remediation analysis
+   * uses (see resolveRemediationRequest / handleAnalyzeRemediation): the
+   * manifest is staged unchanged, and whether the lockfile passed to this
+   * verifier's constructor is supplied determines whether the package
+   * manager reuses it or resolves fully fresh from declared ranges.
+   * `buildStagedManifest` itself rejects an empty change list (it exists to
+   * pin exact versions, which there are none of here), so that step is
+   * skipped entirely rather than passed a list it would reject.
+   */
+  async materializeResolvedGraph(
+    proposal: UpgradeProposal,
+    signal?: AbortSignal
+  ): Promise<{ ok: true; graph: DependencyGraph } | { ok: false }> {
+    const stagedManifest =
+      proposal.changes.length === 0
+        ? this.options.manifestText
+        : buildStagedManifest(
+            this.options.manifestText,
+            proposal.changes.map((change) => ({
+              packageName: change.packageName,
+              target: change.targetVersion,
+              classification: change.classification,
+            }))
+          );
+    const lockfileName = this.options.packageManager === 'pnpm' ? 'pnpm-lock.yaml' : 'package-lock.json';
+    const tempRoot = await mkdtemp(path.join(tmpdir(), 'dependency-dashboard-security-outcome-'));
+    try {
+      await writeFile(path.join(tempRoot, 'package.json'), stagedManifest, 'utf8');
+      if (this.options.lockfile !== undefined) {
+        await writeFile(path.join(tempRoot, this.options.lockfile.name), this.options.lockfile.text, 'utf8');
+      }
+      const result = await this.runner.run(
+        this.options.invocation,
+        buildLockfileMaterializationArgs(this.options.packageManager, this.options.registry, this.options.policy),
+        tempRoot,
+        signal
+      );
+      if (result.exitCode !== 0) return { ok: false };
+
+      const lockfileText = await readFile(path.join(tempRoot, lockfileName), 'utf8');
+      const manifest = parseManifest(stagedManifest);
+      const graph = buildDependencyGraph({
+        root: tempRoot,
+        manifest,
+        lockfileText,
+        packageManager: this.options.packageManager,
+      });
+      return { ok: true, graph };
+    } catch {
+      return { ok: false };
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

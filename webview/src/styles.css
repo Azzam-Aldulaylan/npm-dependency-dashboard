@@ -3,8 +3,14 @@
  * the CSP allows styles only from the webview's own resource origin.
  *
  * Everything is expressed in VS Code's theme variables so the panel follows the
- * user's light/dark/high-contrast theme instead of fighting it.
+ * user's light/dark/high-contrast theme instead of fighting it. Color is used
+ * sparingly and only where it communicates state (severity, warnings, the
+ * selected summary card) — never as decoration.
  */
+
+* {
+  box-sizing: border-box;
+}
 
 body {
   margin: 0;
@@ -13,41 +19,118 @@ body {
   background: var(--vscode-editor-background);
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
+
+  /*
+   * Semantic accents, one per summary card, resolved from VS Code's chart.*
+   * theme colours — the same tokens chart-rendering extensions use, defined
+   * by every built-in theme and adapting automatically between light and
+   * dark. This is the only source of "colour" in the whole page beyond
+   * severity/warning/error; everything else stays on foreground/description/
+   * panel-border, so these four hues stand out rather than blending into a
+   * dozen other coloured things.
+   */
+  --accent-total: var(--vscode-charts-blue, #3794ff);
+  --accent-updates: var(--vscode-charts-purple, #b180d7);
+  --accent-vulnerabilities: var(--vscode-charts-red, #f14c4c);
+  --accent-attention: var(--vscode-charts-orange, #d18616);
 }
+
+button {
+  font-family: inherit;
+}
+
+/* ------------------------------------------------------------------ header */
 
 .dashboard__header {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 1rem;
-  padding: 1rem 0;
+  gap: 0.75rem 1rem;
+  padding: 1rem 0 0.85rem;
 }
 
 .dashboard__header-titles {
   min-width: 0;
 }
 
-.dashboard__header-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-shrink: 0;
-}
-
 .dashboard__title {
   margin: 0;
-  font-size: 1.15rem;
+  font-size: 1.2rem;
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .dashboard__project {
-  margin: 0.15rem 0 0;
+  margin: 0.2rem 0 0;
   overflow: hidden;
   color: var(--vscode-descriptionForeground);
   font-size: 0.8em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ------------------------------------------------------------------ search */
+
+.search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 1 17rem;
+  min-width: 11rem;
+}
+
+.search__icon {
+  position: absolute;
+  left: 0.55rem;
+  color: var(--vscode-descriptionForeground);
+  pointer-events: none;
+}
+
+.search__input {
+  width: 100%;
+  padding: 0.35rem 1.9rem 0.35rem 1.9rem;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
+  border-radius: 4px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.search__input::placeholder {
+  color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
+}
+
+.search__input:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.search__clear {
+  position: absolute;
+  right: 0.3rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.15rem;
+  border: none;
+  border-radius: 3px;
+  color: var(--vscode-descriptionForeground);
+  background: none;
+  cursor: pointer;
+}
+
+.search__clear:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.search__clear:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+/* ------------------------------------------------------------------ notices */
 
 .notice {
   padding: 1.5rem 0;
@@ -58,7 +141,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.6rem;
   margin: 0 0 1rem;
   padding: 0.6rem 0.8rem;
   border-left: 3px solid var(--vscode-editorWarning-foreground);
@@ -71,17 +154,27 @@ body {
   background: var(--vscode-inputValidation-errorBackground, transparent);
 }
 
+.banner__icon {
+  flex-shrink: 0;
+  color: inherit;
+}
+
 .banner__text {
+  flex: 1;
   margin: 0;
 }
 
+/* ------------------------------------------------------------------ buttons */
+
 .button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   padding: 0.35rem 0.9rem;
   border: 1px solid var(--vscode-button-border, transparent);
-  border-radius: 2px;
+  border-radius: 3px;
   color: var(--vscode-button-foreground);
   background: var(--vscode-button-background);
-  font-family: inherit;
   font-size: inherit;
   cursor: pointer;
 }
@@ -90,10 +183,279 @@ body {
   background: var(--vscode-button-hoverBackground);
 }
 
+.button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
 .button:disabled {
   opacity: 0.5;
   cursor: default;
 }
+
+.button--secondary {
+  color: var(--vscode-foreground);
+  background: transparent;
+  border-color: var(--vscode-panel-border, transparent);
+}
+
+.button--secondary:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+/*
+ * Action-column tones, weakest to strongest — see resolveActionState
+ * (src/host/upgradeAction.ts). A routine patch/minor bump should not visually
+ * compete with the package name or a vulnerability badge; a major bump gets
+ * an accent outline because it deserves a second look before clicking; a
+ * security fix is the one case that earns a solid, attention-getting fill.
+ */
+.button--subtle {
+  border-color: var(--vscode-button-background);
+  color: var(--vscode-button-background);
+  background: transparent;
+}
+
+.button--subtle:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vscode-button-background) 14%, transparent);
+}
+
+.button--analyze {
+  border-color: var(--accent-updates);
+  color: var(--accent-updates);
+  background: transparent;
+}
+
+.button--analyze:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-updates) 14%, transparent);
+}
+
+.button--security {
+  border-color: var(--accent-vulnerabilities);
+  background: var(--accent-vulnerabilities);
+  color: var(--vscode-button-foreground);
+}
+
+.button--security:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+/* Up to date / Unavailable — text, not a button, since there is nothing to click. */
+.action-quiet {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.action-quiet__icon {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.action-quiet__icon--warning {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.action-quiet__icon--resolved {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.action-quiet__icon--spin {
+  color: var(--vscode-descriptionForeground);
+  animation: dashboard-spin 1.2s linear infinite;
+}
+
+.action-quiet--muted {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+/* "Fix available through resolution" — a real, provable finding, not a
+   routine "nothing to do here" like Up to date, so it keeps normal weight
+   rather than the muted/italic treatment. */
+.action-quiet--resolved {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+/* ------------------------------------------------------------- summary cards */
+
+.summary-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.summary-card {
+  --card-accent: var(--vscode-focusBorder);
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  color: inherit;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.summary-card[data-card='all'] {
+  --card-accent: var(--accent-total);
+}
+.summary-card[data-card='updates'] {
+  --card-accent: var(--accent-updates);
+}
+.summary-card[data-card='vulnerabilities'] {
+  --card-accent: var(--accent-vulnerabilities);
+}
+.summary-card[data-card='attention'] {
+  --card-accent: var(--accent-attention);
+}
+
+.summary-card:hover {
+  border-color: var(--card-accent);
+}
+
+.summary-card:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.summary-card[data-selected='true'] {
+  border-color: var(--card-accent);
+  box-shadow: inset 0 0 0 1px var(--card-accent);
+  background: color-mix(in srgb, var(--card-accent) 10%, var(--vscode-sideBar-background, var(--vscode-editor-background)));
+}
+
+.summary-card__icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+  color: var(--card-accent);
+  font-size: 1.15em;
+}
+
+.summary-card__body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.summary-card__label {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.75em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.summary-card__count {
+  margin-top: 0.1rem;
+  color: var(--card-accent);
+  font-size: 1.4rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.summary-card[data-selected='true'] .summary-card__count {
+  font-weight: 700;
+}
+
+.summary-card__subtitle {
+  overflow: hidden;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ toolbar */
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+
+.toolbar__leading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.toolbar__count {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+.toolbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* --------------------------------------------------------- type filter */
+
+.type-filter {
+  display: inline-flex;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.type-filter__option {
+  padding: 0.28rem 0.7rem;
+  border: none;
+  border-right: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
+  color: var(--vscode-foreground);
+  background: var(--vscode-input-background);
+  font-size: 0.85em;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease,
+    color 150ms ease;
+}
+
+.type-filter__option:last-child {
+  border-right: none;
+}
+
+.type-filter__option:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.type-filter__option:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.type-filter__option[data-selected='true'] {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+
+.type-filter__option[data-selected='true']:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+/* ------------------------------------------------------------------- table */
 
 /*
  * The table genuinely cannot shrink below this width and stay legible, so it
@@ -102,11 +464,13 @@ body {
  */
 .packages-container {
   overflow-x: auto;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 5px;
 }
 
 .packages {
   width: 100%;
-  min-width: 34rem;
+  min-width: 36rem;
   table-layout: fixed;
   border-collapse: collapse;
   text-align: left;
@@ -114,17 +478,188 @@ body {
 
 .packages th,
 .packages td {
-  padding: 0.45rem 0.6rem;
+  padding: 0.5rem 0.65rem;
   border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
   vertical-align: middle;
+  /* table-layout:fixed clips nothing by default — a column label with no
+     natural break point (e.g. "Vulnerabilities") would otherwise overflow
+     visibly into the next header cell instead of wrapping. */
+  overflow-wrap: anywhere;
+}
+
+.packages tbody:last-child tr:last-child th,
+.packages tbody:last-child tr:last-child td {
+  border-bottom: none;
 }
 
 .packages thead th {
   color: var(--vscode-descriptionForeground);
   font-weight: 600;
   text-transform: uppercase;
-  font-size: 0.75em;
+  font-size: 0.72em;
   letter-spacing: 0.04em;
+  background: var(--vscode-sideBar-background, transparent);
+}
+
+/*
+ * Specificity has to beat ".packages th" (0 classes + 1 element = higher
+ * than a bare class) so the header's own padding doesn't stack with the sort
+ * button's — the button fills the cell so the entire header, not a small
+ * inset button, is clickable.
+ *
+ * The `<th>` itself must NOT become a flex container: `display: flex`
+ * overrides `display: table-cell`, which pulls it out of the table's column
+ * layout entirely (every header stacks full-width instead of sitting in its
+ * own column) — a real regression caught in review here. The flex row that
+ * puts the sort button and the Available column's info trigger side by side
+ * lives one level down, in `.sortable-header__row` — see that rule below for
+ * why those two need to be siblings at all rather than nested.
+ */
+.packages th.sortable-header {
+  padding: 0;
+}
+
+.sortable-header__row {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+.sort-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 1;
+  min-width: 0;
+  padding: 0.5rem 0.65rem;
+  border: none;
+  color: inherit;
+  background: none;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.sort-header:hover {
+  color: var(--vscode-foreground);
+}
+
+.sort-header:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -2px;
+}
+
+.sort-header__icon {
+  flex-shrink: 0;
+  font-size: 0.9em;
+  transition: transform 150ms ease;
+}
+
+.sort-header__icon--desc {
+  transform: rotate(180deg);
+}
+
+.sort-header__icon--neutral {
+  opacity: 0.45;
+}
+
+.sort-header:hover .sort-header__icon--neutral {
+  opacity: 0.8;
+}
+
+.sortable-header[aria-sort='ascending'] .sort-header,
+.sortable-header[aria-sort='descending'] .sort-header {
+  color: var(--vscode-foreground);
+}
+
+.th-with-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+/*
+ * Shared hover/focus/click tooltip-and-popover primitive — see
+ * webview/src/components/Tooltip.tsx. One definition, reused for the
+ * Available header's version terminology and every Action-column "why is
+ * there no button" explanation, so no component grows its own bespoke
+ * tooltip styling.
+ */
+.info-tooltip {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-self: center;
+  align-items: center;
+}
+
+.info-tooltip__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 0.6rem 0 0;
+  padding: 0.15rem;
+  border: none;
+  border-radius: 3px;
+  color: var(--vscode-descriptionForeground);
+  background: none;
+  cursor: help;
+}
+
+.info-tooltip__trigger:hover {
+  color: var(--vscode-foreground);
+}
+
+.info-tooltip__trigger:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.info-tooltip__trigger[aria-expanded='true'] {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.info-tooltip__popover {
+  position: fixed;
+  z-index: 50;
+  min-width: 14rem;
+  max-width: min(22rem, calc(100vw - 1rem));
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+  font-size: 0.8rem;
+  font-weight: 400;
+  line-height: 1.45;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: normal;
+}
+
+.info-tooltip__popover p {
+  margin: 0 0 0.4rem;
+}
+
+.info-tooltip__popover p:last-child {
+  margin-bottom: 0;
+}
+
+.info-tooltip__popover dt {
+  margin-top: 0.4rem;
+  color: var(--vscode-foreground);
+  font-weight: 600;
+}
+
+.info-tooltip__popover dt:first-child {
+  margin-top: 0;
+}
+
+.info-tooltip__popover dd {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
 }
 
 /* Column widths sum to 100%, keeping Available from ballooning next to a
@@ -134,16 +669,16 @@ body {
   width: 4%;
 }
 .col-package {
-  width: 27%;
+  width: 25%;
 }
 .col-current {
   width: 15%;
 }
 .col-available {
-  width: 19%;
+  width: 20%;
 }
 .col-vulnerabilities {
-  width: 13%;
+  width: 14%;
 }
 .col-action {
   width: 22%;
@@ -154,6 +689,7 @@ body {
 }
 
 .packages__name {
+  display: table-cell;
   font-weight: 600;
 }
 
@@ -181,26 +717,52 @@ body {
 }
 
 .disclosure {
-  padding: 0 0.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.15rem;
   border: none;
-  color: inherit;
+  border-radius: 3px;
+  color: var(--vscode-descriptionForeground);
   background: none;
-  font: inherit;
   cursor: pointer;
 }
 
-.tag {
-  padding: 0.05rem 0.35rem;
-  border-radius: 2px;
-  background: var(--vscode-badge-background);
-  color: var(--vscode-badge-foreground);
-  font-size: 0.8em;
+.disclosure:hover {
+  color: var(--vscode-foreground);
 }
 
-.dev-badge {
+.disclosure:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+.disclosure svg {
+  transition: transform 0.1s ease;
+}
+
+.disclosure[data-open='true'] svg {
+  transform: rotate(90deg);
+}
+
+.package-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 0.4rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 1em;
+  vertical-align: -0.15em;
+}
+
+/*
+ * Generic compact badge for non-severity states — Dev, Major, Workspace,
+ * File, Git, Unresolved, etc. Neutral by default; `warning` is the only
+ * other tone, reserved for a major-version bump.
+ */
+.status-badge {
   display: inline-block;
   margin-left: 0.4rem;
-  padding: 0.02rem 0.35rem;
+  padding: 0.03rem 0.35rem;
   border: 1px solid var(--vscode-panel-border, currentColor);
   border-radius: 2px;
   color: var(--vscode-descriptionForeground);
@@ -212,29 +774,52 @@ body {
   white-space: nowrap;
 }
 
-.version-lines {
+.status-badge--warning {
+  border-color: var(--vscode-editorWarning-foreground);
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.version-cell {
   display: inline-flex;
   flex-direction: column;
   gap: 0.15rem;
 }
 
-.version-line {
+.version-cell__row {
   display: flex;
   align-items: baseline;
-  gap: 0.4rem;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.4rem;
 }
 
-.version-label {
-  min-width: 3.2rem;
-  color: var(--vscode-descriptionForeground);
-  font-size: 0.72em;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.version-value {
+/*
+ * `overflow-wrap: anywhere` on a flex item makes its automatic minimum width
+ * resolve to 0 instead of its min-content size (see the CSS Flexbox spec on
+ * automatic minimum size) — without a floor, a neighbouring badge in the same
+ * flex row can squeeze this down to nothing, wrapping "19.2.8" one digit per
+ * line. `min-width` restores a sane floor; `flex-wrap` on `.version-cell__row`
+ * lets a crowded badge drop to its own line instead of fighting for room.
+ */
+.version-cell__value {
+  min-width: 4.5em;
   overflow-wrap: anywhere;
   font-weight: 500;
+}
+
+/* The strong, primary target — the value the redesign wants a user's eye
+   drawn to first when Wanted and Latest disagree. */
+.version-cell__value--primary {
+  font-size: 1.05em;
+  font-weight: 600;
+}
+
+.version-cell__caption {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.75em;
+}
+
+.version-cell__caption--muted {
+  opacity: 0.85;
 }
 
 /*
@@ -244,6 +829,14 @@ body {
  * (Critical, High, Moderate, Low, Info, Safe) is what actually communicates
  * severity, so the badge reads fine without colour vision.
  */
+/*
+ * A soft `color-mix` tint behind each badge — restrained (12% of the
+ * severity colour, never a flat saturated fill) but enough "pop" that
+ * Critical/High read as genuinely alarming and Safe reads as genuinely
+ * calm, not just three shades of the same outlined pill. Falls back to a
+ * plain outline wherever `color-mix` isn't supported: the property is
+ * simply dropped, leaving `background: transparent` from the base rule.
+ */
 .severity {
   display: inline-flex;
   align-items: center;
@@ -251,7 +844,8 @@ body {
   min-width: 4.5rem;
   padding: 0.1rem 0.5rem;
   border: 1px solid currentColor;
-  border-radius: 2px;
+  border-radius: 3px;
+  background: transparent;
   text-align: center;
   font-size: 0.8em;
   font-weight: 600;
@@ -261,13 +855,16 @@ body {
 
 .severity--critical {
   color: var(--vscode-editorError-foreground);
+  background: color-mix(in srgb, var(--vscode-editorError-foreground) 14%, transparent);
   font-weight: 700;
 }
 .severity--high {
   color: var(--vscode-editorError-foreground);
+  background: color-mix(in srgb, var(--vscode-editorError-foreground) 8%, transparent);
 }
 .severity--moderate {
   color: var(--vscode-editorWarning-foreground);
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 10%, transparent);
 }
 .severity--low {
   color: var(--vscode-editorInfo-foreground);
@@ -275,10 +872,11 @@ body {
 .severity--info {
   color: var(--vscode-descriptionForeground);
 }
+/* Safe: a calm, subtle green — never louder than an actual vulnerability. */
 .severity--none {
-  border-color: var(--vscode-panel-border, transparent);
-  color: var(--vscode-descriptionForeground);
-  font-weight: 400;
+  border-color: color-mix(in srgb, var(--vscode-charts-green, #89d185) 55%, var(--vscode-panel-border, transparent));
+  color: var(--vscode-charts-green, #89d185);
+  font-weight: 500;
 }
 
 .dashboard__footer {
@@ -324,6 +922,1037 @@ body {
   margin: 0;
 }
 
-.advisory__path {
+.advisories code {
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.15)));
   font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.92em;
+}
+
+.advisory__path {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.advisory__path-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.advisory__path-arrow {
+  color: var(--vscode-descriptionForeground);
+}
+
+.advisory__source {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.6rem;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--vscode-textLink-foreground);
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+.advisory__source:hover {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  text-decoration: underline;
+}
+
+.advisory__source:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------- pagination */
+
+/*
+ * Sticky to the bottom of the (body-level) scroll, not just the table: at
+ * 25+ rows the table alone can be taller than the panel, and pagination
+ * controls a user can't see without scrolling past every row defeat their
+ * own purpose. `position: sticky` keeps it reachable without a second,
+ * nested scroll region — the page still scrolls as one piece.
+ */
+.pagination {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+  padding: 0.6rem 0;
+  background: var(--vscode-editor-background);
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+
+.pagination__summary {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
+  white-space: nowrap;
+}
+
+.pagination__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.pagination__page-size {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
+  white-space: nowrap;
+}
+
+.pagination__page-size-select {
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
+  border-radius: 3px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.pagination__page-size-select:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+.pagination__pages {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.pagination__nav,
+.pagination__page {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.7rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--vscode-foreground);
+  background: none;
+  font-size: 0.85em;
+  cursor: pointer;
+  transition: background-color 150ms ease;
+}
+
+.pagination__nav:hover:not(:disabled),
+.pagination__page:hover:not([data-selected='true']) {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.pagination__nav:focus-visible,
+.pagination__page:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+.pagination__nav:disabled {
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pagination__nav-icon--prev {
+  transform: rotate(180deg);
+}
+
+.pagination__page[data-selected='true'] {
+  border-color: var(--vscode-focusBorder);
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  font-weight: 600;
+}
+
+.pagination__ellipsis {
+  padding: 0 0.2rem;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* --------------------------------------------------------------- loading */
+
+.loading-state {
+  padding: 1.5rem 0;
+}
+
+.loading-state__intro {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin-bottom: 1.5rem;
+}
+
+.loading-ring-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.loading-ring__track {
+  fill: none;
+  stroke: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  stroke-width: 2.5;
+}
+
+.loading-ring__arc {
+  fill: none;
+  stroke: var(--accent-total);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: center;
+  transition: stroke-dashoffset 200ms ease;
+}
+
+.loading-ring--indeterminate {
+  animation: dashboard-spin 1.4s linear infinite;
+}
+
+.loading-ring__icon {
+  position: absolute;
+  color: var(--vscode-descriptionForeground);
+  font-size: 1.1rem;
+}
+
+@keyframes dashboard-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.loading-state__title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.loading-state__detail {
+  margin: 0.15rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+/*
+ * The skeleton reuses the real grid/flex shapes (.summary-cards' 4-column
+ * grid, the toolbar's two-ended row, the table's column proportions) so the
+ * page's layout is already correct before any real content exists — the
+ * genuine cards/toolbar/table that replace it land in the same place at the
+ * same size, instead of the whole page jumping once data arrives.
+ */
+.loading-skeleton__bar {
+  display: block;
+  height: 0.65rem;
+  border-radius: 3px;
+  background: linear-gradient(
+    100deg,
+    var(--vscode-panel-border, rgba(128, 128, 128, 0.25)) 30%,
+    var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.4)) 50%,
+    var(--vscode-panel-border, rgba(128, 128, 128, 0.25)) 70%
+  );
+  background-size: 200% 100%;
+  animation: dashboard-shimmer 1.6s ease-in-out infinite;
+}
+
+.loading-skeleton__cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.loading-skeleton__card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+}
+
+.loading-skeleton__card-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.loading-skeleton__bar--icon {
+  flex-shrink: 0;
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 4px;
+}
+
+.loading-skeleton__bar--label {
+  width: 65%;
+  height: 0.55rem;
+}
+
+.loading-skeleton__bar--count {
+  width: 35%;
+  height: 1.1rem;
+}
+
+.loading-skeleton__bar--subtitle {
+  width: 80%;
+}
+
+.loading-skeleton__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+
+.loading-skeleton__bar--toolbar-count {
+  width: 7rem;
+}
+
+.loading-skeleton__bar--toolbar-action {
+  width: 5rem;
+}
+
+.loading-skeleton__table {
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.loading-skeleton__table-header {
+  display: flex;
+  gap: 1rem;
+  padding: 0.6rem 0.9rem;
+  background: var(--vscode-sideBar-background, transparent);
+}
+
+.loading-skeleton__table-header .loading-skeleton__bar {
+  height: 0.5rem;
+}
+
+.loading-skeleton__table-header .loading-skeleton__bar:nth-child(1) {
+  width: 25%;
+}
+.loading-skeleton__table-header .loading-skeleton__bar:nth-child(2) {
+  width: 15%;
+}
+.loading-skeleton__table-header .loading-skeleton__bar:nth-child(3) {
+  width: 20%;
+}
+.loading-skeleton__table-header .loading-skeleton__bar:nth-child(4) {
+  width: 14%;
+}
+
+.loading-skeleton__row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 0.9rem;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+
+.loading-skeleton__bar--name {
+  flex: 0 0 25%;
+}
+
+.loading-skeleton__bar--cell {
+  flex: 0 0 15%;
+}
+
+.loading-skeleton__bar--badge {
+  flex: 0 0 3.5rem;
+  border-radius: 3px;
+}
+
+@keyframes dashboard-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-ring--indeterminate {
+    animation: none;
+    /* A static partial arc still communicates "in progress" without motion. */
+  }
+  .loading-skeleton__bar {
+    animation: none;
+    background: var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  }
+  .stale-status__icon {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------ empty state */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 2.5rem 1rem;
+  text-align: center;
+}
+
+.empty-state__icon {
+  color: var(--vscode-descriptionForeground);
+  font-size: 1.75rem;
+  opacity: 0.7;
+}
+
+.empty-state__title {
+  margin: 0.75rem 0 0.15rem;
+  font-weight: 600;
+}
+
+.empty-state__detail {
+  margin: 0 0 0.9rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+/* -------------------------------------------------------- stale status */
+
+.stale-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 4px;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-sideBar-background, transparent);
+  font-size: 0.85em;
+}
+
+.stale-status__icon {
+  flex-shrink: 0;
+  animation: dashboard-spin 1.2s linear infinite;
+}
+
+/* -------------------------------------------------------------- responsive */
+
+@media (max-width: 680px) {
+  .summary-cards,
+  .loading-skeleton__cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .search {
+    flex: 1 1 100%;
+  }
+}
+
+@media (max-width: 420px) {
+  .summary-cards,
+  .loading-skeleton__cards {
+    grid-template-columns: 1fr;
+  }
+
+  .toolbar,
+  .toolbar__leading,
+  .toolbar__actions,
+  .pagination,
+  .pagination__controls {
+    align-items: flex-start;
+  }
+
+  .pagination {
+    flex-direction: column;
+  }
+}
+
+
+/* ---------------------------------------------------- upgrade review modal */
+
+/*
+ * A fixed black scrim regardless of theme — the same choice VS Code's own
+ * native modals make (dimming reads as "modal" more reliably than any
+ * theme-derived translucent colour would across both light and dark).
+ */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(0, 0, 0, 0.5);
+  animation: dashboard-modal-fade 0.12s ease-out;
+}
+
+/*
+ * Sized to its content, not to a fixed "modal-sized" footprint — 30rem is
+ * enough for the header/banner/footer alone; the grid below only widens the
+ * modal once there's a second column of cards to actually fill.
+ */
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 30rem;
+  max-height: 88vh;
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
+  border-radius: 6px;
+  overflow: hidden;
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  box-shadow: 0 8px 28px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.4));
+  animation: dashboard-modal-rise 0.16s ease-out;
+}
+
+@keyframes dashboard-modal-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes dashboard-modal-rise {
+  from {
+    transform: translateY(6px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal-overlay,
+  .modal {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------------ header */
+
+.modal__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-shrink: 0;
+  padding: 0.95rem 1.1rem 0.9rem;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+}
+
+.modal__header-text {
+  min-width: 0;
+}
+
+/* "Review upgrade" — generic, secondary. The package name below it is the
+   real identifier, so this stays small and quiet. */
+.modal__eyebrow {
+  margin: 0 0 0.2rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.modal__title {
+  margin: 0;
+  overflow: hidden;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * The one signature moment in this design: the version transition, set in
+ * the editor's own monospace font like a diff hunk rather than the UI font
+ * everything else uses. The "from" version reads as struck-through/muted —
+ * already superseded — while the arrow and "to" version carry the app's own
+ * "update" accent (the same purple the Updates summary card and Analyze
+ * button already use elsewhere, not a new one-off color). This is the
+ * fastest possible answer to "from what version to what version", which is
+ * the header's actual job.
+ */
+.modal__version-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.35rem 0 0;
+  font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.modal__version {
+  overflow-wrap: anywhere;
+}
+
+.modal__version--from {
+  color: var(--vscode-descriptionForeground);
+  font-weight: 400;
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--vscode-descriptionForeground) 45%, transparent);
+  text-decoration-thickness: 1px;
+}
+
+.modal__version-arrow {
+  color: var(--accent-updates);
+  font-weight: 400;
+}
+
+.modal__version--to {
+  color: var(--accent-updates);
+}
+
+.modal__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+}
+
+.modal__badges .status-badge {
+  margin-left: 0;
+}
+
+.modal__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  color: var(--vscode-descriptionForeground);
+  background: none;
+  cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease;
+}
+
+.modal__close:hover:not(:disabled) {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.modal__close:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.modal__close:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal__close {
+    transition: none;
+  }
+}
+
+/* -------------------------------------------------------------------- body */
+
+.modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding: 0.95rem 1.1rem 1.05rem;
+  overflow-y: auto;
+}
+
+/*
+ * The one overall status line the whole modal commits to — every card below
+ * explains *why*, but never repeats *what the answer is*. Bounded like a
+ * card so it doesn't read as a generic alert strip bolted onto the top.
+ */
+.modal__body > .outcome-status {
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+}
+
+.modal__body > .outcome-status .outcome-status__icon {
+  font-size: 1.15em;
+}
+
+.modal__body > .outcome-status .outcome-status__label {
+  font-size: 1.02em;
+}
+
+/*
+ * Compatibility | Security, then Files | Verification — a plain two-column
+ * grid on anything wide enough to hold it, one column (stacked) otherwise.
+ * Card order in the markup already matches this pairing, so no explicit
+ * grid-column placement is needed.
+ */
+.modal__grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+}
+
+/*
+ * One breakpoint, not two — the modal only widens to 44rem exactly when the
+ * grid switches to two columns, so there is never a window where a
+ * two-column grid is forced into the narrow 30rem modal and each card ends
+ * up too cramped to read.
+ */
+@media (min-width: 36rem) {
+  .modal {
+    max-width: 44rem;
+  }
+
+  .modal__grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.modal__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  flex-shrink: 0;
+  padding: 0.75rem 1.1rem;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+}
+
+/* ------------------------------------------------------------ section cards */
+
+/*
+ * Subtle, bounded, but not a heavy nested box — a single hairline border and
+ * the same radius as the modal itself, no separate surface color layered on
+ * top of the modal's own background. This is the one structural device every
+ * Compatibility/Security/Files/Verification card shares.
+ */
+.analysis-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+}
+
+/*
+ * The one place a card outranks its neighbors — a vulnerability that
+ * survives the upgrade gets a visibly stronger border and a tinted
+ * background, so Security is never mistaken for just another quiet status
+ * card when there is something the user actually needs to act on.
+ */
+.analysis-card--emphasized {
+  border-color: var(--vscode-editorError-foreground);
+  background: color-mix(in srgb, var(--vscode-editorError-foreground) 6%, transparent);
+}
+
+.analysis-card__title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.5rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.7em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.analysis-card--emphasized .analysis-card__title {
+  color: var(--vscode-editorError-foreground);
+}
+
+.analysis-card__title-icon {
+  flex-shrink: 0;
+}
+
+.analysis-card__hint {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.55rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.82em;
+}
+
+.analysis-card__hint-icon {
+  flex-shrink: 0;
+}
+
+.analysis-card__more {
+  align-self: flex-start;
+  margin-top: 0.55rem;
+}
+
+.finding-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin: 0.55rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.finding {
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px;
+}
+
+/*
+ * The single icon+colour vocabulary shared by every outcome state in the
+ * modal — compatibility's four statuses and security's four statuses both
+ * resolve to one of these five classes (see outcomeCopy.ts).
+ */
+.outcome-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.outcome-status + .outcome-status {
+  margin-top: 0.5rem;
+}
+
+.outcome-status__icon {
+  flex-shrink: 0;
+  margin-top: 0.05em;
+}
+
+.outcome-status__label {
+  margin: 0;
+  font-weight: 600;
+}
+
+.outcome-status__detail {
+  margin: 0.1rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.88em;
+}
+
+/* Each finding's structured lines (see findingCopy.ts) stack rather than run
+   together as one sentence — a required/proposed range reads as its own
+   line, in `<code>`, distinct from the surrounding prose line above it. */
+.finding__line {
+  display: block;
+}
+
+.finding__line code {
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.15));
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.95em;
+}
+
+.outcome-status--compatible .outcome-status__icon,
+.outcome-status--resolved .outcome-status__icon {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.outcome-status--warning .outcome-status__icon {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.outcome-status--conflict .outcome-status__icon,
+.outcome-status--remains .outcome-status__icon {
+  color: var(--vscode-editorError-foreground);
+}
+
+.outcome-status--unknown .outcome-status__icon,
+.outcome-status--not-applicable .outcome-status__icon {
+  color: var(--vscode-descriptionForeground);
+}
+
+.analysis-card__vulnerabilities {
+  margin: 0.55rem 0 0;
+  padding: 0;
+}
+
+.analysis-card__vulnerabilities .advisory {
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px;
+}
+
+.analysis-card__vulnerabilities .advisory + .advisory {
+  margin-top: 0.5rem;
+}
+
+/* ---------------------------------------------------------- smart-plan banner */
+
+/*
+ * Full-width, above the card grid — a call-to-action the modal is steering
+ * the user toward, not another paired status card, so it gets the app's own
+ * accent border rather than the neutral card treatment.
+ */
+.smart-plan-banner {
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--accent-updates);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent-updates) 8%, transparent);
+}
+
+.smart-plan-banner__title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.5rem;
+  font-size: 0.85em;
+  font-weight: 700;
+}
+
+.smart-plan-banner__title-icon {
+  flex-shrink: 0;
+  color: var(--accent-updates);
+}
+
+.smart-plan-banner__hint {
+  margin: 0.5rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.smart-plan__changes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  counter-reset: smart-plan-step;
+  list-style: none;
+}
+
+.smart-plan__change {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  counter-increment: smart-plan-step;
+}
+
+.smart-plan__change::before {
+  content: counter(smart-plan-step);
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 50%;
+  background: var(--vscode-badge-background, var(--vscode-button-background));
+  color: var(--vscode-badge-foreground, var(--vscode-button-foreground));
+  font-size: 0.7em;
+  font-weight: 700;
+}
+
+.smart-plan__package {
+  font-weight: 600;
+}
+
+.smart-plan__versions {
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.88em;
+}
+
+/* -------------------------------------------------------------- files card */
+
+.files__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.85em;
+}
+
+.files__list li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  overflow-wrap: anywhere;
+}
+
+.files__list-icon {
+  flex-shrink: 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.analysis-card__hint--rollback {
+  flex-wrap: wrap;
+}
+
+/* --------------------------------------------------------- verification card */
+
+.verification__scripts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.55rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verification__scripts code {
+  padding: 0.1rem 0.5rem;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.15)));
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.85em;
+}
+
+/* ----------------------------------------------------------------- loading */
+
+.analysis-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 2rem 1rem;
+  text-align: center;
+}
+
+.analysis-loading__title {
+  margin: 0.85rem 0 0.2rem;
+  font-weight: 600;
+}
+
+.analysis-loading__detail {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+/* -------------------------------------------------------------- narrow view */
+
+@media (max-width: 460px) {
+  .modal-overlay {
+    padding: 0;
+    align-items: flex-end;
+  }
+
+  .modal {
+    max-height: 92vh;
+    border-radius: 6px 6px 0 0;
+  }
 }

@@ -160,7 +160,10 @@ test('a clean row and a vulnerable row are both fully populated', async () => {
   assert.equal(clean.latest, '1.0.1');
   assert.deepEqual(clean.advisories, []);
   assert.equal(clean.worstSeverity, null);
-  assert.equal(clean.upgradeTo, null);
+  // A healthy package with a real, non-security update is still an
+  // eligible, executable upgrade — see src/core/upgrade/candidate.ts.
+  assert.equal(clean.upgradeTo, '1.0.1');
+  assert.equal(clean.upgradeReason, 'update');
 
   const vulnerable = rowFor(result, 'minimatch');
   assert.equal(vulnerable.current, '3.0.4');
@@ -169,6 +172,7 @@ test('a clean row and a vulnerable row are both fully populated', async () => {
   assert.equal(vulnerable.advisories.length, 1);
   assert.deepEqual(vulnerable.advisories[0].path, ['minimatch'], 'flagged at its own version');
   assert.equal(vulnerable.upgradeTo, '3.1.5', "audit's fixAvailable is authoritative");
+  assert.equal(vulnerable.upgradeReason, 'security-fix', 'a verified fix wins over the general update path');
 
   // The bulk request carries every (name, version) pair in the tree.
   assert.equal(client.posts.length, 1);
@@ -176,9 +180,14 @@ test('a clean row and a vulnerable row are both fully populated', async () => {
   assert.deepEqual(client.posts[0].body, { 'clean-pkg': ['1.0.0'], minimatch: ['3.0.4'] });
 });
 
-test('a usable fixAvailable suppresses the packument escalation entirely', async () => {
-  // The cost-conscious half of step 6: when audit answers, the full version
-  // list is never needed, so it is never fetched.
+test('a usable fixAvailable suppresses the self-computed-fix packument escalation, but patched-version remediation still fetches it', async () => {
+  // The cost-conscious half of step 6 still holds for the self-computed-fix
+  // fallback specifically: when audit answers, that escalation path is never
+  // taken. But minimatch is still a flagged package, so the separate
+  // patched-version remediation step (advisories/remediation.ts, wired in
+  // pipeline.ts) fetches its packument regardless of fixAvailable — that's a
+  // different question ("what version first fixed this") than the one
+  // fixAvailable already answered ("is this specific candidate clean").
   const client = fakeClient({ ...LATEST_ROUTES, [`${REGISTRY}/minimatch`]: MINIMATCH_PACKUMENT }, BULK_RESPONSE);
 
   const result = await buildPackageRows(
@@ -186,7 +195,11 @@ test('a usable fixAvailable suppresses the packument escalation entirely', async
   );
 
   assert.equal(rowFor(result, 'minimatch').upgradeTo, '3.1.5');
-  assert.deepEqual(client.urls, [`${REGISTRY}/clean-pkg/latest`, `${REGISTRY}/minimatch/latest`]);
+  assert.deepEqual(client.urls, [
+    `${REGISTRY}/clean-pkg/latest`,
+    `${REGISTRY}/minimatch/latest`,
+    `${REGISTRY}/minimatch`,
+  ]);
 });
 
 test('fixAvailable: true fetches the packument and offers only a verified clean version', async () => {
@@ -218,10 +231,14 @@ test('a failed bulk fetch still returns rows, with advisories emptied', async ()
   for (const row of result.rows) {
     assert.deepEqual(row.advisories, []);
     assert.equal(row.worstSeverity, null);
-    assert.equal(row.upgradeTo, null, 'no advisories means nothing to upgrade away from');
+    // A failed advisory fetch only removes the security-fix path — it never
+    // blocks the independent general-update path, which both rows here have
+    // (clean-pkg 1.0.0->1.0.1, minimatch 3.0.4->3.1.5).
+    assert.equal(row.upgradeReason, 'update', `${row.name} still offers its general update`);
   }
   // Version data is unaffected by the advisory failure.
   assert.equal(rowFor(result, 'minimatch').wanted, '3.1.5');
+  assert.equal(rowFor(result, 'minimatch').upgradeTo, '3.1.5');
 });
 
 test('unparseable bulk JSON is an advisoriesError, not a thrown pipeline', async () => {
@@ -241,7 +258,9 @@ test('with no audit runner the self-computed fallback still finds a fix', async 
 
   assert.equal(result.auditUnavailable, true);
   assert.equal(rowFor(result, 'minimatch').upgradeTo, '3.1.5', 'highest in-range non-vulnerable');
-  assert.equal(rowFor(result, 'clean-pkg').upgradeTo, null);
+  assert.equal(rowFor(result, 'minimatch').upgradeReason, 'security-fix');
+  assert.equal(rowFor(result, 'clean-pkg').upgradeTo, '1.0.1', 'a healthy package still offers its own general update');
+  assert.equal(rowFor(result, 'clean-pkg').upgradeReason, 'update');
 
   assert.ok(client.urls.includes(`${REGISTRY}/minimatch`), 'escalated for the flagged package');
   assert.equal(
@@ -277,14 +296,20 @@ test('an audit runner that fails to spawn is not fatal', async () => {
   assert.equal(rowFor(result, 'minimatch').upgradeTo, '3.1.5');
 });
 
-test('a failed packument escalation leaves the row intact with no upgrade offered', async () => {
-  // The packument route is absent, so the escalation 404s.
+test('a failed packument escalation leaves the security fix unverified, but the general update still stands', async () => {
+  // The packument route is absent, so the self-computed fix-verification
+  // escalation 404s — resolveUpgradeTarget can offer nothing it has actually
+  // vetted against minimatch's own advisory. The general-update path never
+  // needed that escalation at all (it only compares Current/Wanted/Latest),
+  // so it still finds the same 3.0.4 -> 3.1.5 bump, just without the
+  // security guarantee.
   const client = fakeClient(LATEST_ROUTES, BULK_RESPONSE);
   const result = await buildPackageRows(baseOptions(client));
 
   const row = rowFor(result, 'minimatch');
   assert.equal(row.worstSeverity, 'high', 'the advisory is still reported');
-  assert.equal(row.upgradeTo, null, 'no version list means nothing safe to offer');
+  assert.equal(row.upgradeTo, '3.1.5');
+  assert.equal(row.upgradeReason, 'update', 'not a verified security fix, since that check could not run');
 });
 
 test("one package's version fetch failing does not disturb the other rows", async () => {
@@ -333,12 +358,14 @@ test('a fixAvailable naming a non-direct package never lands on another row', as
   for (const row of result.rows) {
     assert.notEqual(row.upgradeTo, '4.22.2', `${row.name} must not inherit express's fix`);
   }
-  assert.equal(rowFor(result, 'clean-pkg').upgradeTo, null);
+  assert.equal(rowFor(result, 'clean-pkg').upgradeTo, '1.0.1', 'its own, unrelated general update');
+  assert.equal(rowFor(result, 'clean-pkg').upgradeReason, 'update');
   assert.equal(
     rowFor(result, 'minimatch').upgradeTo,
     '3.1.5',
     'the dropped fix falls through to the self-computed value'
   );
+  assert.equal(rowFor(result, 'minimatch').upgradeReason, 'security-fix');
 });
 
 // -------------------------------------------------- unresolvable nodes

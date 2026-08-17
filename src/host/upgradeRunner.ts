@@ -21,7 +21,6 @@ import {
   buildCoordinatedInstallArgs,
   buildInstallArgs,
   buildManifestReconciliationArgs,
-  isMajorUpgrade,
 } from '../core/upgrade/plan.js';
 import { createNodeNpmResolverDeps, resolveNpmInvocation } from './npmResolver.js';
 import { resolveInstalledPnpmInvocation } from './pnpmResolver.js';
@@ -39,8 +38,6 @@ export interface UpgradeRunParams {
   cwd: string;
   ignoreScripts: boolean;
   packageManager: 'npm' | 'pnpm';
-  verificationScriptNames?: readonly string[];
-  compatibilitySummary?: readonly string[];
   coordinatedChanges?: readonly {
     packageName: string;
     target: string;
@@ -77,46 +74,6 @@ const DISPOSED_OUTCOME: UpgradeRunOutcome = {
   code: 'DISPOSED',
   message: 'The dashboard panel was closed.',
 };
-
-/**
- * Modal, so the user cannot lose it behind other panels — this is the one
- * gate standing between a click and package.json/the lockfile changing.
- * Returns false for every dismissal path (Escape, clicking outside, the
- * explicit Cancel), not just an explicit "Cancel" click.
- */
-export async function confirmUpgrade(params: UpgradeRunParams): Promise<boolean> {
-  const major = isMajorUpgrade(params.currentVersion, params.target);
-  const detail = [
-    `Package: ${params.packageName}`,
-    `Current version: ${params.currentVersion}`,
-    `Target version: ${params.target}${major ? ' (major upgrade)' : ''}`,
-    '',
-    'This will modify package.json and the lockfile.',
-    params.ignoreScripts
-      ? 'Lifecycle scripts are disabled for this upgrade (--ignore-scripts).'
-      : 'Lifecycle scripts will run as part of this upgrade.',
-    params.verificationScriptNames !== undefined && params.verificationScriptNames.length > 0
-      ? `Post-upgrade verification: ${params.verificationScriptNames.join(', ')}.`
-      : 'No application verification scripts are configured; install success will remain unverified.',
-    ...(params.compatibilitySummary === undefined
-      ? []
-      : ['', 'Preflight compatibility:', ...params.compatibilitySummary]),
-    ...(params.coordinatedChanges === undefined || params.coordinatedChanges.length <= 1
-      ? []
-      : [
-          '',
-          'Coordinated changes:',
-          ...params.coordinatedChanges.map((change) => `• ${change.packageName} → ${change.target}`),
-        ]),
-  ].join('\n');
-
-  const choice = await vscode.window.showWarningMessage(
-    `Upgrade ${params.packageName} to ${params.target}?`,
-    { modal: true, detail },
-    'Upgrade'
-  );
-  return choice === 'Upgrade';
-}
 
 /**
  * Tracks the panel-wide upgrade lock and in-flight task-completion listeners

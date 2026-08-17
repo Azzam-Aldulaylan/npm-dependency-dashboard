@@ -25,6 +25,7 @@ const ROW = {
   advisories: [],
   worstSeverity: null,
   upgradeTo: null,
+  upgradeReason: null,
 };
 
 const VALID_FINGERPRINT = { manifestHash: 'h-manifest', lockfileHash: 'h-lockfile', lockfilePath: '/tmp/project/package-lock.json' };

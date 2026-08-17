@@ -22,6 +22,7 @@ const ROW = {
   advisories: [],
   worstSeverity: null,
   upgradeTo: null,
+  upgradeReason: null,
 };
 
 const AT = '2026-08-01T12:00:00.000Z';

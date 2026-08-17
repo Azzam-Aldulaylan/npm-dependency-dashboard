@@ -19,6 +19,7 @@ function row(overrides = {}) {
     advisories: [],
     worstSeverity: null,
     upgradeTo: '2.0.0',
+    upgradeReason: 'update',
     ...overrides,
   };
 }

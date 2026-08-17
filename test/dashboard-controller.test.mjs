@@ -121,6 +121,7 @@ const CACHED_ROW = {
   advisories: [],
   worstSeverity: null,
   upgradeTo: null,
+  upgradeReason: null,
 };
 
 /**
@@ -610,12 +611,13 @@ test('updateProjectSnapshot changes declaredDependencies, reflected in upgrade c
   });
   await controller.handleRefresh(recordingSink());
 
-  // clean-pkg has no advisories, so there is still no eligible upgrade — this
-  // only proves the reclassification took effect, via `not-declared` staying
-  // unset (the row + declared dependency now agree it's a real, dev entry).
+  // clean-pkg has a genuine general update available (1.0.0 -> 1.0.1, no
+  // advisory involved) — proving the reclassification took effect directly,
+  // via the returned classification, rather than indirectly via a rejection
+  // reason that is no longer produced now that the update is eligible.
   const result = controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' });
-  assert.equal(result.ok, false);
-  assert.notEqual(result.reason, 'not-declared');
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.classification, 'dev');
 });
 
 // ------------------------------------------------------------ upgrade eligibility
@@ -640,16 +642,33 @@ test('an unknown package is rejected even after a successful scan', async () => 
 });
 
 test('a package with no eligible upgrade is rejected, and a stale/forged target too', async () => {
-  const controller = makeController(staticClient('1.0.1'));
+  // 1.0.0 is clean-pkg's own installed version — nothing newer is reported,
+  // so there is genuinely no general-update or security-fix candidate for
+  // resolveUpgradeCandidate to find, regardless of what target a (forged or
+  // stale) request names.
+  const controller = makeController(staticClient('1.0.0'));
   await controller.handleReady(recordingSink());
 
-  // clean-pkg has no advisories, so resolveUpgradeTarget leaves upgradeTo
-  // null — no matter what target a (forged or stale) request names.
-  const noUpgrade = controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' });
+  const noUpgrade = controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.0' });
   assert.deepEqual(noUpgrade, { ok: false, reason: 'no-eligible-upgrade' });
 
   const forged = controller.validateUpgradeRequest({ package: 'clean-pkg', target: '99.0.0' });
   assert.equal(forged.ok, false);
+});
+
+test('a genuine general update is eligible, but a stale/forged target for it is still rejected', async () => {
+  // clean-pkg is at 1.0.0; 1.0.1 is a real, newer version with no advisory
+  // involved at all — exactly the "healthy package with an update" case
+  // Problem 1 exists to make actionable.
+  const controller = makeController(staticClient('1.0.1'));
+  await controller.handleReady(recordingSink());
+
+  const eligible = controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' });
+  assert.equal(eligible.ok, true);
+  if (eligible.ok) assert.equal(eligible.target, '1.0.1');
+
+  const stale = controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.2' });
+  assert.deepEqual(stale, { ok: false, reason: 'stale-target' });
 });
 
 test('classification is derived from the manifest, never trusted from the request', async () => {

@@ -5,8 +5,8 @@ import type { PackageRow } from '../../../src/core/types.js';
 import type { DependencyFinding, InstallPathVersionEntry } from '../../../src/core/hygiene/types.js';
 import type { DependencyReference, DependencyUsageResult } from '../../../src/core/usage/types.js';
 import {
+  dependencyDescriptionCopy,
   deprecatedFindingFor,
-  directDeclarationCopy,
   introducedDuplicateFindings,
   ownDuplicateFinding,
 } from '../../../src/host/dependencyDetailsCopy.js';
@@ -14,8 +14,17 @@ import { IconAlertTriangle, IconRefresh, IconTarget, IconX } from '../icons.js';
 
 export type UsageRequestState =
   | { phase: 'analyzing' }
-  | { phase: 'done'; usageId: string; result: DependencyUsageResult }
+  | { phase: 'done'; usageId: string; result: DependencyUsageResult; cacheExpiresAt: string; fromCache: boolean }
   | { phase: 'error'; message: string };
+
+function analyzedAge(scannedAt: string, now: number): string {
+  const timestamp = Date.parse(scannedAt);
+  if (!Number.isFinite(timestamp)) return 'Analyzed previously';
+  const minutes = Math.max(0, Math.floor((now - timestamp) / 60_000));
+  if (minutes === 0) return 'Analyzed just now';
+  if (minutes === 1) return 'Analyzed 1 minute ago';
+  return `Analyzed ${minutes} minutes ago`;
+}
 
 function VersionPaths({ entry }: { entry: InstallPathVersionEntry }): ReactElement {
   return (
@@ -52,24 +61,46 @@ function UsageReferenceList({
   packageName,
   usageId,
   result,
+  cacheExpiresAt,
+  fromCache,
+  now,
+  onReanalyze,
   onOpenReference,
 }: {
   packageName: string;
   usageId: string;
   result: DependencyUsageResult;
+  cacheExpiresAt: string;
+  fromCache: boolean;
+  now: number;
+  onReanalyze: () => void;
   onOpenReference: (usageId: string, referenceIndex: number) => void;
 }): ReactElement {
-  if (result.references.length === 0) {
-    return <p className="dependency-details__empty">No references to {packageName} were found in this scan.</p>;
-  }
+  const expiresAt = Date.parse(cacheExpiresAt);
+  const stale = Number.isFinite(expiresAt) && now >= expiresAt;
   return (
     <>
-      <p className="dependency-details__usage-summary">
-        Used in {result.references.length} location{result.references.length === 1 ? '' : 's'}
-        {result.truncated ? ' (scan was capped — results may be incomplete)' : ''}
-      </p>
-      <ul className="dependency-details__references">
-        {result.references.map((reference, index) => (
+      <div className="dependency-details__usage-meta">
+        <p className="dependency-details__usage-summary">
+          {analyzedAge(result.scannedAt, now)}
+          {fromCache ? ' · cached' : ''}
+          {stale ? ' · stale' : ''}
+        </p>
+        <button type="button" className="button button--secondary" onClick={onReanalyze}>
+          <IconRefresh />
+          Re-analyze
+        </button>
+      </div>
+      {result.references.length === 0 ? (
+        <p className="dependency-details__empty">No references to {packageName} were found in this scan.</p>
+      ) : (
+        <>
+          <p className="dependency-details__usage-summary">
+            Used in {result.references.length} location{result.references.length === 1 ? '' : 's'}
+            {result.truncated ? ' (scan was capped — results may be incomplete)' : ''}
+          </p>
+          <ul className="dependency-details__references">
+            {result.references.map((reference, index) => (
           <li key={index} className="dependency-details__reference">
             {reference.filePath !== 'package.json' && reference.kind !== 'config' ? (
               <button
@@ -88,8 +119,10 @@ function UsageReferenceList({
             )}
             <code className="dependency-details__snippet">{reference.snippet}</code>
           </li>
-        ))}
-      </ul>
+            ))}
+          </ul>
+        </>
+      )}
     </>
   );
 }
@@ -100,23 +133,27 @@ const FOCUSABLE_SELECTOR =
 /**
  * The row-level "Dependency details" drawer — deprecated status, duplicate-
  * version paths (this package's own, and any it introduces transitively),
- * why it's installed, and on-demand "Where is this used?" — all reusing
+ * its registry description, and on-demand "Where is this used?" — all reusing
  * data the scan already produced, plus one explicit on-demand usage scan.
- * Never a redesign of the main table; opened only from RowActionsMenu.
+ * Never a redesign of the main table; opened from the row's Details action.
  */
 export function DependencyDetailsModal({
   row,
   hygieneFindings,
   usage,
   onRequestUsage,
+  onReanalyzeUsage,
   onOpenUsageReference,
+  now,
   onClose,
 }: {
   row: PackageRow;
   hygieneFindings: readonly DependencyFinding[];
   usage: UsageRequestState | undefined;
   onRequestUsage: (packageName: string) => void;
+  onReanalyzeUsage: (packageName: string) => void;
   onOpenUsageReference: (usageId: string, referenceIndex: number) => void;
+  now: number;
   onClose: () => void;
 }): ReactElement {
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -195,11 +232,11 @@ export function DependencyDetailsModal({
             </section>
           ) : null}
 
-          <section className="analysis-card" aria-labelledby="dependency-details-why-heading">
-            <h3 className="analysis-card__title" id="dependency-details-why-heading">
-              Why is this installed?
+          <section className="analysis-card" aria-labelledby="dependency-details-about-heading">
+            <h3 className="analysis-card__title" id="dependency-details-about-heading">
+              About
             </h3>
-            <p>{directDeclarationCopy(row)}</p>
+            <p>{dependencyDescriptionCopy(row)}</p>
           </section>
 
           {ownDuplicate?.evidence.kind === 'duplicate-version' ? (
@@ -266,6 +303,12 @@ export function DependencyDetailsModal({
                 packageName={row.name}
                 usageId={usage.usageId}
                 result={usage.result}
+                cacheExpiresAt={usage.cacheExpiresAt}
+                fromCache={usage.fromCache}
+                now={now}
+                onReanalyze={() => {
+                  onReanalyzeUsage(row.name);
+                }}
                 onOpenReference={onOpenUsageReference}
               />
             )}

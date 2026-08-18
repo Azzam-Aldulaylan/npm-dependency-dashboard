@@ -23,20 +23,31 @@ import type { ProjectSourceFingerprint } from './sourceFingerprint.js';
 import { isSourceFingerprint } from './sourceFingerprint.js';
 
 /**
- * Bumped whenever either persisted shape below changes incompatibly. A
+ * Bumped whenever the persisted project-cache shape or semantics change
+ * incompatibly. A
  * stored blob whose version doesn't match exactly is ignored outright — no
  * attempt at forward/backward migration, which would be its own source of
  * subtly-wrong data for a cache that's allowed to just be empty instead.
  *
  * 2: `PersistedProjectCache` gained `sourceFingerprint` — a v1 entry has no
  * fingerprint to compare against, so it must be rejected outright rather
- * than treated as an automatic, unverifiable match. Both collections below
- * share this one version number for simplicity; the registry/ETag cache's
- * own shape didn't change, so this bump only costs it one harmless, one-time
- * cold start (identical to any other schema-version mismatch — it just
- * refetches).
+ * than treated as an automatic, unverifiable match.
+ *
+ * 3: package rows gained registry descriptions. Version 2 rows are still
+ * structurally safe, but accepting them would make an upgraded extension
+ * keep displaying the description fallback until some unrelated source
+ * change invalidated the cache. Rejecting the old project snapshot forces
+ * one correct regeneration.
  */
-export const CACHE_SCHEMA_VERSION = 2;
+export const CACHE_SCHEMA_VERSION = 3;
+
+/**
+ * The registry response cache did not change when project rows gained a
+ * description. Keep its independent version stable so the one-time project
+ * refresh can reuse validated response bodies and ETags instead of turning
+ * into an unnecessary network cold start.
+ */
+export const ETAG_CACHE_SCHEMA_VERSION = 2;
 
 function isValidIsoTimestamp(value: unknown): value is string {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value));
@@ -128,7 +139,7 @@ export interface PersistedEtagCacheCollection {
 
 export function isPersistedEtagCacheCollection(value: unknown): value is PersistedEtagCacheCollection {
   if (!isRecord(value)) return false;
-  if (value['schemaVersion'] !== CACHE_SCHEMA_VERSION) return false;
+  if (value['schemaVersion'] !== ETAG_CACHE_SCHEMA_VERSION) return false;
   const entries = value['entries'];
   return (
     Array.isArray(entries) &&

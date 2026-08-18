@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { PersistentProjectCacheStore, PROJECT_CACHE_STORAGE_KEY } from '../out/core/cache/projectCacheStore.js';
+import { CACHE_SCHEMA_VERSION } from '../out/core/cache/schema.js';
 
 function fakeKeyValueStore(initial) {
   const data = new Map(initial ? [[PROJECT_CACHE_STORAGE_KEY, initial]] : []);
@@ -44,7 +45,7 @@ test('set/get round-trip in memory, and the underlying store receives the persis
 
   await flushed();
   const persisted = kv.raw.get(PROJECT_CACHE_STORAGE_KEY);
-  assert.equal(persisted.schemaVersion, 2);
+  assert.equal(persisted.schemaVersion, CACHE_SCHEMA_VERSION);
   assert.deepEqual(persisted.entries, [['project-a', entry([{ name: 'x' }])]]);
 });
 

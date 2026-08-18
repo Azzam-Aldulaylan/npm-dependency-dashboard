@@ -18,8 +18,10 @@ import * as vscode from 'vscode';
 
 import { configReferencesPackage } from '../../core/usage/configHeuristics.js';
 import { findPackageInScripts } from '../../core/usage/packageScripts.js';
-import { scanSourceForImports } from '../../core/usage/importScan.js';
-import type { DependencyReference, DependencyUsageResult } from '../../core/usage/types.js';
+import type { DependencyUsageResult } from '../../core/usage/types.js';
+import { UsageReferenceIndex } from '../../core/usage/referenceIndex.js';
+import type { PerformanceRecorder } from '../../core/performance/measurement.js';
+import { NOOP_PERFORMANCE_RECORDER } from '../../core/performance/measurement.js';
 import { findConfigFiles, findSourceFiles, readTextFileCapped, relativeToFolder } from './workspaceFiles.js';
 
 const DEFAULT_MAX_FILES = 6000;
@@ -33,6 +35,7 @@ export interface AnalyzeUsageOptions {
   maxFiles?: number;
   onProgress?: (scanned: number, total: number) => void;
   token: vscode.CancellationToken;
+  performance?: PerformanceRecorder;
 }
 
 export async function analyzeDependencyUsage(
@@ -40,12 +43,15 @@ export async function analyzeDependencyUsage(
 ): Promise<Map<string, DependencyUsageResult>> {
   const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
   const requested = new Set(options.packageNames);
-  const referencesByPackage = new Map<string, DependencyReference[]>();
-  for (const name of requested) referencesByPackage.set(name, []);
+  const referenceIndex = new UsageReferenceIndex(options.packageNames);
+  const performance = options.performance ?? NOOP_PERFORMANCE_RECORDER;
 
+  const endDiscovery = performance.start('usage file discovery');
   const sourceFiles = await findSourceFiles(options.folder, options.dir, maxFiles, options.token);
+  endDiscovery({ files: sourceFiles.length });
   const fileCapReached = sourceFiles.length >= maxFiles;
 
+  const endSourceScan = performance.start('usage source scan');
   let scanned = 0;
   let cancelledEarly = false;
   for (const uri of sourceFiles) {
@@ -55,30 +61,17 @@ export async function analyzeDependencyUsage(
     }
     const text = await readTextFileCapped(uri);
     if (text !== null) {
-      const matches = scanSourceForImports(text);
-      if (matches.length > 0) {
-        const filePath = relativeToFolder(options.folder, uri);
-        if (filePath !== null) {
-          for (const match of matches) {
-            if (!requested.has(match.packageName)) continue;
-            referencesByPackage.get(match.packageName)?.push({
-              filePath,
-              line: match.line,
-              column: match.column,
-              snippet: match.snippet,
-              kind: match.kind,
-            });
-          }
-        }
-      }
+      const filePath = relativeToFolder(options.folder, uri);
+      if (filePath !== null) referenceIndex.addSourceFile(filePath, text);
     }
     scanned += 1;
     options.onProgress?.(scanned, sourceFiles.length);
   }
+  endSourceScan({ files: scanned, packages: requested.size });
 
   for (const name of requested) {
     for (const scriptMatch of findPackageInScripts(options.manifestText, name)) {
-      referencesByPackage.get(name)?.push({
+      referenceIndex.addReference(name, {
         filePath: 'package.json',
         line: 0,
         column: 0,
@@ -90,6 +83,7 @@ export async function analyzeDependencyUsage(
   }
 
   if (!options.token.isCancellationRequested) {
+    const endConfigScan = performance.start('usage config scan');
     const configFiles = await findConfigFiles(options.folder, options.dir, options.token);
     for (const uri of configFiles) {
       if (options.token.isCancellationRequested) {
@@ -103,7 +97,7 @@ export async function analyzeDependencyUsage(
       const configName = filePath.slice(filePath.lastIndexOf('/') + 1);
       for (const name of requested) {
         if (configReferencesPackage(text, name)) {
-          referencesByPackage.get(name)?.push({
+          referenceIndex.addReference(name, {
             filePath,
             line: 0,
             column: 0,
@@ -114,6 +108,7 @@ export async function analyzeDependencyUsage(
         }
       }
     }
+    endConfigScan({ files: configFiles.length });
   }
 
   const scannedAt = new Date().toISOString();
@@ -122,7 +117,7 @@ export async function analyzeDependencyUsage(
   for (const name of requested) {
     results.set(name, {
       packageName: name,
-      references: referencesByPackage.get(name) ?? [],
+      references: referenceIndex.forPackage(name),
       truncated,
       scannedFileCount: scanned,
       scannedAt,

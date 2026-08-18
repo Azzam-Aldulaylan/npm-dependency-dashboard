@@ -2,22 +2,18 @@
  * Presentation-layer synthesis for the row-level "Dependency details" view —
  * built entirely from data already on hand (a `PackageRow` plus the scan's
  * own `hygieneFindings`), never a new host round trip. See the redesign
- * brief's own Section 6 ("Why Is This Installed?"): for a direct
- * dependency — the only kind that ever has a table row — the answer is
- * always derivable from `row.dev`/`row.range` directly; the "transitive
- * parent chain" half of the same question is answered by whichever
- * duplicate-version finding (if any) already carries this exact package's
- * introducing paths, reusing the one shared path implementation rather than
- * a second one (see src/core/graph/paths.ts).
+ * brief's row-level details surface. Table rows are always direct
+ * dependencies, so repeating “declared in dependencies/devDependencies” for
+ * every package provides little information. The About card instead uses the
+ * registry description already returned by /latest. Duplicate introduction
+ * paths continue to reuse the graph's shared path implementation.
  */
 
 import type { DependencyFinding } from '../core/hygiene/types.js';
 import type { PackageRow } from '../core/types.js';
 
-export function directDeclarationCopy(row: PackageRow): string {
-  const kind = row.dev ? 'development' : 'production';
-  const block = row.dev ? 'devDependencies' : 'dependencies';
-  return `Direct ${kind} dependency — declared in package.json's ${block}`;
+export function dependencyDescriptionCopy(row: PackageRow): string {
+  return row.description ?? 'No package description is published for this dependency.';
 }
 
 export function deprecatedFindingFor(

@@ -28,6 +28,7 @@ import type { ProjectSourceFingerprint } from '../../core/cache/sourceFingerprin
 import { buildUnusedFinding } from '../../core/usage/unused.js';
 import type { DependencyUsageResult } from '../../core/usage/types.js';
 import type { DependencyFinding } from '../../core/hygiene/types.js';
+import { createPerformanceSession } from '../../core/performance/measurement.js';
 import type { DashboardController, MessageSink } from '../dashboardController.js';
 import type { DiscoveredProject } from '../projectResolution.js';
 import { analyzeDependencyUsage } from './usageAnalyzer.js';
@@ -47,6 +48,7 @@ export interface UsageCoordinatorOptions {
   ensureController(): Promise<DashboardController | undefined>;
   getSelectedProject(): DiscoveredProject | undefined;
   isDisposed(): boolean;
+  performanceEnabled?(): boolean;
 }
 
 interface CachedUsage {
@@ -55,7 +57,7 @@ interface CachedUsage {
   cachedAt: number;
 }
 
-const USAGE_CACHE_TTL_MS = 10 * 60_000;
+export const USAGE_CACHE_TTL_MS = 10 * 60_000;
 
 function toProtocolError(cause: unknown): { code: string; message: string } {
   if (cause instanceof Error) return { code: cause.name, message: cause.message };
@@ -92,25 +94,27 @@ export class UsageAnalysisCoordinator {
     });
   }
 
-  private getCached(root: string, packageName: string, fingerprint: ProjectSourceFingerprint): DependencyUsageResult | undefined {
+  private getCached(root: string, packageName: string, fingerprint: ProjectSourceFingerprint): CachedUsage | undefined {
     const entry = this.cache.get(root)?.get(packageName);
     if (entry === undefined) return undefined;
     if (Date.now() - entry.cachedAt > USAGE_CACHE_TTL_MS) return undefined;
     if (!sourceFingerprintsMatch(entry.fingerprint, fingerprint)) return undefined;
-    return entry.result;
+    return entry;
   }
 
-  private setCached(root: string, packageName: string, fingerprint: ProjectSourceFingerprint, result: DependencyUsageResult): void {
+  private setCached(root: string, packageName: string, fingerprint: ProjectSourceFingerprint, result: DependencyUsageResult): CachedUsage {
     let projectCache = this.cache.get(root);
     if (projectCache === undefined) {
       projectCache = new Map();
       this.cache.set(root, projectCache);
     }
-    projectCache.set(packageName, { result, fingerprint, cachedAt: Date.now() });
+    const entry = { result, fingerprint, cachedAt: Date.now() };
+    projectCache.set(packageName, entry);
+    return entry;
   }
 
   /** On-demand, single-package usage scan — never runs a full cleanup pass just to answer one package. */
-  async handleWhereUsed(message: WhereUsedMessage): Promise<void> {
+  async handleWhereUsed(message: WhereUsedMessage, bypassCache = false): Promise<void> {
     if (this.isBusy()) {
       this.options.sink.postMessage({
         status: 'usage-error',
@@ -135,10 +139,26 @@ export class UsageAnalysisCoordinator {
     if (selected === undefined) return;
 
     const fingerprint = this.fingerprintFor(controller);
-    const cached = this.getCached(controller.root, message.package, fingerprint);
+    const performance = createPerformanceSession(
+      'Dependency Dashboard usage analysis',
+      this.options.performanceEnabled?.() ?? false
+    );
+    const endCache = performance.start('usage cache lookup');
+    const cached = bypassCache ? undefined : this.getCached(controller.root, message.package, fingerprint);
+    endCache({ hit: cached !== undefined, bypassed: bypassCache });
     if (cached !== undefined) {
-      const usageId = this.referenceStore.store(message.package, cached, selected.folder);
-      this.options.sink.postMessage({ status: 'usage-result', package: message.package, analysis: { usageId, result: cached } });
+      const usageId = this.referenceStore.store(message.package, cached.result, selected.folder);
+      this.options.sink.postMessage({
+        status: 'usage-result',
+        package: message.package,
+        analysis: {
+          usageId,
+          result: cached.result,
+          cacheExpiresAt: new Date(cached.cachedAt + USAGE_CACHE_TTL_MS).toISOString(),
+          fromCache: true,
+        },
+      });
+      performance.finish({ cached: true });
       return;
     }
 
@@ -153,14 +173,24 @@ export class UsageAnalysisCoordinator {
         manifestText: source.manifestText,
         packageNames: [message.package],
         token: cts.token,
+        performance,
       });
       if (this.options.isDisposed() || this.activeCts !== cts) return;
 
       const result = resultsByPackage.get(message.package);
       if (result === undefined) return;
-      this.setCached(controller.root, message.package, fingerprint, result);
+      const cachedEntry = this.setCached(controller.root, message.package, fingerprint, result);
       const usageId = this.referenceStore.store(message.package, result, selected.folder);
-      this.options.sink.postMessage({ status: 'usage-result', package: message.package, analysis: { usageId, result } });
+      this.options.sink.postMessage({
+        status: 'usage-result',
+        package: message.package,
+        analysis: {
+          usageId,
+          result,
+          cacheExpiresAt: new Date(cachedEntry.cachedAt + USAGE_CACHE_TTL_MS).toISOString(),
+          fromCache: false,
+        },
+      });
     } catch (cause) {
       if (!this.options.isDisposed()) {
         this.options.sink.postMessage({ status: 'usage-error', package: message.package, error: toProtocolError(cause) });
@@ -170,6 +200,7 @@ export class UsageAnalysisCoordinator {
         cts.dispose();
         this.activeCts = undefined;
       }
+      performance.finish({ cached: false });
     }
   }
 
@@ -196,12 +227,23 @@ export class UsageAnalysisCoordinator {
     if (selected === undefined) return;
 
     if (packageNames.length === 0) {
-      this.options.sink.postMessage({ status: 'cleanup-result', findings: [] });
+      const analyzedAt = new Date().toISOString();
+      this.options.sink.postMessage({
+        status: 'cleanup-result',
+        findings: [],
+        analyzedAt,
+        cacheExpiresAt: new Date(Date.now() + USAGE_CACHE_TTL_MS).toISOString(),
+      });
       return;
     }
 
     const cts = new vscode.CancellationTokenSource();
     this.activeCts = cts;
+    const performance = createPerformanceSession(
+      'Dependency Dashboard cleanup usage analysis',
+      this.options.performanceEnabled?.() ?? false
+    );
+    performance.setMetadata('direct dependencies', packageNames.length);
     this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned: 0, total: 0 });
 
     try {
@@ -222,6 +264,7 @@ export class UsageAnalysisCoordinator {
               manifestText: source.manifestText,
               packageNames,
               token: cts.token,
+              performance,
               onProgress: (scanned, total) => {
                 const increment = total > 0 ? ((scanned - lastScanned) / total) * 100 : 0;
                 lastScanned = scanned;
@@ -238,12 +281,16 @@ export class UsageAnalysisCoordinator {
 
       const fingerprint = this.fingerprintFor(controller);
       const findings: DependencyFinding[] = [];
+      let analyzedAt = new Date().toISOString();
+      let cacheExpiresAt = new Date(Date.now() + USAGE_CACHE_TTL_MS).toISOString();
       for (const [name, result] of resultsByPackage) {
-        this.setCached(controller.root, name, fingerprint, result);
+        const cachedEntry = this.setCached(controller.root, name, fingerprint, result);
+        analyzedAt = result.scannedAt;
+        cacheExpiresAt = new Date(cachedEntry.cachedAt + USAGE_CACHE_TTL_MS).toISOString();
         const finding = buildUnusedFinding(name, result);
         if (finding !== null) findings.push(finding);
       }
-      this.options.sink.postMessage({ status: 'cleanup-result', findings });
+      this.options.sink.postMessage({ status: 'cleanup-result', findings, analyzedAt, cacheExpiresAt });
     } catch (cause) {
       if (!this.options.isDisposed()) {
         this.options.sink.postMessage({ status: 'cleanup-error', error: toProtocolError(cause) });
@@ -253,6 +300,7 @@ export class UsageAnalysisCoordinator {
         cts.dispose();
         this.activeCts = undefined;
       }
+      performance.finish();
     }
   }
 

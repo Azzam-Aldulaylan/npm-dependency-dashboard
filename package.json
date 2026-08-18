@@ -85,6 +85,11 @@
           "default": 30,
           "minimum": 0,
           "description": "How long cached dependency data stays fresh before it's rescanned, in minutes. 0 means always revalidate."
+        },
+        "dependencyDashboard.debug.performance": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log local Dependency Dashboard performance measurements to the extension and webview developer consoles. No telemetry is sent."
         }
       }
     }
@@ -98,6 +103,7 @@
     "test": "node --test",
     "pretest:live": "npm run build:core",
     "test:live": "node --test scripts/live-checks/advisories-bulk-live.mjs",
+    "benchmark:performance": "npm run pretest && npm run build:core && node scripts/performance/benchmark.mjs",
     "vscode:prepublish": "node esbuild.mjs --production",
     "package": "vsce package",
     "marketplace:publish": "vsce publish"

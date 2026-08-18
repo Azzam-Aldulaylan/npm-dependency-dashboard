@@ -296,19 +296,6 @@ export function IconHistory(props: IconProps): ReactElement {
   );
 }
 
-/** The per-row secondary-actions menu trigger — "Where is this used?", "Dependency details". */
-export function IconMoreHorizontal(props: IconProps): ReactElement {
-  return (
-    <Svg {...props} fill="currentColor" stroke="none">
-      <>
-        <circle cx="3.25" cy="8" r="1.15" />
-        <circle cx="8" cy="8" r="1.15" />
-        <circle cx="12.75" cy="8" r="1.15" />
-      </>
-    </Svg>
-  );
-}
-
 /** "Where is this used?" and the usage-analysis / cleanup results. */
 export function IconTarget(props: IconProps): ReactElement {
   return (

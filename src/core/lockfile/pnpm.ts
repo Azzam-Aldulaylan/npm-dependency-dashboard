@@ -5,6 +5,8 @@ import semver from 'semver';
 
 import type { DependencyEdge, DependencyGraph, DependencyNode } from '../types.js';
 import type { DeclaredDependency, Manifest } from '../manifest/parse.js';
+import type { PerformanceRecorder } from '../performance/measurement.js';
+import { NOOP_PERFORMANCE_RECORDER } from '../performance/measurement.js';
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -36,6 +38,7 @@ export interface BuildPnpmGraphOptions {
   lockfileText: string | null;
   /** pnpm importer key relative to the directory containing pnpm-lock.yaml. */
   importerId?: string;
+  performance?: PerformanceRecorder;
 }
 
 function normalizeImporterId(value: string | undefined): string {
@@ -214,16 +217,25 @@ function resolvePeerTarget(
 }
 
 export function buildPnpmGraph(options: BuildPnpmGraphOptions): DependencyGraph {
+  const performance = options.performance ?? NOOP_PERFORMANCE_RECORDER;
   const importerId = normalizeImporterId(options.importerId);
-  if (options.lockfileText === null) return buildWithoutLockfile(options.root, options.manifest, importerId);
+  if (options.lockfileText === null) {
+    const endGraph = performance.start('dependency graph build');
+    const graph = buildWithoutLockfile(options.root, options.manifest, importerId);
+    endGraph({ 'graph nodes': graph.nodes.size });
+    return graph;
+  }
 
+  const endParse = performance.start('lockfile parse');
   const parsed = loadYaml(options.lockfileText, { json: true });
+  endParse({ bytes: Buffer.byteLength(options.lockfileText) });
   const lock = asRecord(parsed);
   const rawVersion = lock?.['lockfileVersion'];
   if (lock === null || !/^9(?:\.0)?$/.test(String(rawVersion))) {
     throw new UnsupportedPnpmLockfileError(rawVersion);
   }
 
+  const endGraph = performance.start('dependency graph build');
   const packages = asRecord(lock['packages']);
   const snapshots = asRecord(lock['snapshots']);
   const nodes = new Map<string, DependencyNode>();
@@ -286,6 +298,7 @@ export function buildPnpmGraph(options: BuildPnpmGraphOptions): DependencyGraph 
 
   const importer = asRecord(asRecord(lock['importers'])?.[importerId]);
   const directTargets = new Map<string, string>();
+  const directNames = new Set<string>();
   const manifestByName = new Map(options.manifest.dependencies.map((dep) => [dep.name, dep]));
   const importerBlocks = [
     'dependencies',
@@ -304,6 +317,7 @@ export function buildPnpmGraph(options: BuildPnpmGraphOptions): DependencyGraph 
       if (declared.unresolvable !== undefined) {
         const synthetic = emptyDirectNode(declared, importerId);
         nodes.set(synthetic.path, synthetic);
+        directNames.add(name);
         continue;
       }
       const targetId = resolveReference(idsByLockKey, name, reference.version);
@@ -314,6 +328,7 @@ export function buildPnpmGraph(options: BuildPnpmGraphOptions): DependencyGraph 
           target.dev = declared.dev;
           target.range = declared.range;
           directTargets.set(name, targetId);
+          directNames.add(name);
           continue;
         }
       }
@@ -323,15 +338,17 @@ export function buildPnpmGraph(options: BuildPnpmGraphOptions): DependencyGraph 
           synthetic.unresolvable = 'workspace-link';
         }
         nodes.set(synthetic.path, synthetic);
+        directNames.add(name);
       }
     }
   }
 
   // A drifted lockfile still gets a row for every manifest declaration.
   for (const declared of options.manifest.dependencies) {
-    if ([...nodes.values()].some((node) => node.direct && node.name === declared.name)) continue;
+    if (directNames.has(declared.name)) continue;
     const synthetic = emptyDirectNode(declared, importerId);
     nodes.set(synthetic.path, synthetic);
+    directNames.add(declared.name);
   }
 
   for (const node of nodes.values()) {
@@ -342,5 +359,6 @@ export function buildPnpmGraph(options: BuildPnpmGraphOptions): DependencyGraph 
     );
   }
 
+  endGraph({ 'graph nodes': nodes.size });
   return graph;
 }

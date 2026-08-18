@@ -22,10 +22,14 @@ import { buildDependencyGraph } from './lockfile/build.js';
 import { computeGraphHygieneFindings } from './hygiene/index.js';
 import type { DependencyFinding } from './hygiene/index.js';
 import { parseManifest } from './manifest/parse.js';
+import type { PerformanceRecorder } from './performance/measurement.js';
+import { NOOP_PERFORMANCE_RECORDER } from './performance/measurement.js';
 import type { HttpClient } from './registry/http.js';
 import { FetchError } from './registry/http.js';
 import type { EtagStore, VersionRequest } from './registry/versions.js';
 import { fetchAllVersions, fetchPackument } from './registry/versions.js';
+import type { PackumentDoc } from './registry/versions.js';
+import { DEFAULT_CONCURRENCY, runPool } from './registry/pool.js';
 import { resolveUpgradeCandidate } from './upgrade/candidate.js';
 import type { Advisory, AttributedAdvisory, FixAvailable, PackageRow, VersionInfo } from './types.js';
 import type { PackageManagerKind } from './types.js';
@@ -46,6 +50,25 @@ export interface BuildPackageRowsOptions {
   auditRunner?: AuditRunner;
   concurrency?: number;
   signal?: AbortSignal;
+  /** Local diagnostics only. The default recorder is a zero-allocation no-op. */
+  performance?: PerformanceRecorder;
+  /** Real, observable progress only; never a fabricated percentage. */
+  onProgress?: (progress: ScanProgress) => void;
+}
+
+export type ScanProgressStage =
+  | 'manifest'
+  | 'dependency-graph'
+  | 'versions'
+  | 'advisories'
+  | 'patched-versions'
+  | 'npm-audit'
+  | 'rows';
+
+export interface ScanProgress {
+  stage: ScanProgressStage;
+  completed?: number;
+  total?: number;
 }
 
 export interface BuildPackageRowsResult {
@@ -77,21 +100,97 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   }
 }
 
+function instrumentEtagStore(store: EtagStore, recorder: PerformanceRecorder): EtagStore {
+  if (!recorder.enabled) return store;
+  return {
+    get(key) {
+      const value = store.get(key);
+      if (value !== undefined) recorder.increment('ETag cache hits');
+      return value;
+    },
+    set(key, value) {
+      store.set(key, value);
+    },
+  };
+}
+
+function instrumentHttpClient(client: HttpClient, recorder: PerformanceRecorder): HttpClient {
+  if (!recorder.enabled) return client;
+  return {
+    async get(url, options) {
+      recorder.increment('registry requests');
+      recorder.increment(url.endsWith('/latest') ? '/latest requests' : 'packument requests');
+      const response = await client.get(url, options);
+      if (response.status === 304) recorder.increment('304 responses');
+      return response;
+    },
+    async post(url, body, options) {
+      recorder.increment('registry requests');
+      recorder.increment('bulk advisory requests');
+      const response = await client.post(url, body, options);
+      if (response.status === 304) recorder.increment('304 responses');
+      return response;
+    },
+  };
+}
+
 export async function buildPackageRows(
   options: BuildPackageRowsOptions
 ): Promise<BuildPackageRowsResult> {
-  const { root, manifestText, lockfileText, registry, httpClient, etagStore, signal } = options;
+  const { root, manifestText, lockfileText, registry, signal } = options;
+  const recorder = options.performance ?? NOOP_PERFORMANCE_RECORDER;
+  const httpClient = instrumentHttpClient(options.httpClient, recorder);
+  const etagStore = instrumentEtagStore(options.etagStore, recorder);
   throwIfAborted(signal);
 
+  options.onProgress?.({ stage: 'manifest' });
+  const endManifest = recorder.start('manifest parse');
   const manifest = parseManifest(manifestText);
+  endManifest({ 'direct dependencies': manifest.dependencies.length });
+  recorder.setMetadata('direct dependencies', manifest.dependencies.length);
+
+  options.onProgress?.({ stage: 'dependency-graph' });
   const graph = buildDependencyGraph({
     root,
     manifest,
     lockfileText,
     packageManager: options.packageManager ?? 'npm',
     ...(options.importerId === undefined ? {} : { importerId: options.importerId }),
+    performance: recorder,
   });
   const roots = directNodes(graph);
+  recorder.setMetadata('graph nodes', graph.nodes.size);
+
+  const packumentPromises = new Map<string, Promise<PackumentDoc>>();
+  const loadPackument = (name: string, requestSignal?: AbortSignal): Promise<PackumentDoc> => {
+    const cached = packumentPromises.get(name);
+    if (cached !== undefined) {
+      recorder.increment('scan-local packument hits');
+      return cached;
+    }
+    const pending = fetchPackument(httpClient, etagStore, registry, name, requestSignal);
+    packumentPromises.set(name, pending);
+    return pending;
+  };
+
+  // npm audit is subprocess-bound and independent of registry metadata. Start
+  // it as soon as the normalized graph provides the direct-name allow-list,
+  // then consume its optional fixAvailable enrichment at the original stage.
+  const auditPromise: Promise<{ fixes: Map<string, FixAvailable>; unavailable: boolean }> = (() => {
+    if (options.auditRunner === undefined) return Promise.resolve({ fixes: new Map(), unavailable: true });
+    options.onProgress?.({ stage: 'npm-audit' });
+    const endAudit = recorder.start('npm audit');
+    recorder.increment('package-manager subprocesses');
+    return runNpmAudit(options.auditRunner, root, signal)
+      .then((vulnerabilities) => ({
+        fixes: mapFixAvailableToDirectDependencies(vulnerabilities, new Set(roots.map((node) => node.name))),
+        unavailable: false,
+      }))
+      .catch(() => ({ fixes: new Map<string, FixAvailable>(), unavailable: true }))
+      .finally(() => {
+        endAudit();
+      });
+  })();
 
   // --- versions -------------------------------------------------------
   // Unresolvable nodes (workspace links, file:/git: specifiers, no lockfile)
@@ -105,11 +204,20 @@ export async function buildPackageRows(
     client: httpClient,
     store: etagStore,
     registry,
+    packumentLoader: loadPackument,
   };
   if (options.concurrency !== undefined) fetchOptions.limit = options.concurrency;
   if (signal !== undefined) fetchOptions.signal = signal;
+  let resolvedVersions = 0;
+  fetchOptions.onSettled = () => {
+    resolvedVersions += 1;
+    options.onProgress?.({ stage: 'versions', completed: resolvedVersions, total: requests.length });
+  };
 
+  options.onProgress?.({ stage: 'versions', completed: 0, total: requests.length });
+  const endVersions = recorder.start('version metadata resolution');
   const settled = await fetchAllVersions(fetchOptions, requests);
+  endVersions({ requests: requests.length });
   const versionsByName = new Map<string, VersionInfo>();
   requests.forEach((req, i) => {
     const result = settled[i];
@@ -120,6 +228,8 @@ export async function buildPackageRows(
   throwIfAborted(signal);
 
   // --- advisories -----------------------------------------------------
+  options.onProgress?.({ stage: 'advisories' });
+  const endAdvisoryRequest = recorder.start('bulk advisory request');
   let advisoriesByName = new Map<string, Advisory[]>();
   let advisoriesError: FetchError | undefined;
   try {
@@ -130,9 +240,13 @@ export async function buildPackageRows(
         ? cause
         : new FetchError('NETWORK', cause instanceof Error ? cause.message : String(cause));
   }
+  endAdvisoryRequest({ packages: advisoriesByName.size });
+  recorder.setMetadata('advisory packages', advisoriesByName.size);
   throwIfAborted(signal);
 
+  const endAttribution = recorder.start('advisory attribution');
   let attributed = attributeAdvisories(graph, advisoriesByName);
+  endAttribution();
 
   // --- patched-version remediation ---------------------------------------
   // One packument fetch per distinct *flagged* package (not per row — a
@@ -144,37 +258,35 @@ export async function buildPackageRows(
   const flaggedPackages = distinctFlaggedPackages(attributed);
   if (flaggedPackages.size > 0) {
     const packumentsByPackage = new Map<string, string[]>();
-    for (const name of flaggedPackages) {
-      throwIfAborted(signal);
-      try {
-        const packument = await fetchPackument(httpClient, etagStore, registry, name, signal);
-        packumentsByPackage.set(name, packument.versions);
-      } catch {
-        // Left unset — attachPatchedVersions treats a missing entry as unknown.
+    const names = [...flaggedPackages];
+    let completed = 0;
+    options.onProgress?.({ stage: 'patched-versions', completed, total: names.length });
+    const endPatchedVersions = recorder.start('patched-version metadata');
+    const patchedSettled = await runPool(
+      names,
+      (name, poolSignal) => loadPackument(name, poolSignal),
+      {
+        limit: options.concurrency ?? DEFAULT_CONCURRENCY,
+        ...(signal === undefined ? {} : { signal }),
+        onSettled: () => {
+          completed += 1;
+          options.onProgress?.({ stage: 'patched-versions', completed, total: names.length });
+        },
       }
-    }
+    );
+    names.forEach((name, index) => {
+      const result = patchedSettled[index];
+      if (result?.ok === true) packumentsByPackage.set(name, result.value.versions);
+    });
+    endPatchedVersions({ packages: names.length });
     attributed = attachPatchedVersions(attributed, packumentsByPackage);
   }
   throwIfAborted(signal);
 
   // --- audit enrichment (optional) -------------------------------------
-  let fixes = new Map<string, FixAvailable>();
-  let auditUnavailable = false;
-  if (options.auditRunner === undefined) {
-    auditUnavailable = true;
-  } else {
-    try {
-      const vulnerabilities = await runNpmAudit(options.auditRunner, root, signal);
-      fixes = mapFixAvailableToDirectDependencies(
-        vulnerabilities,
-        new Set(roots.map((n) => n.name))
-      );
-    } catch {
-      // Enrichment only. Every failure mode — npm missing, ENOLOCK, garbage on
-      // stdout — degrades to the self-computed fallback below.
-      auditUnavailable = true;
-    }
-  }
+  const audit = await auditPromise;
+  const fixes = audit.fixes;
+  const auditUnavailable = audit.unavailable;
   throwIfAborted(signal);
 
   // --- packument escalation, only where the fallback will use it --------
@@ -184,31 +296,33 @@ export async function buildPackageRows(
   // flagged AND has no usable fixAvailable — usually a handful of packages,
   // and none at all when audit is healthy.
   const availableVersions = new Map<string, string[]>();
-  for (const node of roots) {
-    if (node.unresolvable !== undefined) continue;
+  const fallbackNodes = roots.filter((node) => {
+    if (node.unresolvable !== undefined) return false;
     const own = attributed.get(node.name)?.some((a) => a.path.length === 1) ?? false;
     const fix = fixes.get(node.name);
     // An object names an explicit version and `false` says no fix exists, so
     // neither needs a version-list lookup. Boolean `true` names no version;
     // verify a clean candidate ourselves just as we do when audit is absent.
     const needsSelfComputedFix = fix === undefined || fix === true;
-    if (!own || !needsSelfComputedFix) continue;
-    // Checked per iteration, not just once before the loop: this can run over
-    // several packages, and a signal firing partway through should stop it
-    // before the remaining ones are fetched too.
-    throwIfAborted(signal);
-    try {
-      const packument = await fetchPackument(httpClient, etagStore, registry, node.name, signal);
-      availableVersions.set(node.name, packument.versions);
-    } catch {
-      // resolveUpgradeTarget simply finds nothing to offer with an empty list,
-      // which is the right answer when we can't see the version history.
-      availableVersions.set(node.name, []);
+    return own && needsSelfComputedFix;
+  });
+  const fallbackSettled = await runPool(
+    fallbackNodes,
+    (node, poolSignal) => loadPackument(node.name, poolSignal),
+    {
+      limit: options.concurrency ?? DEFAULT_CONCURRENCY,
+      ...(signal === undefined ? {} : { signal }),
     }
-  }
+  );
+  fallbackNodes.forEach((node, index) => {
+    const result = fallbackSettled[index];
+    availableVersions.set(node.name, result?.ok === true ? result.value.versions : []);
+  });
   throwIfAborted(signal);
 
   // --- rows ------------------------------------------------------------
+  options.onProgress?.({ stage: 'rows' });
+  const endRows = recorder.start('row composition');
   const rows: PackageRow[] = roots.map((node) => {
     const info = versionsByName.get(node.name);
     const advisories: AttributedAdvisory[] = attributed.get(node.name) ?? [];
@@ -240,12 +354,14 @@ export async function buildPackageRows(
       upgradeTo: candidate?.target ?? null,
       upgradeReason: candidate?.reason ?? null,
     };
+    if (info?.description !== undefined) row.description = info.description;
     if (info?.deprecated !== undefined) row.deprecated = info.deprecated;
     if (node.unresolvable !== undefined) row.unresolvable = node.unresolvable;
     return row;
   });
 
   const hygieneFindings = computeGraphHygieneFindings(rows, graph, manifest.dependencies);
+  endRows({ rows: rows.length, 'hygiene findings': hygieneFindings.length });
 
   const result: BuildPackageRowsResult = { rows, hygieneFindings };
   if (advisoriesError !== undefined) result.advisoriesError = advisoriesError;

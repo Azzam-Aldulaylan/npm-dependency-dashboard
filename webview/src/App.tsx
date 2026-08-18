@@ -457,9 +457,8 @@ export function App(): ReactElement {
     setDetailsPackage(null);
   }, []);
 
-  // Shared by the row menu's "Where is this used?" and the details modal's
-  // own "Scan workspace" button — both send the identical, package-name-only
-  // request (see webviewProtocol.ts's own doc on 'where-used'). Never
+  // The details modal's "Scan workspace" action sends only the package name
+  // (see webviewProtocol.ts's own doc on 'where-used'). Never
   // re-requested once a result already exists for this package this session.
   const requestWhereUsed = useCallback(
     (packageName: string) => {
@@ -605,7 +604,6 @@ export function App(): ReactElement {
           now={minuteClock}
           onAnalyzeCleanup={requestAnalyzeCleanup}
           onOpenDetails={openDetails}
-          onWhereUsed={requestWhereUsed}
         />
       ) : null}
 
@@ -676,7 +674,6 @@ function Dashboard({
   now,
   onAnalyzeCleanup,
   onOpenDetails,
-  onWhereUsed,
 }: {
   status: 'empty' | 'ready' | 'stale' | 'partial-error';
   data: DashboardData;
@@ -708,7 +705,6 @@ function Dashboard({
   now: number;
   onAnalyzeCleanup: () => void;
   onOpenDetails: (packageName: string) => void;
-  onWhereUsed: (packageName: string) => void;
 }): ReactElement {
   const degraded = status === 'partial-error' ? partialErrorText(data) : null;
   // A UX nicety only — the host independently rejects any upgrade request
@@ -834,7 +830,6 @@ function Dashboard({
                 onSort={onSort}
                 hygieneFindings={hygieneFindings}
                 onOpenDetails={onOpenDetails}
-                onWhereUsed={onWhereUsed}
               />
               <Pagination
                 currentPage={pageResult.currentPage}

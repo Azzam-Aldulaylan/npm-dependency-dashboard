@@ -28,45 +28,45 @@ function row(overrides = {}) {
 
 // ------------------------------------------------------------ security-fix
 
-test('a verified security fix labels itself as fixing a vulnerability', () => {
+test('a verified security fix is clearly labeled as an upgrade review', () => {
   const state = resolveActionState(
     row({ current: '1.0.0', worstSeverity: 'high', upgradeTo: '1.0.1', upgradeReason: 'security-fix' })
   );
   assert.equal(state.kind, 'security-fix');
   assert.equal(state.target, '1.0.1');
-  assert.equal(state.label, 'Fix vulnerability');
+  assert.equal(state.label, 'Review upgrade');
   assert.match(state.tooltip, /1\.0\.1/);
   assert.match(state.tooltip, /vulnerability/i);
 });
 
 // ------------------------------------------------------------------ update
 
-test('a healthy patch update is a straightforward "Upgrade to X"', () => {
+test('a healthy patch update opens a clearly labeled upgrade review', () => {
   const state = resolveActionState(
     row({ current: '1.2.3', wanted: '1.2.4', latest: '1.2.4', upgradeTo: '1.2.4', upgradeReason: 'update' })
   );
   assert.equal(state.kind, 'update');
   assert.equal(state.updateKind, 'patch');
-  assert.equal(state.label, 'Upgrade to 1.2.4');
+  assert.equal(state.label, 'Review upgrade');
   assert.equal(state.tooltip, UPGRADE_TOOLTIP);
 });
 
-test('a healthy minor update is also a straightforward "Upgrade to X"', () => {
+test('a healthy minor update opens the same upgrade review', () => {
   const state = resolveActionState(
     row({ current: '1.2.3', wanted: '1.3.0', latest: '1.3.0', upgradeTo: '1.3.0', upgradeReason: 'update' })
   );
   assert.equal(state.kind, 'update');
   assert.equal(state.updateKind, 'minor');
-  assert.equal(state.label, 'Upgrade to 1.3.0');
+  assert.equal(state.label, 'Review upgrade');
 });
 
-test('a healthy major update is framed as "Analyze X", not a blind upgrade', () => {
+test('a healthy major update uses the same review action while retaining its major-upgrade warning', () => {
   const state = resolveActionState(
     row({ current: '1.2.3', wanted: '1.2.3', latest: '2.0.0', upgradeTo: '2.0.0', upgradeReason: 'update' })
   );
   assert.equal(state.kind, 'update');
   assert.equal(state.updateKind, 'major');
-  assert.equal(state.label, 'Analyze 2.0.0');
+  assert.equal(state.label, 'Review upgrade');
   assert.match(state.tooltip, /major/i);
   assert.ok(state.tooltip.includes(UPGRADE_TOOLTIP), 'still explains the preflight/confirmation flow');
 });
@@ -134,10 +134,10 @@ test('a vulnerability whose every advisory is direct (path length 1) reads as no
   assert.equal(state.kind, 'no-direct-fix');
 });
 
-test('a transitive vulnerability with no analysis yet offers "Analyze remediation"', () => {
+test('a transitive vulnerability with no analysis yet offers a distinct transitive-fix check', () => {
   const state = resolveActionState(row({ current: '1.0.0', worstSeverity: 'high', advisories: [advisory()] }));
   assert.equal(state.kind, 'transitive-remediation');
-  assert.equal(state.label, 'Analyze remediation');
+  assert.equal(state.label, 'Check transitive fix');
   assert.match(state.tooltip, /flagged-pkg/);
 });
 

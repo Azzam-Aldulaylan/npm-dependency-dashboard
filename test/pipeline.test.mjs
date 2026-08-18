@@ -87,7 +87,7 @@ const MINIMATCH_ADVISORY = {
 const BULK_RESPONSE = json({ minimatch: [MINIMATCH_ADVISORY] });
 
 const LATEST_ROUTES = {
-  [`${REGISTRY}/clean-pkg/latest`]: json({ version: '1.0.1', license: 'MIT' }),
+  [`${REGISTRY}/clean-pkg/latest`]: json({ version: '1.0.1', description: 'A clean fixture package.', license: 'MIT' }),
   [`${REGISTRY}/minimatch/latest`]: json({ version: '3.1.5', license: 'ISC' }),
 };
 
@@ -156,6 +156,7 @@ test('a clean row and a vulnerable row are both fully populated', async () => {
   assert.deepEqual(runner.calls, [ROOT], 'audit runs against the project root');
 
   const clean = rowFor(result, 'clean-pkg');
+  assert.equal(clean.description, 'A clean fixture package.');
   assert.equal(clean.current, '1.0.0');
   assert.equal(clean.wanted, '1.0.1');
   assert.equal(clean.latest, '1.0.1');

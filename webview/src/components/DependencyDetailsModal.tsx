@@ -5,8 +5,8 @@ import type { PackageRow } from '../../../src/core/types.js';
 import type { DependencyFinding, InstallPathVersionEntry } from '../../../src/core/hygiene/types.js';
 import type { DependencyReference, DependencyUsageResult } from '../../../src/core/usage/types.js';
 import {
+  dependencyDescriptionCopy,
   deprecatedFindingFor,
-  directDeclarationCopy,
   introducedDuplicateFindings,
   ownDuplicateFinding,
 } from '../../../src/host/dependencyDetailsCopy.js';
@@ -133,9 +133,9 @@ const FOCUSABLE_SELECTOR =
 /**
  * The row-level "Dependency details" drawer — deprecated status, duplicate-
  * version paths (this package's own, and any it introduces transitively),
- * why it's installed, and on-demand "Where is this used?" — all reusing
+ * its registry description, and on-demand "Where is this used?" — all reusing
  * data the scan already produced, plus one explicit on-demand usage scan.
- * Never a redesign of the main table; opened only from RowActionsMenu.
+ * Never a redesign of the main table; opened from the row's Details action.
  */
 export function DependencyDetailsModal({
   row,
@@ -232,11 +232,11 @@ export function DependencyDetailsModal({
             </section>
           ) : null}
 
-          <section className="analysis-card" aria-labelledby="dependency-details-why-heading">
-            <h3 className="analysis-card__title" id="dependency-details-why-heading">
-              Why is this installed?
+          <section className="analysis-card" aria-labelledby="dependency-details-about-heading">
+            <h3 className="analysis-card__title" id="dependency-details-about-heading">
+              About
             </h3>
-            <p>{directDeclarationCopy(row)}</p>
+            <p>{dependencyDescriptionCopy(row)}</p>
           </section>
 
           {ownDuplicate?.evidence.kind === 'duplicate-version' ? (

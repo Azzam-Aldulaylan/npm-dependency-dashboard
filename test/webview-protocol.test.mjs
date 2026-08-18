@@ -32,6 +32,7 @@ const ATTRIBUTED = {
 
 const CLEAN_ROW = {
   name: 'clean-pkg',
+  description: 'A clean fixture package.',
   current: '1.0.0',
   wanted: '1.0.1',
   latest: '1.0.1',
@@ -484,6 +485,13 @@ test('the optional data fields are accepted when present and correct', () => {
       },
     }),
     true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'ready',
+      data: { ...DATA, rows: [{ ...CLEAN_ROW, description: 42 }] },
+    }),
+    false
   );
 });
 

@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  dependencyDescriptionCopy,
   deprecatedFindingFor,
-  directDeclarationCopy,
   introducedDuplicateFindings,
   ownDuplicateFinding,
 } from '../out/host/dependencyDetailsCopy.js';
@@ -12,12 +12,12 @@ function row(overrides) {
   return { name: 'react', dev: false, range: '^18.0.0', ...overrides };
 }
 
-test('directDeclarationCopy names the production dependencies block', () => {
-  assert.match(directDeclarationCopy(row({ dev: false })), /production dependency.*dependencies/);
+test('dependencyDescriptionCopy uses the registry description', () => {
+  assert.equal(dependencyDescriptionCopy(row({ description: 'A library for building interfaces.' })), 'A library for building interfaces.');
 });
 
-test('directDeclarationCopy names the devDependencies block', () => {
-  assert.match(directDeclarationCopy(row({ dev: true })), /development dependency.*devDependencies/);
+test('dependencyDescriptionCopy has an honest fallback when no description is published', () => {
+  assert.equal(dependencyDescriptionCopy(row({})), 'No package description is published for this dependency.');
 });
 
 const DEPRECATED_FINDING = {

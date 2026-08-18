@@ -354,6 +354,7 @@ export async function buildPackageRows(
       upgradeTo: candidate?.target ?? null,
       upgradeReason: candidate?.reason ?? null,
     };
+    if (info?.description !== undefined) row.description = info.description;
     if (info?.deprecated !== undefined) row.deprecated = info.deprecated;
     if (node.unresolvable !== undefined) row.unresolvable = node.unresolvable;
     return row;

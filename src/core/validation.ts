@@ -124,6 +124,7 @@ export function isPackageRow(value: unknown): value is PackageRow {
       (typeof worstSeverity === 'string' && SEVERITIES.has(worstSeverity))) &&
     Array.isArray(advisories) &&
     advisories.every(isAttributedAdvisory) &&
+    isAbsentOr(value['description'], (v) => typeof v === 'string') &&
     isAbsentOr(value['deprecated'], (v) => typeof v === 'string') &&
     isAbsentOr(
       value['unresolvable'],

@@ -16,11 +16,9 @@ import {
   IconRoute,
   IconSortArrow,
   IconSortNeutral,
-  IconTarget,
 } from '../icons.js';
 import { AdvisoryDetails } from './AdvisoryDetails.js';
 import { PackageIcon } from './PackageIcon.js';
-import { RowActionsMenu } from './RowActionsMenu.js';
 import { SeverityBadge } from './SeverityBadge.js';
 import { StatusBadge } from './StatusBadge.js';
 import { InfoTooltip } from './Tooltip.js';
@@ -117,7 +115,7 @@ function QuietAction({
  * upgrade message through the identical host-owned validate/preflight/
  * confirm/install pipeline (see resolveActionState's own doc) — only the
  * label, tooltip, and visual weight change with what the host has already
- * decided is on offer. "Analyze remediation" is the one exception: it sends
+ * decided is on offer. "Check transitive fix" is the one exception: it sends
  * only a package name (see analyze-remediation's own doc in
  * webviewProtocol.ts) through an entirely separate, read-only host flow.
  */
@@ -175,7 +173,7 @@ function UpgradeAction({
     return (
       <QuietAction
         icon={<IconCheck className="action-quiet__icon action-quiet__icon--resolved" />}
-        label="Fix available"
+        label="Transitive fix found"
         tone="resolved"
         tooltipLabel="How this fix works"
         tooltip={state.tooltip}
@@ -250,7 +248,6 @@ export function PackageTable({
   onAnalyzeRemediation,
   hygieneFindings,
   onOpenDetails,
-  onWhereUsed,
 }: {
   rows: readonly PackageRow[];
   activeUpgrade: string | null;
@@ -271,7 +268,6 @@ export function PackageTable({
   /** Deprecated + duplicate-version findings from the current scan, plus any likely-unused findings from a completed "Analyze cleanup" run — see App.tsx. */
   hygieneFindings: readonly DependencyFinding[];
   onOpenDetails: (packageName: string) => void;
-  onWhereUsed: (packageName: string) => void;
 }): ReactElement {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -293,7 +289,6 @@ export function PackageTable({
           <col className="col-available" />
           <col className="col-vulnerabilities" />
           <col className="col-action" />
-          <col className="col-row-menu" />
         </colgroup>
         <thead>
           <tr>
@@ -309,9 +304,6 @@ export function PackageTable({
             />
             <SortableHeader column="vulnerabilities" label="Vulnerabilities" sortState={sortState} onSort={onSort} />
             <th scope="col">Action</th>
-            <th scope="col" className="packages__row-menu-header">
-              <span className="sr-only">More actions</span>
-            </th>
           </tr>
         </thead>
         {rows.map((row) => {
@@ -341,21 +333,27 @@ export function PackageTable({
                   ) : null}
                 </td>
                 <th scope="row" className="packages__name">
-                  <PackageIcon name={row.name} />
-                  <span className="packages__name-text">{row.name}</span>
-                  {row.dev ? <StatusBadge label="Dev" /> : null}
-                  {row.deprecated !== undefined ? (
-                    <StatusBadge label="Deprecated" tone="warning" title={row.deprecated} />
-                  ) : null}
-                  {duplicateFinding !== undefined ? (
-                    <StatusBadge label="Duplicate versions" tone="warning" title={duplicateFinding.summary} />
-                  ) : null}
-                  {unusedFinding?.evidence.kind === 'likely-unused' ? (
-                    <StatusBadge
-                      label={unusedFinding.confidence === 'high' ? 'Likely unused' : 'Possibly unused'}
-                      tone="warning"
-                      title={unusedFinding.evidence.reason}
-                    />
+                  <span className="packages__name-primary">
+                    <PackageIcon name={row.name} />
+                    <span className="packages__name-text">{row.name}</span>
+                  </span>
+                  {row.dev || row.deprecated !== undefined || duplicateFinding !== undefined || unusedFinding !== undefined ? (
+                    <span className="packages__name-tags">
+                      {row.dev ? <StatusBadge label="Dev" /> : null}
+                      {row.deprecated !== undefined ? (
+                        <StatusBadge label="Deprecated" tone="warning" title={row.deprecated} />
+                      ) : null}
+                      {duplicateFinding !== undefined ? (
+                        <StatusBadge label="Duplicate versions" tone="warning" title={duplicateFinding.summary} />
+                      ) : null}
+                      {unusedFinding?.evidence.kind === 'likely-unused' ? (
+                        <StatusBadge
+                          label={unusedFinding.confidence === 'high' ? 'Likely unused' : 'Possibly unused'}
+                          tone="warning"
+                          title={unusedFinding.evidence.reason}
+                        />
+                      ) : null}
+                    </span>
                   ) : null}
                 </th>
                 <td className="packages__wrap">
@@ -368,41 +366,30 @@ export function PackageTable({
                   <SeverityBadge severity={row.worstSeverity} />
                 </td>
                 <td>
-                  <UpgradeAction
-                    row={row}
-                    activeUpgrade={activeUpgrade}
-                    onUpgrade={onUpgrade}
-                    upgradesDisabled={upgradesDisabled}
-                    remediation={remediationByPackage.get(row.name)}
-                    onAnalyzeRemediation={onAnalyzeRemediation}
-                  />
-                </td>
-                <td className="packages__row-menu">
-                  <RowActionsMenu
-                    label={`More actions for ${row.name}`}
-                    items={[
-                      {
-                        key: 'where-used',
-                        label: 'Where is this used?',
-                        icon: <IconTarget />,
-                        onSelect: () => {
-                          onWhereUsed(row.name);
-                        },
-                      },
-                      {
-                        key: 'details',
-                        label: 'Dependency details',
-                        onSelect: () => {
-                          onOpenDetails(row.name);
-                        },
-                      },
-                    ]}
-                  />
+                  <div className="packages__actions">
+                    <UpgradeAction
+                      row={row}
+                      activeUpgrade={activeUpgrade}
+                      onUpgrade={onUpgrade}
+                      upgradesDisabled={upgradesDisabled}
+                      remediation={remediationByPackage.get(row.name)}
+                      onAnalyzeRemediation={onAnalyzeRemediation}
+                    />
+                    <button
+                      type="button"
+                      className="button button--secondary packages__details-button"
+                      onClick={() => {
+                        onOpenDetails(row.name);
+                      }}
+                    >
+                      Details
+                    </button>
+                  </div>
                 </td>
               </tr>
               {isOpen ? (
                 <tr className="packages__details">
-                  <td colSpan={7}>
+                  <td colSpan={6}>
                     <AdvisoryDetails packageName={row.name} advisories={row.advisories} onOpenAdvisory={onOpenAdvisory} />
                   </td>
                 </tr>

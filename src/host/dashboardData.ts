@@ -31,7 +31,13 @@ export function toDashboardData(
   canChangeProject: boolean,
   generatedAt: string = new Date().toISOString()
 ): DashboardData {
-  const data: DashboardData = { rows: result.rows, generatedAt, project, canChangeProject };
+  const data: DashboardData = {
+    rows: result.rows,
+    generatedAt,
+    project,
+    canChangeProject,
+    hygieneFindings: result.hygieneFindings ?? [],
+  };
   if (result.advisoriesError !== undefined) {
     data.advisoriesError = {
       code: result.advisoriesError.code,

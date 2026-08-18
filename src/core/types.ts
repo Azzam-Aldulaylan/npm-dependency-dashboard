@@ -73,6 +73,8 @@ export interface VersionInfo {
   wanted: string | null;
   /** Highest stable version. Prereleases only when installed is a prerelease. */
   latest: string | null;
+  /** Human-readable package summary from /<pkg>/latest. */
+  description?: string;
   deprecated?: string;
   /** SPDX id from /<pkg>/latest. Free under the hybrid fetch — see spec. */
   license?: string;
@@ -131,6 +133,8 @@ export type UpgradeReason = 'security-fix' | 'update';
 
 export interface PackageRow {
   name: string;
+  /** Human-readable registry summary, when the package publishes one. */
+  description?: string;
   /**
    * The real, lockfile-resolved installed version, or null when there is
    * none — never a range/spec string. Callers (upgrade eligibility in

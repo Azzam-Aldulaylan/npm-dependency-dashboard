@@ -20,6 +20,8 @@
 
 import type { DependencyEdge, DependencyEdgeKind, DependencyGraph, DependencyNode } from '../types.js';
 import type { Manifest } from '../manifest/parse.js';
+import type { PerformanceRecorder } from '../performance/measurement.js';
+import { NOOP_PERFORMANCE_RECORDER } from '../performance/measurement.js';
 
 const NODE_MODULES = 'node_modules/';
 
@@ -230,6 +232,7 @@ export interface BuildGraphOptions {
   manifest: Manifest;
   /** Raw lockfile text, or null when no lockfile exists. */
   lockfileText: string | null;
+  performance?: PerformanceRecorder;
 }
 
 /**
@@ -241,6 +244,7 @@ export interface BuildGraphOptions {
  */
 export function buildGraph(options: BuildGraphOptions): DependencyGraph {
   const { root, manifest, lockfileText } = options;
+  const performance = options.performance ?? NOOP_PERFORMANCE_RECORDER;
 
   const declaredRanges = new Map<string, string>();
   for (const dep of manifest.dependencies) {
@@ -248,6 +252,7 @@ export function buildGraph(options: BuildGraphOptions): DependencyGraph {
   }
 
   if (lockfileText === null) {
+    const endGraph = performance.start('dependency graph build');
     const nodes = new Map<string, DependencyNode>();
     for (const dep of manifest.dependencies) {
       const node: DependencyNode = {
@@ -264,10 +269,14 @@ export function buildGraph(options: BuildGraphOptions): DependencyGraph {
       };
       nodes.set(node.path, node);
     }
-    return { root, packageManager: 'npm', lockfileVersion: null, nodes };
+    const graph = { root, packageManager: 'npm' as const, lockfileVersion: null, nodes };
+    endGraph({ 'graph nodes': nodes.size });
+    return graph;
   }
 
+  const endParse = performance.start('lockfile parse');
   const json: unknown = JSON.parse(lockfileText);
+  endParse({ bytes: Buffer.byteLength(lockfileText) });
   const lock = asRecord(json);
   if (lock === null) throw new UnsupportedLockfileError(undefined);
 
@@ -280,6 +289,7 @@ export function buildGraph(options: BuildGraphOptions): DependencyGraph {
   const packages = asRecord(lock['packages']);
   const dependencies = asRecord(lock['dependencies']);
 
+  const endGraph = performance.start('dependency graph build');
   let nodes: Map<string, DependencyNode>;
   if (packages !== null) {
     // v2 and v3. For v2 this deliberately ignores the legacy `dependencies`
@@ -322,6 +332,7 @@ export function buildGraph(options: BuildGraphOptions): DependencyGraph {
 
   const graph: DependencyGraph = { root, packageManager: 'npm', lockfileVersion, nodes };
   resolveNpmEdgeTargets(graph);
+  endGraph({ 'graph nodes': nodes.size });
   return graph;
 }
 

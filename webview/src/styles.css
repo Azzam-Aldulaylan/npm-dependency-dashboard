@@ -32,7 +32,7 @@ body {
   --accent-total: var(--vscode-charts-blue, #3794ff);
   --accent-updates: var(--vscode-charts-purple, #b180d7);
   --accent-vulnerabilities: var(--vscode-charts-red, #f14c4c);
-  --accent-attention: var(--vscode-charts-orange, #d18616);
+  --accent-attention: var(--vscode-charts-yellow, #e5c07b);
 }
 
 button {
@@ -409,6 +409,18 @@ button {
   gap: 0.5rem;
 }
 
+.toolbar__analysis-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.toolbar__analysis-age {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
 /* --------------------------------------------------------- type filter */
 
 .type-filter {
@@ -663,8 +675,7 @@ button {
 }
 
 /* Column widths sum to 100%, keeping Available from ballooning next to a
-   short Vulnerabilities badge and leaving Action room for the longest
-   "Upgrade to X.Y.Z" label. */
+   short Vulnerabilities badge and leaving Action room for review + details. */
 .col-disclosure {
   width: 4%;
 }
@@ -693,8 +704,35 @@ button {
   font-weight: 600;
 }
 
+.packages__name-primary,
+.packages__name-tags {
+  display: flex;
+  align-items: center;
+}
+
+.packages__name-primary {
+  gap: 0.4rem;
+}
+
+.packages__name-tags {
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.35rem;
+}
+
 .packages__name-text {
   overflow-wrap: anywhere;
+}
+
+.packages__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.55rem;
+}
+
+.packages__details-button {
+  flex-shrink: 0;
 }
 
 /* Long scoped package names and version strings wrap instead of forcing the
@@ -1922,6 +1960,10 @@ button {
   font-size: 0.85em;
 }
 
+.verification__configure {
+  margin-top: 0.7rem;
+}
+
 /* ----------------------------------------------------------------- loading */
 
 .analysis-loading {
@@ -1955,4 +1997,167 @@ button {
     max-height: 92vh;
     border-radius: 6px 6px 0 0;
   }
+}
+
+/* ---------------------------------------------------- dependency hygiene */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.banner--info {
+  border-left-color: var(--vscode-editorInfo-foreground, var(--vscode-focusBorder));
+  background: var(--vscode-inputValidation-infoBackground, transparent);
+}
+
+.banner__icon--spin {
+  animation: dashboard-spin 1.2s linear infinite;
+}
+
+.dependency-details__version-list,
+.dependency-details__references {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dependency-details__version {
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px;
+}
+
+.dependency-details__version-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+}
+
+.dependency-details__version-number {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-weight: 600;
+}
+
+.dependency-details__paths {
+  margin: 0.4rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.85em;
+}
+
+.dependency-details__path {
+  padding: 0.15rem 0;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.dependency-details__more-paths {
+  margin: 0.35rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
+}
+
+.dependency-details__introduced {
+  margin: 0.5rem 0 0;
+}
+
+.dependency-details__introduced-name {
+  margin: 0;
+  font-weight: 600;
+}
+
+.dependency-details__deprecated-message {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.dependency-details__suggested-replacement {
+  margin: 0.4rem 0 0;
+}
+
+.dependency-details__usage-summary {
+  margin: 0 0 0.5rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.dependency-details__usage-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+
+.dependency-details__usage-meta .dependency-details__usage-summary {
+  margin: 0;
+}
+
+.dependency-details__usage-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+}
+
+.dependency-details__usage-status--error {
+  color: var(--vscode-editorError-foreground);
+}
+
+.dependency-details__usage-status-icon--spin {
+  animation: dashboard-spin 1.2s linear infinite;
+}
+
+.dependency-details__empty {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.dependency-details__reference {
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px;
+}
+
+.dependency-details__reference-open {
+  display: block;
+  margin: 0 0 0.3rem;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--vscode-textLink-foreground);
+  font-size: 0.85em;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dependency-details__reference-open:hover {
+  text-decoration: underline;
+}
+
+.dependency-details__reference-open--static {
+  color: var(--vscode-descriptionForeground);
+  cursor: default;
+}
+
+.dependency-details__snippet {
+  display: block;
+  overflow-x: auto;
+  padding: 0.3rem 0.45rem;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.12));
+  font-size: 0.82em;
+  white-space: pre;
 }

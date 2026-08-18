@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 
 import {
   CACHE_SCHEMA_VERSION,
+  ETAG_CACHE_SCHEMA_VERSION,
   isPersistedProjectCache,
   isPersistedProjectCacheCollection,
   isPersistedEtagCacheCollection,
@@ -39,6 +40,7 @@ const VALID_ENTRY = {
 
 test('isPersistedProjectCache accepts a well-formed record, including a null lockfilePath and a null lockfileHash', () => {
   assert.equal(isPersistedProjectCache(VALID_ENTRY), true);
+  assert.equal(isPersistedProjectCache({ ...VALID_ENTRY, rows: [{ ...ROW, description: 'A fixture package.' }] }), true);
   assert.equal(isPersistedProjectCache({ ...VALID_ENTRY, lockfilePath: null }), true);
   assert.equal(
     isPersistedProjectCache({ ...VALID_ENTRY, sourceFingerprint: { ...VALID_FINGERPRINT, lockfileHash: null, lockfilePath: null } }),
@@ -56,6 +58,7 @@ test('isPersistedProjectCache rejects a malformed generatedAt, missing lockfileP
   assert.equal(isPersistedProjectCache({ ...VALID_ENTRY, sourceFingerprint: { manifestHash: 'h' } }), false, 'a partial fingerprint is rejected');
   assert.equal(isPersistedProjectCache({ ...VALID_ENTRY, sourceFingerprint: 'not-an-object' }), false);
   assert.equal(isPersistedProjectCache({ ...VALID_ENTRY, rows: [{ name: 'oops' }] }), false);
+  assert.equal(isPersistedProjectCache({ ...VALID_ENTRY, rows: [{ ...ROW, description: 42 }] }), false);
   assert.equal(isPersistedProjectCache({ ...VALID_ENTRY, rows: 'not-an-array' }), false);
   assert.equal(isPersistedProjectCache(null), false);
   assert.equal(isPersistedProjectCache('a string'), false);
@@ -80,12 +83,14 @@ test('isPersistedProjectCacheCollection rejects malformed entries: non-tuples, w
   assert.equal(isPersistedProjectCacheCollection(undefined), false);
 });
 
-test('isPersistedEtagCacheCollection accepts well-formed entries and rejects malformed ones the same way', () => {
-  const good = { schemaVersion: CACHE_SCHEMA_VERSION, entries: [['https://registry.npmjs.org/x', { etag: 'W/"1"', body: '{}' }]] };
+test('isPersistedEtagCacheCollection accepts well-formed entries without sharing the project-row schema version', () => {
+  const good = { schemaVersion: ETAG_CACHE_SCHEMA_VERSION, entries: [['https://registry.npmjs.org/x', { etag: 'W/"1"', body: '{}' }]] };
   assert.equal(isPersistedEtagCacheCollection(good), true);
+  assert.notEqual(ETAG_CACHE_SCHEMA_VERSION, CACHE_SCHEMA_VERSION, 'a project-row refresh must preserve the registry cache');
+  assert.equal(isPersistedEtagCacheCollection({ ...good, schemaVersion: CACHE_SCHEMA_VERSION }), false);
   assert.equal(isPersistedEtagCacheCollection({ ...good, schemaVersion: 999 }), false);
   assert.equal(
-    isPersistedEtagCacheCollection({ schemaVersion: CACHE_SCHEMA_VERSION, entries: [['k', { etag: 'x' }]] }),
+    isPersistedEtagCacheCollection({ schemaVersion: ETAG_CACHE_SCHEMA_VERSION, entries: [['k', { etag: 'x' }]] }),
     false,
     'body is required'
   );

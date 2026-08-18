@@ -122,6 +122,7 @@ test('deprecated is surfaced from /latest', async () => {
   const client = fakeClient({
     [`${REGISTRY}/request/latest`]: json({
       version: '2.88.2',
+      description: '  Simplified HTTP request client.  ',
       deprecated: 'request has been deprecated',
       license: 'Apache-2.0',
     }),
@@ -130,6 +131,7 @@ test('deprecated is surfaced from /latest', async () => {
     { client, store: new MemoryEtagStore(), registry: REGISTRY },
     { name: 'request', range: '^2.0.0', installed: '2.88.2' }
   );
+  assert.equal(info.description, 'Simplified HTTP request client.');
   assert.equal(info.deprecated, 'request has been deprecated');
   assert.equal(info.license, 'Apache-2.0');
 });

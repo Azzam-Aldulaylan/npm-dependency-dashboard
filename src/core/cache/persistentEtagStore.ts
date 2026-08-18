@@ -12,7 +12,7 @@
 import type { CachedResponse, EtagStore } from '../registry/versions.js';
 import { hasUrlCredentials } from './keys.js';
 import type { KeyValueStore } from './keyValueStore.js';
-import { CACHE_SCHEMA_VERSION, isPersistedEtagCacheCollection } from './schema.js';
+import { ETAG_CACHE_SCHEMA_VERSION, isPersistedEtagCacheCollection } from './schema.js';
 import { WriteBackCache } from './writeBackCache.js';
 
 export const REGISTRY_CACHE_STORAGE_KEY = 'dependencyDashboard.registryCache';
@@ -46,7 +46,7 @@ export class PersistentEtagStore implements EtagStore {
         // refused to resolve must still never reach disk if one somehow did.
         const safeEntries = entries.filter(([key]) => !hasUrlCredentials(key));
         await store.update(REGISTRY_CACHE_STORAGE_KEY, {
-          schemaVersion: CACHE_SCHEMA_VERSION,
+          schemaVersion: ETAG_CACHE_SCHEMA_VERSION,
           entries: safeEntries,
         });
       },

@@ -35,7 +35,7 @@ export function VerificationSection({
             className="warning"
             detail="The dependency installation can be verified, but the application's build/tests will not run automatically."
           />
-          <button type="button" className="button button--secondary" onClick={onConfigureVerification}>
+          <button type="button" className="button button--secondary verification__configure" onClick={onConfigureVerification}>
             <IconGear />
             Configure verification
           </button>

@@ -129,8 +129,8 @@ export function resolveActionState(row: PackageRow, remediation?: TransitiveReme
     return {
       kind: 'security-fix',
       target: row.upgradeTo,
-      label: 'Fix vulnerability',
-      tooltip: `Upgrades to ${row.upgradeTo} to resolve the reported vulnerability. ${UPGRADE_TOOLTIP}`,
+      label: 'Review upgrade',
+      tooltip: `Reviews an upgrade to ${row.upgradeTo}, which resolves the reported vulnerability. ${UPGRADE_TOOLTIP}`,
     };
   }
 
@@ -141,7 +141,7 @@ export function resolveActionState(row: PackageRow, remediation?: TransitiveReme
       kind: 'update',
       target: row.upgradeTo,
       updateKind,
-      label: isMajor ? `Analyze ${row.upgradeTo}` : `Upgrade to ${row.upgradeTo}`,
+      label: 'Review upgrade',
       tooltip: isMajor ? `${row.upgradeTo} is a major version bump. ${UPGRADE_TOOLTIP}` : UPGRADE_TOOLTIP,
     };
   }
@@ -160,7 +160,7 @@ export function resolveActionState(row: PackageRow, remediation?: TransitiveReme
       return { kind: 'no-direct-fix', tooltip: directNoFixTooltip() };
     }
     if (remediation === undefined) {
-      return { kind: 'transitive-remediation', label: 'Analyze remediation', tooltip: transitiveAnalyzeTooltip(transitiveAdvisories) };
+      return { kind: 'transitive-remediation', label: 'Check transitive fix', tooltip: transitiveAnalyzeTooltip(transitiveAdvisories) };
     }
     if (remediation.phase === 'analyzing') {
       return { kind: 'remediation-analyzing', tooltip: 'Analyzing whether this vulnerability can be remediated…' };

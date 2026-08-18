@@ -40,6 +40,8 @@ import { PersistentEtagStore } from '../core/cache/persistentEtagStore.js';
 import { PersistentProjectCacheStore } from '../core/cache/projectCacheStore.js';
 import { isSameProjectReload, lockfileWatchDirs, projectCandidateLabel } from '../core/workspace/scan.js';
 import { NodeHttpClient } from '../core/registry/http.js';
+import type { PerformanceRecorder } from '../core/performance/measurement.js';
+import { createPerformanceSession } from '../core/performance/measurement.js';
 import { DashboardController } from './dashboardController.js';
 import type { MessageSink } from './dashboardController.js';
 import type { ReloadSource } from './fileChangeReload.js';
@@ -48,6 +50,7 @@ import { pickProject } from './projectPicker.js';
 import type { DiscoveredProject, ResolvedProject } from './projectResolution.js';
 import { discoverProjects, loadProject } from './projectResolution.js';
 import { UpgradeAssistantCoordinator } from './upgradeAssistantCoordinator.js';
+import { UsageAnalysisCoordinator } from './usage/usageCoordinator.js';
 import type { ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
 import type { WebviewToHostMessage } from './webviewProtocol.js';
 import { isWebviewToHostMessage } from './webviewProtocol.js';
@@ -59,7 +62,7 @@ const BACKGROUND_REFRESH_INTERVAL_MS = 30 * 60_000;
 /** Coalesces a burst of filesystem events (e.g. an editor's atomic save, which can fire delete+create in quick succession) into a single invalidation + rescan. */
 const FILE_EVENT_DEBOUNCE_MS = 300;
 
-function buildHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+function buildHtml(webview: vscode.Webview, extensionUri: vscode.Uri, performanceEnabled: boolean): string {
   const nonce = randomBytes(16).toString('base64');
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'));
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview.css'));
@@ -81,7 +84,7 @@ function buildHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     <link rel="stylesheet" href="${styleUri.toString()}" />
     <title>${TITLE}</title>
   </head>
-  <body>
+  <body data-performance-debug="${performanceEnabled ? 'true' : 'false'}">
     <div id="root"></div>
     <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
   </body>
@@ -107,6 +110,8 @@ export class DashboardPanel {
   private pending: Promise<DashboardController | undefined> | undefined;
   /** Owns preflight, confirmation, transaction, verification, and completion. */
   private readonly upgradeCoordinator: UpgradeAssistantCoordinator;
+  /** Owns on-demand "Where is this used?" / "Analyze cleanup" usage analysis — see src/host/usage/usageCoordinator.ts. */
+  private readonly usageCoordinator: UsageAnalysisCoordinator;
   /**
    * Shared across every controller this panel ever builds (initial open and
    * every reload) so ETag caching survives a reload — only the project
@@ -151,7 +156,7 @@ export class DashboardPanel {
     reload: (kinds, generation) => this.reloadAfterFileChange(kinds, generation),
   });
   private readonly reloadSource: ReloadSource<DiscoveredProject> = {
-    loadProject: (candidate) => loadProject(candidate),
+    loadProject: (candidate) => this.loadProjectMeasured(candidate, 'Dependency Dashboard project reload'),
     toProjectInfo,
     cacheKeyFor: (candidate, registry, packageManager) =>
       deriveProjectCacheKey(candidate.id, registry, packageManager ?? 'npm'),
@@ -161,6 +166,13 @@ export class DashboardPanel {
     this.panel = panel;
     this.sink = {
       postMessage: (message) => {
+        if (this.performanceEnabled()) {
+          const performance = createPerformanceSession('Dependency Dashboard webview message', true);
+          const endSerialization = performance.start('webview message serialization');
+          const serialized = JSON.stringify(message);
+          endSerialization({ status: message.status, bytes: Buffer.byteLength(serialized) });
+          performance.finish({ status: message.status });
+        }
         void this.panel.webview.postMessage(message);
       },
     };
@@ -176,11 +188,18 @@ export class DashboardPanel {
       reloadFinalState: () => this.reloadAndScan(),
       flushDeferredChanges: () => this.fileChangeCoordinator.flushDeferred(),
     });
+    this.usageCoordinator = new UsageAnalysisCoordinator({
+      sink: this.sink,
+      ensureController: () => this.ensureController(),
+      getSelectedProject: () => this.selectedProject,
+      isDisposed: () => this.disposed,
+      performanceEnabled: this.performanceEnabled,
+    });
     this.backgroundTimer = new BackgroundRefreshTimer(realTimerScheduler, BACKGROUND_REFRESH_INTERVAL_MS, () => {
       this.onBackgroundTick();
     });
 
-    this.panel.webview.html = buildHtml(this.panel.webview, context.extensionUri);
+    this.panel.webview.html = buildHtml(this.panel.webview, context.extensionUri, this.performanceEnabled());
 
     this.panel.webview.onDidReceiveMessage(
       (raw: unknown) => {
@@ -203,6 +222,7 @@ export class DashboardPanel {
         // even after its panel closes. The transaction's async owner keeps the
         // session alive until install/verification/rollback completes.
         this.upgradeCoordinator.disposeWhenIdle();
+        this.usageCoordinator.dispose();
         this.disposeWatchers();
         this.fileChangeCoordinator.dispose();
         this.backgroundTimer.dispose();
@@ -275,6 +295,51 @@ export class DashboardPanel {
       await this.upgradeCoordinator.handleAnalyzeRemediation(message);
       return;
     }
+    if (message.type === 'where-used') {
+      // Same rule as analyze-remediation: read-only, but a concurrent read
+      // could still race an in-flight upgrade's file writes.
+      if (this.upgradeCoordinator.isBusy()) {
+        this.sink.postMessage({
+          status: 'usage-error',
+          package: message.package,
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+        });
+        return;
+      }
+      await this.usageCoordinator.handleWhereUsed(message);
+      return;
+    }
+    if (message.type === 'reanalyze-usage') {
+      if (this.upgradeCoordinator.isBusy()) {
+        this.sink.postMessage({
+          status: 'usage-error',
+          package: message.package,
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+        });
+        return;
+      }
+      await this.usageCoordinator.handleWhereUsed(message, true);
+      return;
+    }
+    if (message.type === 'analyze-cleanup') {
+      if (this.upgradeCoordinator.isBusy()) {
+        this.sink.postMessage({
+          status: 'cleanup-error',
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+        });
+        return;
+      }
+      await this.usageCoordinator.handleAnalyzeCleanup();
+      return;
+    }
+    if (message.type === 'cancel-usage-analysis') {
+      this.usageCoordinator.handleCancel();
+      return;
+    }
+    if (message.type === 'open-usage-reference') {
+      this.usageCoordinator.handleOpenReference(message);
+      return;
+    }
     if (message.type === 'change-project') {
       // Same rule as refresh below: a project switch mid-upgrade would race
       // a scan (and a controller replacement) against a package.json/
@@ -330,14 +395,17 @@ export class DashboardPanel {
    * currently selected project stays selected, nothing is posted.
    */
   private async changeProject(): Promise<void> {
+    const performance = createPerformanceSession('Dependency Dashboard project discovery', this.performanceEnabled());
     let candidates: DiscoveredProject[];
     try {
-      candidates = await discoverProjects();
+      candidates = await discoverProjects(performance);
     } catch (cause) {
+      performance.finish({ failed: true });
       if (this.disposed) return;
       this.sink.postMessage({ status: 'fatal-error', error: toProtocolError(cause) });
       return;
     }
+    performance.finish({ candidates: candidates.length });
     if (this.disposed) return;
     this.candidateCount = candidates.length;
 
@@ -474,7 +542,7 @@ export class DashboardPanel {
 
     let project: ResolvedProject;
     try {
-      project = await loadProject(candidate);
+      project = await this.loadProjectMeasured(candidate, 'Dependency Dashboard project reload');
     } catch (cause) {
       if (this.disposed || generation !== this.reloadGeneration) return;
       this.sink.postMessage({ status: 'fatal-error', error: toProtocolError(cause) });
@@ -550,12 +618,13 @@ export class DashboardPanel {
   }
 
   private async createController(): Promise<DashboardController | undefined> {
+    const performance = createPerformanceSession('Dependency Dashboard project load', this.performanceEnabled());
     try {
-      const candidate = await this.selectInitialProject();
+      const candidate = await this.selectInitialProject(performance);
       if (this.disposed || candidate === undefined) return undefined; // already posted (or torn down)
 
       this.selectedProject = candidate;
-      const project = await loadProject(candidate);
+      const project = await loadProject(candidate, performance);
       if (this.disposed) return undefined;
 
       this.setupFileWatchers(candidate, path.join(project.root, 'package.json'));
@@ -571,6 +640,8 @@ export class DashboardPanel {
       if (this.disposed) return undefined;
       this.sink.postMessage({ status: 'fatal-error', error: toProtocolError(cause) });
       return undefined;
+    } finally {
+      performance.finish();
     }
   }
 
@@ -581,8 +652,8 @@ export class DashboardPanel {
    * candidates, distinguished only by the message, since there is no
    * "currently selected project" yet to fall back to on a first-ever open.
    */
-  private async selectInitialProject(): Promise<DiscoveredProject | undefined> {
-    const candidates = await discoverProjects();
+  private async selectInitialProject(performance: PerformanceRecorder): Promise<DiscoveredProject | undefined> {
+    const candidates = await discoverProjects(performance);
     if (this.disposed) return undefined;
     this.candidateCount = candidates.length;
 
@@ -630,7 +701,23 @@ export class DashboardPanel {
       projectCacheStore: this.projectCacheStore,
       cacheKey,
       ttlMinutesProvider: this.ttlMinutesProvider,
+      performanceEnabled: this.performanceEnabled,
+      progressEnabled: true,
     });
+  }
+
+  private readonly performanceEnabled = (): boolean =>
+    vscode.workspace
+      .getConfiguration('dependencyDashboard')
+      .get<boolean>('debug.performance', false);
+
+  private async loadProjectMeasured(candidate: DiscoveredProject, operation: string): Promise<ResolvedProject> {
+    const performance = createPerformanceSession(operation, this.performanceEnabled());
+    try {
+      return await loadProject(candidate, performance);
+    } finally {
+      performance.finish();
+    }
   }
 
   /** S6 project identity (stable across scans) plus registry — see deriveProjectCacheKey for why both are needed to avoid cross-registry contamination within the same project. */

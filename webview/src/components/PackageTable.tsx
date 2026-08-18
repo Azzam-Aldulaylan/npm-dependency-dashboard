@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 
 import type { PackageRow } from '../../../src/core/types.js';
+import type { DependencyFinding } from '../../../src/core/hygiene/types.js';
+import { ownDuplicateFinding } from '../../../src/host/dependencyDetailsCopy.js';
 import type { SortColumn, TableSortState } from '../../../src/host/tableSort.js';
 import { resolveActionState } from '../../../src/host/upgradeAction.js';
 import type { TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
@@ -113,7 +115,7 @@ function QuietAction({
  * upgrade message through the identical host-owned validate/preflight/
  * confirm/install pipeline (see resolveActionState's own doc) — only the
  * label, tooltip, and visual weight change with what the host has already
- * decided is on offer. "Analyze remediation" is the one exception: it sends
+ * decided is on offer. "Check transitive fix" is the one exception: it sends
  * only a package name (see analyze-remediation's own doc in
  * webviewProtocol.ts) through an entirely separate, read-only host flow.
  */
@@ -171,7 +173,7 @@ function UpgradeAction({
     return (
       <QuietAction
         icon={<IconCheck className="action-quiet__icon action-quiet__icon--resolved" />}
-        label="Fix available"
+        label="Transitive fix found"
         tone="resolved"
         tooltipLabel="How this fix works"
         tooltip={state.tooltip}
@@ -244,6 +246,8 @@ export function PackageTable({
   onOpenAdvisory,
   remediationByPackage,
   onAnalyzeRemediation,
+  hygieneFindings,
+  onOpenDetails,
 }: {
   rows: readonly PackageRow[];
   activeUpgrade: string | null;
@@ -261,6 +265,9 @@ export function PackageTable({
   /** This webview session's own "Analyze remediation" phase/result per package — see App.tsx; never persisted, never a fact from the host's own scan. */
   remediationByPackage: ReadonlyMap<string, TransitiveRemediationUiState>;
   onAnalyzeRemediation: (packageName: string) => void;
+  /** Deprecated + duplicate-version findings from the current scan, plus any likely-unused findings from a completed "Analyze cleanup" run — see App.tsx. */
+  hygieneFindings: readonly DependencyFinding[];
+  onOpenDetails: (packageName: string) => void;
 }): ReactElement {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -302,6 +309,10 @@ export function PackageTable({
         {rows.map((row) => {
           const expandable = row.advisories.length > 0;
           const isOpen = expandable && expanded.has(row.name);
+          const duplicateFinding = ownDuplicateFinding(hygieneFindings, row.name);
+          const unusedFinding = hygieneFindings.find(
+            (finding) => finding.kind === 'likely-unused' && finding.packageName === row.name
+          );
           return (
             <tbody key={row.name}>
               <tr>
@@ -322,11 +333,27 @@ export function PackageTable({
                   ) : null}
                 </td>
                 <th scope="row" className="packages__name">
-                  <PackageIcon name={row.name} />
-                  <span className="packages__name-text">{row.name}</span>
-                  {row.dev ? <StatusBadge label="Dev" /> : null}
-                  {row.deprecated !== undefined ? (
-                    <StatusBadge label="Deprecated" tone="warning" title={row.deprecated} />
+                  <span className="packages__name-primary">
+                    <PackageIcon name={row.name} />
+                    <span className="packages__name-text">{row.name}</span>
+                  </span>
+                  {row.dev || row.deprecated !== undefined || duplicateFinding !== undefined || unusedFinding !== undefined ? (
+                    <span className="packages__name-tags">
+                      {row.dev ? <StatusBadge label="Dev" /> : null}
+                      {row.deprecated !== undefined ? (
+                        <StatusBadge label="Deprecated" tone="warning" title={row.deprecated} />
+                      ) : null}
+                      {duplicateFinding !== undefined ? (
+                        <StatusBadge label="Duplicate versions" tone="warning" title={duplicateFinding.summary} />
+                      ) : null}
+                      {unusedFinding?.evidence.kind === 'likely-unused' ? (
+                        <StatusBadge
+                          label={unusedFinding.confidence === 'high' ? 'Likely unused' : 'Possibly unused'}
+                          tone="warning"
+                          title={unusedFinding.evidence.reason}
+                        />
+                      ) : null}
+                    </span>
                   ) : null}
                 </th>
                 <td className="packages__wrap">
@@ -339,14 +366,25 @@ export function PackageTable({
                   <SeverityBadge severity={row.worstSeverity} />
                 </td>
                 <td>
-                  <UpgradeAction
-                    row={row}
-                    activeUpgrade={activeUpgrade}
-                    onUpgrade={onUpgrade}
-                    upgradesDisabled={upgradesDisabled}
-                    remediation={remediationByPackage.get(row.name)}
-                    onAnalyzeRemediation={onAnalyzeRemediation}
-                  />
+                  <div className="packages__actions">
+                    <UpgradeAction
+                      row={row}
+                      activeUpgrade={activeUpgrade}
+                      onUpgrade={onUpgrade}
+                      upgradesDisabled={upgradesDisabled}
+                      remediation={remediationByPackage.get(row.name)}
+                      onAnalyzeRemediation={onAnalyzeRemediation}
+                    />
+                    <button
+                      type="button"
+                      className="button button--secondary packages__details-button"
+                      onClick={() => {
+                        onOpenDetails(row.name);
+                      }}
+                    >
+                      Details
+                    </button>
+                  </div>
                 </td>
               </tr>
               {isOpen ? (

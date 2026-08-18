@@ -30,6 +30,7 @@ import { runPool, DEFAULT_CONCURRENCY } from './pool.js';
 import type { Settled } from './pool.js';
 
 export const ABBREVIATED_ACCEPT = 'application/vnd.npm.install-v1+json';
+const MAX_DESCRIPTION_LENGTH = 500;
 
 export interface CachedResponse {
   etag: string;
@@ -113,6 +114,7 @@ function parseJson(body: string, url: string): Record<string, unknown> {
 
 export interface LatestDoc {
   version: string | null;
+  description?: string;
   license?: string;
   deprecated?: string;
 }
@@ -132,6 +134,9 @@ export async function fetchLatest(
   const doc: LatestDoc = {
     version: typeof json['version'] === 'string' ? json['version'] : null,
   };
+  if (typeof json['description'] === 'string' && json['description'].trim() !== '') {
+    doc.description = json['description'].trim().slice(0, MAX_DESCRIPTION_LENGTH);
+  }
   if (typeof json['license'] === 'string') doc.license = json['license'];
   if (typeof json['deprecated'] === 'string') doc.deprecated = json['deprecated'];
   return doc;
@@ -271,6 +276,8 @@ export interface FetchVersionOptions {
   store: EtagStore;
   registry: string;
   signal?: AbortSignal;
+  /** Optional scan-local loader used to share one packument across consumers. */
+  packumentLoader?: (name: string, signal?: AbortSignal) => Promise<PackumentDoc>;
 }
 
 /**
@@ -307,12 +314,14 @@ export async function fetchVersionInfo(
       wanted: latestDoc.version,
       latest: latestDoc.version,
     };
+    if (latestDoc.description !== undefined) info.description = latestDoc.description;
     if (latestDoc.deprecated !== undefined) info.deprecated = latestDoc.deprecated;
     if (latestDoc.license !== undefined) info.license = latestDoc.license;
     return info;
   }
 
-  const packument = await fetchPackument(client, store, registry, req.name, signal);
+  const packument = await (options.packumentLoader?.(req.name, signal) ??
+    fetchPackument(client, store, registry, req.name, signal));
 
   // Delegate to the existing selection rules — do not reimplement them here.
   const info: VersionInfo = {
@@ -320,6 +329,7 @@ export async function fetchVersionInfo(
     wanted: resolveWanted(packument.versions, req.range, req.installed),
     latest: resolveLatest(packument.versions, packument.distTags, req.installed),
   };
+  if (latestDoc.description !== undefined) info.description = latestDoc.description;
   if (latestDoc.deprecated !== undefined) info.deprecated = latestDoc.deprecated;
   if (latestDoc.license !== undefined) info.license = latestDoc.license;
   return info;
@@ -348,9 +358,13 @@ export async function fetchAllVersions(
     requests,
     (req, signal) =>
       fetchVersionInfo(
-        signal === undefined
-          ? { client: options.client, store: options.store, registry: options.registry }
-          : { client: options.client, store: options.store, registry: options.registry, signal },
+        {
+          client: options.client,
+          store: options.store,
+          registry: options.registry,
+          ...(signal === undefined ? {} : { signal }),
+          ...(options.packumentLoader === undefined ? {} : { packumentLoader: options.packumentLoader }),
+        },
         req
       ),
     poolOptions

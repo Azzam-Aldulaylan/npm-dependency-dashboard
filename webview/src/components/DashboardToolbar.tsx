@@ -23,6 +23,7 @@ export function DashboardToolbar({
   onRefresh,
   disabled,
   children,
+  trailingActions,
 }: {
   visibleCount: number;
   totalCount: number;
@@ -31,6 +32,8 @@ export function DashboardToolbar({
   onRefresh: () => void;
   disabled: boolean;
   children?: ReactNode;
+  /** Rendered before "Change project"/"Refresh" — see App.tsx's "Analyze cleanup" button. */
+  trailingActions?: ReactNode;
 }): ReactElement {
   return (
     <div className="toolbar">
@@ -39,6 +42,7 @@ export function DashboardToolbar({
         {children}
       </div>
       <div className="toolbar__actions">
+        {trailingActions}
         {canChangeProject ? (
           <button className="button button--secondary" type="button" onClick={onChangeProject} disabled={disabled}>
             <IconFolder />

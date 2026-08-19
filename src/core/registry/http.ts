@@ -83,6 +83,10 @@ function decompress(stream: Readable, encoding: string | undefined): Readable {
   return stream;
 }
 
+function signalIsAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
 /**
  * HttpClient backed by node:https.
  *
@@ -152,7 +156,7 @@ export class NodeHttpClient implements HttpClient {
       }
 
       const signal = options.signal;
-      if (signal?.aborted === true) {
+      if (signalIsAborted(signal)) {
         reject(new FetchError('CANCELLED', 'aborted before request started'));
         return;
       }
@@ -170,6 +174,24 @@ export class NodeHttpClient implements HttpClient {
       // what is actually written below.
       const bodyBuffer = body === undefined ? undefined : Buffer.from(body, 'utf8');
       if (bodyBuffer !== undefined) headers['content-length'] = String(bodyBuffer.length);
+
+      let settled = false;
+      let onAbort: (() => void) | undefined;
+      const cleanupAbort = (): void => {
+        if (onAbort !== undefined) signal?.removeEventListener('abort', onAbort);
+      };
+      const succeed = (response: HttpResponse): void => {
+        if (settled) return;
+        settled = true;
+        cleanupAbort();
+        resolve(response);
+      };
+      const fail = (error: FetchError): void => {
+        if (settled) return;
+        settled = true;
+        cleanupAbort();
+        reject(error);
+      };
 
       const req = request(
         {
@@ -196,7 +218,7 @@ export class NodeHttpClient implements HttpClient {
           // that will never receive bytes.
           if (status === 304) {
             res.resume();
-            res.on('end', () => resolve({ status, headers, body: '', wireBytes }));
+            res.on('end', () => succeed({ status, headers, body: '', wireBytes }));
             return;
           }
 
@@ -211,14 +233,14 @@ export class NodeHttpClient implements HttpClient {
             if (total > MAX_RESPONSE_BYTES) {
               aborted = true;
               req.destroy();
-              reject(new FetchError('TOO_LARGE', `response exceeded ${MAX_RESPONSE_BYTES} bytes`));
+              fail(new FetchError('TOO_LARGE', `response exceeded ${MAX_RESPONSE_BYTES} bytes`));
               return;
             }
             chunks.push(chunk);
           });
           body.on('end', () => {
             if (aborted) return;
-            resolve({
+            succeed({
               status,
               headers,
               body: Buffer.concat(chunks).toString('utf8'),
@@ -227,29 +249,40 @@ export class NodeHttpClient implements HttpClient {
           });
           body.on('error', (err: Error) => {
             if (aborted) return;
-            reject(new FetchError('NETWORK', err.message));
+            fail(new FetchError('NETWORK', err.message));
           });
         }
       );
 
       req.setTimeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, () => {
         req.destroy();
-        reject(new FetchError('TIMEOUT', `timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`));
+        fail(new FetchError('TIMEOUT', `timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`));
       });
 
       req.on('error', (err: Error) => {
-        reject(
+        fail(
           signal?.aborted === true
             ? new FetchError('CANCELLED', 'aborted')
             : new FetchError('NETWORK', err.message)
         );
       });
 
-      const onAbort = (): void => {
+      onAbort = (): void => {
         req.destroy();
-        reject(new FetchError('CANCELLED', 'aborted'));
+        fail(new FetchError('CANCELLED', 'aborted'));
       };
       signal?.addEventListener('abort', onAbort, { once: true });
+      // One scan signal is shared by every registry call. Remove each
+      // completed request's listener immediately; otherwise a 100+ dependency
+      // scan retains one listener per settled request until the whole scan is
+      // collected and can trigger EventTarget listener-pressure warnings.
+      req.once('close', cleanupAbort);
+      // Close the small race between the pre-request check above and listener
+      // registration. AbortSignal does not replay an already-fired event.
+      if (signalIsAborted(signal)) {
+        onAbort();
+        return;
+      }
 
       if (bodyBuffer !== undefined) req.write(bodyBuffer);
       req.end();

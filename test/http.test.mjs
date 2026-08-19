@@ -8,6 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 
 import {
   NodeHttpClient,
@@ -64,6 +65,20 @@ test('an already-aborted signal is refused before the socket opens', async () =>
       return true;
     }
   );
+});
+
+test('a settled request releases its shared scan-signal abort listener', async () => {
+  const controller = new AbortController();
+  const client = new NodeHttpClient();
+
+  await assert.rejects(() =>
+    client.get('https://invalid.invalid/listener-cleanup', {
+      signal: controller.signal,
+      timeoutMs: 2000,
+    })
+  );
+
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
 });
 
 test('status codes map to typed, correctly-retryable errors', () => {

@@ -17,6 +17,7 @@
 import * as vscode from 'vscode';
 
 import { configReferencesPackage } from '../../core/usage/configHeuristics.js';
+import { scanFilesBounded } from '../../core/usage/boundedFileScan.js';
 import { findPackageInScripts } from '../../core/usage/packageScripts.js';
 import type { DependencyUsageResult } from '../../core/usage/types.js';
 import { UsageReferenceIndex } from '../../core/usage/referenceIndex.js';
@@ -52,21 +53,18 @@ export async function analyzeDependencyUsage(
   const fileCapReached = sourceFiles.length >= maxFiles;
 
   const endSourceScan = performance.start('usage source scan');
-  let scanned = 0;
-  let cancelledEarly = false;
-  for (const uri of sourceFiles) {
-    if (options.token.isCancellationRequested) {
-      cancelledEarly = true;
-      break;
-    }
-    const text = await readTextFileCapped(uri);
-    if (text !== null) {
+  const sourceScan = await scanFilesBounded({
+    items: sourceFiles,
+    read: readTextFileCapped,
+    consume: (uri, text) => {
       const filePath = relativeToFolder(options.folder, uri);
       if (filePath !== null) referenceIndex.addSourceFile(filePath, text);
-    }
-    scanned += 1;
-    options.onProgress?.(scanned, sourceFiles.length);
-  }
+    },
+    isCancelled: () => options.token.isCancellationRequested,
+    ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+  });
+  const scanned = sourceScan.processed;
+  let cancelledEarly = sourceScan.cancelled;
   endSourceScan({ files: scanned, packages: requested.size });
 
   for (const name of requested) {

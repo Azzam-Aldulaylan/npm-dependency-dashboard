@@ -32,3 +32,15 @@ test('"all" with no type filter narrowing falls back to a generic message', () =
 test('a non-"all" card combined with a type filter still uses the card wording', () => {
   assert.equal(filterEmptyStateTitle('vulnerabilities', 'dev'), 'No vulnerable dependencies');
 });
+
+test('hygiene filters take precedence and explain whether usage analysis has run', () => {
+  assert.equal(
+    filterEmptyStateTitle('all', 'all', 'likely-unused', false),
+    'Analyze cleanup to find likely-unused dependencies'
+  );
+  assert.equal(filterEmptyStateTitle('all', 'all', 'likely-unused', true), 'No likely-unused dependencies');
+  assert.equal(
+    filterEmptyStateTitle('all', 'all', 'duplicate-version', true),
+    'No dependencies introduce duplicate versions'
+  );
+});

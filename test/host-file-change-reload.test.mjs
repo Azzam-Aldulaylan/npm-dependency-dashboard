@@ -80,6 +80,7 @@ function makeControllerAndStore(cacheKey) {
     etagStore: new MemoryEtagStore(),
     projectInfo: { label: 'app', manifestPath: 'package.json' },
     canChangeProject: false,
+    buildInfo: { extensionVersion: '0.0.1', builtAt: '2026-08-01T09:00:00.000Z' },
     projectCacheStore,
     cacheKey,
     ttlMinutesProvider: () => 30,

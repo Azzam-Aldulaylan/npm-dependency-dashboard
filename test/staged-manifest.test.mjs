@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { buildStagedManifest, StagedManifestError } from '../out/core/upgrade/stagedManifest.js';
+import { buildStagedManifest, buildStagedManifestForRemoval, StagedManifestError } from '../out/core/upgrade/stagedManifest.js';
 
 test('mixed classifications are updated in place with exact versions', () => {
   const source = JSON.stringify({
@@ -108,5 +108,67 @@ test('unsafe identifiers, non-exact versions, malformed blocks, and prototype ke
       { packageName: 'react', target: '19.0.0', classification: 'prod' },
     ]),
     (error) => error instanceof StagedManifestError && error.code === 'INVALID_MANIFEST'
+  );
+});
+
+test('buildStagedManifestForRemoval deletes the removed keys and leaves every sibling untouched', () => {
+  const source = JSON.stringify({
+    name: 'fixture',
+    dependencies: { react: '^18.0.0', untouched: '^1.0.0' },
+    devDependencies: { typescript: '~5.0.0' },
+    optionalDependencies: { fsevents: '^2.0.0' },
+  }, null, 2) + '\n';
+
+  const staged = JSON.parse(buildStagedManifestForRemoval(source, [
+    { packageName: 'react', classification: 'prod' },
+    { packageName: 'typescript', classification: 'dev' },
+    { packageName: 'fsevents', classification: 'optional' },
+  ]));
+
+  assert.equal(Object.hasOwn(staged.dependencies, 'react'), false);
+  assert.equal(Object.hasOwn(staged.devDependencies, 'typescript'), false);
+  assert.equal(Object.hasOwn(staged.optionalDependencies, 'fsevents'), false);
+  assert.equal(staged.dependencies.untouched, '^1.0.0');
+});
+
+test('buildStagedManifestForRemoval preserves formatting the same way buildStagedManifest does', () => {
+  assert.equal(
+    buildStagedManifestForRemoval('{"dependencies":{"react":"^18","untouched":"^1"}}', [
+      { packageName: 'react', classification: 'prod' },
+    ]),
+    '{"dependencies":{"untouched":"^1"}}'
+  );
+});
+
+test('buildStagedManifestForRemoval rejects missing, misclassified, duplicate, and unsafe removals', () => {
+  const source = JSON.stringify({
+    dependencies: { react: '^18', duplicate: '^1' },
+    devDependencies: { typescript: '^5', duplicate: '^1' },
+  });
+
+  const cases = [
+    { code: 'MISSING_DECLARATION', removals: [{ packageName: 'missing', classification: 'prod' }] },
+    { code: 'MISSING_DECLARATION', removals: [{ packageName: 'react', classification: 'dev' }] },
+    {
+      code: 'DUPLICATE_CHANGE',
+      removals: [
+        { packageName: 'react', classification: 'prod' },
+        { packageName: 'react', classification: 'prod' },
+      ],
+    },
+    { code: 'INVALID_CHANGE', removals: [{ packageName: 'react;echo injected', classification: 'prod' }] },
+    { code: 'INVALID_CHANGE', removals: [{ packageName: '__proto__', classification: 'prod' }] },
+  ];
+
+  for (const fixture of cases) {
+    assert.throws(
+      () => buildStagedManifestForRemoval(source, fixture.removals),
+      (error) => error instanceof StagedManifestError && error.code === fixture.code
+    );
+  }
+
+  assert.throws(
+    () => buildStagedManifestForRemoval(source, []),
+    (error) => error instanceof StagedManifestError && error.code === 'INVALID_CHANGE'
   );
 });

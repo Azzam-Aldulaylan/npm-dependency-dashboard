@@ -14,3 +14,25 @@ export function dependencyTypeFilterPredicate(filter: DependencyTypeFilter): (ro
   if (filter === 'dev') return (row) => row.dev;
   return () => true;
 }
+
+export interface DependencyTypeFilterCounts {
+  all: number;
+  prod: number;
+  dev: number;
+}
+
+/**
+ * Counts for each option's own button label. `rows` is expected to already
+ * be narrowed by whatever *other* filter is active (the Finding filter, in
+ * the dashboard toolbar) — this function itself never applies the type
+ * filter to its own input, so All/Production/Dev counts move together as a
+ * set when another filter changes, the same faceted behavior
+ * hygieneFilterCounts already has.
+ */
+export function dependencyTypeFilterCounts(rows: readonly PackageRow[]): DependencyTypeFilterCounts {
+  let dev = 0;
+  for (const row of rows) {
+    if (row.dev) dev += 1;
+  }
+  return { all: rows.length, prod: rows.length - dev, dev };
+}

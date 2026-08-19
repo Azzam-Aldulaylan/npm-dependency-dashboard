@@ -2,22 +2,14 @@ import type { ReactElement, ReactNode } from 'react';
 
 import { IconFolder, IconRefresh } from '../icons.js';
 
-function countLabel(visible: number, total: number): string {
-  const noun = total === 1 ? 'dependency' : 'dependencies';
-  if (visible === total) return `${total} ${noun}`;
-  return `${visible} of ${total} ${noun}`;
-}
-
 /**
- * The control row above the table: how many rows the current search/card
- * filter leaves visible plus `children` (the dependency-type filter) on the
- * left, project switching and refresh on the right. Both actions keep their
- * existing disabled-while-busy behavior — this only rearranges where they
- * render.
+ * The control row above the table: `children` (the dependency-type and
+ * hygiene filters — each already carries its own counts, e.g. "All (139)")
+ * on the left, project switching and refresh on the right. There is
+ * deliberately no separate "N dependencies" count here anymore — it only
+ * ever duplicated the "All (N)" filter option right next to it.
  */
 export function DashboardToolbar({
-  visibleCount,
-  totalCount,
   canChangeProject,
   onChangeProject,
   onRefresh,
@@ -25,8 +17,6 @@ export function DashboardToolbar({
   children,
   trailingActions,
 }: {
-  visibleCount: number;
-  totalCount: number;
   canChangeProject: boolean;
   onChangeProject: () => void;
   onRefresh: () => void;
@@ -37,10 +27,7 @@ export function DashboardToolbar({
 }): ReactElement {
   return (
     <div className="toolbar">
-      <div className="toolbar__leading">
-        <p className="toolbar__count">{countLabel(visibleCount, totalCount)}</p>
-        {children}
-      </div>
+      <div className="toolbar__leading">{children}</div>
       <div className="toolbar__actions">
         {trailingActions}
         {canChangeProject ? (

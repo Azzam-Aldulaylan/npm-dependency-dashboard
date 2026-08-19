@@ -36,6 +36,12 @@ export interface BuildUpgradeAnalysisPresentationOptions {
   currentVersion: string;
   targetVersion: string;
   classification: DependencyClassification;
+  changes?: readonly {
+    packageName: string;
+    currentVersion: string;
+    targetVersion: string;
+    classification: DependencyClassification;
+  }[];
   compatibility: UpgradeAnalysisCompatibility;
   security: SecurityOutcome | null;
   smartPlan: UpgradeAnalysisSmartPlan | null;
@@ -47,6 +53,12 @@ export interface BuildUpgradeAnalysisPresentationOptions {
 export function buildUpgradeAnalysisPresentation(
   options: BuildUpgradeAnalysisPresentationOptions
 ): UpgradeAnalysisPresentation {
+  const changes = options.changes ?? [{
+    packageName: options.packageName,
+    currentVersion: options.currentVersion,
+    targetVersion: options.targetVersion,
+    classification: options.classification,
+  }];
   return {
     analysisId: options.analysisId,
     package: options.packageName,
@@ -54,6 +66,10 @@ export function buildUpgradeAnalysisPresentation(
     targetVersion: options.targetVersion,
     classification: options.classification,
     majorUpdate: isMajorUpgrade(options.currentVersion, options.targetVersion),
+    changes: changes.map((change) => ({
+      ...change,
+      majorUpdate: isMajorUpgrade(change.currentVersion, change.targetVersion),
+    })),
     compatibility: options.compatibility,
     security: options.security,
     smartPlan: options.smartPlan,

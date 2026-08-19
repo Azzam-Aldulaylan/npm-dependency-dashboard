@@ -67,6 +67,8 @@ const DATA = {
   project: PROJECT,
   canChangeProject: false,
   hygieneFindings: [],
+  extensionVersion: '0.0.1',
+  builtAt: '2026-08-01T09:00:00.000Z',
 };
 
 const MINIMAL_ANALYSIS = {
@@ -76,6 +78,13 @@ const MINIMAL_ANALYSIS = {
   targetVersion: '11.1.0',
   classification: 'prod',
   majorUpdate: true,
+  changes: [{
+    packageName: 'react-toastify',
+    currentVersion: '10.0.6',
+    targetVersion: '11.1.0',
+    classification: 'prod',
+    majorUpdate: true,
+  }],
   compatibility: { status: 'compatible', completeness: 'complete', findings: [] },
   security: null,
   smartPlan: null,
@@ -122,6 +131,34 @@ test('extra keys on the envelope are rejected, not ignored', () => {
 
 test('a well-formed upgrade request is accepted', () => {
   assert.equal(isWebviewToHostMessage({ type: 'upgrade', package: 'left-pad', target: '2.0.0' }), true);
+});
+
+test('a well-formed bulk upgrade requires a bounded, unique list of exact package targets', () => {
+  assert.equal(
+    isWebviewToHostMessage({
+      type: 'bulk-upgrade',
+      changes: [
+        { package: 'alpha', target: '1.1.0' },
+        { package: 'beta', target: '2.0.0' },
+      ],
+    }),
+    true
+  );
+  assert.equal(isWebviewToHostMessage({ type: 'bulk-upgrade', changes: [] }), false);
+  assert.equal(
+    isWebviewToHostMessage({
+      type: 'bulk-upgrade',
+      changes: [
+        { package: 'alpha', target: '1.1.0' },
+        { package: 'alpha', target: '1.2.0' },
+      ],
+    }),
+    false
+  );
+  assert.equal(
+    isWebviewToHostMessage({ type: 'bulk-upgrade', changes: [{ package: 'alpha', target: '1.1.0', args: '--force' }] }),
+    false
+  );
 });
 
 test('an upgrade request missing package or target is rejected', () => {
@@ -546,6 +583,10 @@ test('a malformed DashboardData shell is rejected', () => {
     { ...DATA, project: { label: 1, manifestPath: 'package.json' } },
     { ...DATA, canChangeProject: undefined },
     { ...DATA, canChangeProject: 'true' },
+    { ...DATA, extensionVersion: undefined },
+    { ...DATA, extensionVersion: 1 },
+    { ...DATA, builtAt: undefined },
+    { ...DATA, builtAt: 0 },
   ];
   for (const data of bad) {
     assert.equal(
@@ -632,6 +673,15 @@ test('analyze-remediation never carries anything beyond a package name — no pa
   );
 });
 
+test('batch remediation accepts a bounded unique package list and a payload-free cancel', () => {
+  assert.equal(isWebviewToHostMessage({ type: 'analyze-remediations', packages: ['alpha', 'beta'] }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'analyze-remediations', packages: [] }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'analyze-remediations', packages: ['alpha', 'alpha'] }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'analyze-remediations', packages: ['alpha'], target: '2.0.0' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'cancel-remediation-analysis' }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'cancel-remediation-analysis', package: 'alpha' }), false);
+});
+
 // --------------------------------------- host -> webview: remediation-analyzing/result/error
 
 test('remediation-analyzing is accepted with just a package name, and rejects a missing/empty one', () => {
@@ -664,6 +714,25 @@ test('remediation-error mirrors upgrade-error\'s shape', () => {
       error: { code: 'STALE_SOURCE' }, // missing message
     }),
     false
+  );
+});
+
+test('batch remediation progress and completion require consistent real counts', () => {
+  assert.equal(
+    isHostToWebviewMessage({ status: 'remediation-batch-progress', completed: 1, total: 3, current: 'beta' }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({ status: 'remediation-batch-complete', completed: 2, total: 3, cancelled: true }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({ status: 'remediation-batch-progress', completed: 4, total: 3, current: null }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({ status: 'remediation-batch-error', error: { code: 'X', message: 'Y' } }),
+    true
   );
 });
 
@@ -874,4 +943,117 @@ test('a cleanup-result finding of an unrecognized kind is rejected', () => {
     }),
     false
   );
+});
+
+// ---------------------------------------------- webview -> host: bulk-remove/confirm-remove/cancel-remove
+
+test('a well-formed bulk-remove request requires a bounded, unique list of package names', () => {
+  assert.equal(
+    isWebviewToHostMessage({ type: 'bulk-remove', changes: [{ package: 'alpha' }, { package: 'beta' }] }),
+    true
+  );
+  assert.equal(isWebviewToHostMessage({ type: 'bulk-remove', changes: [] }), false);
+  assert.equal(
+    isWebviewToHostMessage({ type: 'bulk-remove', changes: [{ package: 'alpha' }, { package: 'alpha' }] }),
+    false
+  );
+  assert.equal(
+    isWebviewToHostMessage({ type: 'bulk-remove', changes: [{ package: 'alpha', target: '2.0.0' }] }),
+    false
+  );
+});
+
+test('confirm-remove and cancel-remove mirror confirm-upgrade / cancel-upgrade\'s analysisId discipline', () => {
+  assert.equal(isWebviewToHostMessage({ type: 'confirm-remove', analysisId: 'abc123' }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'confirm-remove', analysisId: '' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'confirm-remove', analysisId: 'abc123', changes: [] }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'cancel-remove', analysisId: 'abc123' }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'cancel-remove', analysisId: null }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'cancel-remove' }), false);
+});
+
+// -------------------------------------- host -> webview: remove-analyzing/remove-analysis/remove-error
+
+const MINIMAL_REMOVE_ANALYSIS = {
+  analysisId: 'abc123',
+  package: 'left-pad',
+  changes: [{ packageName: 'left-pad', classification: 'prod', stillRequiredBy: [] }],
+  verification: { configured: false },
+  files: { manifestPath: '/app/package.json', lockfilePath: '/app/package-lock.json', rollbackAvailable: true },
+};
+
+test('remove-analyzing is accepted with just a package name, and rejects a missing/empty one', () => {
+  assert.equal(isHostToWebviewMessage({ status: 'remove-analyzing', package: 'left-pad' }), true);
+  assert.equal(isHostToWebviewMessage({ status: 'remove-analyzing' }), false);
+  assert.equal(isHostToWebviewMessage({ status: 'remove-analyzing', package: '' }), false);
+});
+
+test('a well-formed remove-analysis is accepted', () => {
+  assert.equal(isHostToWebviewMessage({ status: 'remove-analysis', analysis: MINIMAL_REMOVE_ANALYSIS }), true);
+});
+
+test('remove-analysis rejects a missing payload, extra top-level keys, and a missing required field', () => {
+  assert.equal(isHostToWebviewMessage({ status: 'remove-analysis' }), false);
+  assert.equal(isHostToWebviewMessage({ status: 'remove-analysis', analysis: {} }), false);
+  assert.equal(
+    isHostToWebviewMessage({ status: 'remove-analysis', analysis: { ...MINIMAL_REMOVE_ANALYSIS, extra: true } }),
+    false
+  );
+  const { analysisId, ...withoutId } = MINIMAL_REMOVE_ANALYSIS;
+  assert.equal(isHostToWebviewMessage({ status: 'remove-analysis', analysis: withoutId }), false);
+});
+
+test('remove-analysis accepts multiple changes with stillRequiredBy warnings, and rejects an unknown classification', () => {
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'remove-analysis',
+      analysis: {
+        ...MINIMAL_REMOVE_ANALYSIS,
+        changes: [
+          { packageName: 'left-pad', classification: 'prod', stillRequiredBy: [] },
+          { packageName: 'unused-dep', classification: 'dev', stillRequiredBy: ['some-tool'] },
+        ],
+      },
+    }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'remove-analysis',
+      analysis: {
+        ...MINIMAL_REMOVE_ANALYSIS,
+        changes: [{ packageName: 'left-pad', classification: 'peer', stillRequiredBy: [] }],
+      },
+    }),
+    false
+  );
+});
+
+test('remove-analysis accepts configured verification scripts, and rejects a malformed verification shape', () => {
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'remove-analysis',
+      analysis: { ...MINIMAL_REMOVE_ANALYSIS, verification: { configured: true, scriptNames: ['test'] } },
+    }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'remove-analysis',
+      analysis: { ...MINIMAL_REMOVE_ANALYSIS, verification: { configured: true } },
+    }),
+    false
+  );
+});
+
+test('remove-error mirrors upgrade-error\'s shape', () => {
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'remove-error',
+      package: 'left-pad',
+      error: { code: 'STALE_SOURCE', message: 'Project dependency files changed. Refresh and try again.' },
+    }),
+    true
+  );
+  assert.equal(isHostToWebviewMessage({ status: 'remove-error', package: 'left-pad' }), false);
 });

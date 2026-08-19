@@ -1,23 +1,28 @@
 import type { ReactElement } from 'react';
 
-import type { DependencyTypeFilter as DependencyTypeFilterValue } from '../../../src/host/dependencyTypeFilter.js';
-
-const OPTIONS: readonly { id: DependencyTypeFilterValue; label: string }[] = [
-  { id: 'all', label: 'All' },
-  { id: 'prod', label: 'Production' },
-  { id: 'dev', label: 'Dev' },
-];
+import type {
+  DependencyTypeFilter as DependencyTypeFilterValue,
+  DependencyTypeFilterCounts,
+} from '../../../src/host/dependencyTypeFilter.js';
 
 export function DependencyTypeFilter({
   value,
+  counts,
   onChange,
 }: {
   value: DependencyTypeFilterValue;
+  /** Faceted against whatever else is currently filtered — see dependencyTypeFilterCounts's own doc. */
+  counts: DependencyTypeFilterCounts;
   onChange: (value: DependencyTypeFilterValue) => void;
 }): ReactElement {
+  const options: readonly { id: DependencyTypeFilterValue; label: string }[] = [
+    { id: 'all', label: `All (${counts.all})` },
+    { id: 'prod', label: `Production (${counts.prod})` },
+    { id: 'dev', label: `Dev (${counts.dev})` },
+  ];
   return (
     <div className="type-filter" role="radiogroup" aria-label="Filter by dependency type">
-      {OPTIONS.map((option) => (
+      {options.map((option) => (
         <button
           key={option.id}
           type="button"

@@ -145,6 +145,8 @@ const PROJECT_INFO = { label: 'app', manifestPath: 'package.json' };
  * run follows" behavior. Tests that exercise TTL-aware freshness override
  * this explicitly.
  */
+const BUILD_INFO = { extensionVersion: '0.0.1', builtAt: '2026-08-01T09:00:00.000Z' };
+
 function makeController(client, overrides = {}) {
   return new DashboardController({
     root: ROOT,
@@ -156,6 +158,7 @@ function makeController(client, overrides = {}) {
     etagStore: new MemoryEtagStore(),
     projectInfo: PROJECT_INFO,
     canChangeProject: false,
+    buildInfo: BUILD_INFO,
     projectCacheStore: new PersistentProjectCacheStore(fakeKeyValueStore()),
     cacheKey: 'test-project',
     ttlMinutesProvider: () => 0,

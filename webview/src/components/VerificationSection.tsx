@@ -7,9 +7,12 @@ import { OutcomeStatus } from './OutcomeStatus.js';
 export function VerificationSection({
   verification,
   onConfigureVerification,
+  configuredLabel = 'Post-upgrade checks configured',
 }: {
   verification: UpgradeAnalysisVerification;
   onConfigureVerification: () => void;
+  /** Override for a flow other than an upgrade — e.g. a removal's "Post-removal checks configured". */
+  configuredLabel?: string;
 }): ReactElement {
   return (
     <section className="analysis-card" aria-labelledby="analysis-verification-heading">
@@ -19,7 +22,7 @@ export function VerificationSection({
       </h3>
       {verification.configured ? (
         <>
-          <OutcomeStatus label="Post-upgrade checks configured" className="compatible" />
+          <OutcomeStatus label={configuredLabel} className="compatible" />
           <ul className="verification__scripts">
             {verification.scriptNames.map((name) => (
               <li key={name}>

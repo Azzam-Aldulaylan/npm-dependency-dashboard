@@ -23,6 +23,10 @@ const extensionConfig = {
   sourcemap: !production,
   minify: production,
   logLevel: 'info',
+  // Stamped once per build invocation, not per activation — the dashboard
+  // footer shows this so a dev pressing F5 can tell a rebuild actually took
+  // effect, rather than looking at a stale Extension Development Host.
+  define: { __BUILD_TIME__: JSON.stringify(new Date().toISOString()) },
 };
 
 /**

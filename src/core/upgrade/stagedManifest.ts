@@ -17,6 +17,11 @@ export interface StagedManifestChange {
   classification: DependencyClassification;
 }
 
+export interface StagedManifestRemoval {
+  packageName: string;
+  classification: DependencyClassification;
+}
+
 export type StagedManifestErrorCode =
   | 'INVALID_MANIFEST'
   | 'INVALID_CHANGE'
@@ -125,6 +130,51 @@ export function buildStagedManifest(
       );
     }
     block[change.packageName] = change.target;
+  }
+
+  return stringifyLikeSource(root, contents);
+}
+
+/**
+ * Return manifest text with the given declared dependencies deleted from
+ * their existing blocks. Nothing is added or modified — every sibling
+ * dependency in the same block, and every other key in the manifest, is
+ * left exactly as written; only the removed packages' own key/value pairs
+ * disappear.
+ */
+export function buildStagedManifestForRemoval(
+  contents: string,
+  removals: readonly StagedManifestRemoval[]
+): string {
+  if (removals.length === 0) {
+    throw new StagedManifestError('INVALID_CHANGE', 'At least one dependency to remove is required.');
+  }
+
+  const root = parseRoot(contents);
+  const seen = new Set<string>();
+
+  for (const removal of removals) {
+    if (FORBIDDEN_KEYS.has(removal.packageName) || !isSafeNpmPackageName(removal.packageName)) {
+      throw new StagedManifestError('INVALID_CHANGE', 'A dependency to remove is not a safe package name.');
+    }
+    if (seen.has(removal.packageName)) {
+      throw new StagedManifestError('DUPLICATE_CHANGE', `Duplicate removal for ${removal.packageName}.`);
+    }
+    seen.add(removal.packageName);
+
+    const expectedBlock = BLOCK_BY_CLASSIFICATION[removal.classification];
+    const block = dependencyBlock(root, expectedBlock);
+    if (
+      block === null ||
+      !Object.hasOwn(block, removal.packageName) ||
+      typeof block[removal.packageName] !== 'string'
+    ) {
+      throw new StagedManifestError(
+        'MISSING_DECLARATION',
+        `${removal.packageName} is not a string declaration in ${expectedBlock}.`
+      );
+    }
+    delete block[removal.packageName];
   }
 
   return stringifyLikeSource(root, contents);

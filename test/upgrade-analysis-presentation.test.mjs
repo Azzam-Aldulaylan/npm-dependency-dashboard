@@ -95,4 +95,24 @@ test('analysisId, package, and version fields pass through unchanged', () => {
   assert.equal(result.currentVersion, '10.0.6');
   assert.equal(result.targetVersion, '11.1.0');
   assert.equal(result.classification, 'prod');
+  assert.deepEqual(result.changes, [{
+    packageName: 'react-toastify',
+    currentVersion: '10.0.6',
+    targetVersion: '11.1.0',
+    classification: 'prod',
+    majorUpdate: true,
+  }]);
+});
+
+test('coordinated changes are preserved and each computes its own major-update flag', () => {
+  const result = buildUpgradeAnalysisPresentation(baseOptions({
+    changes: [
+      { packageName: 'react-toastify', currentVersion: '10.0.6', targetVersion: '11.1.0', classification: 'prod' },
+      { packageName: 'typescript', currentVersion: '5.8.0', targetVersion: '5.9.0', classification: 'dev' },
+    ],
+  }));
+  assert.deepEqual(result.changes.map(({ packageName, majorUpdate }) => ({ packageName, majorUpdate })), [
+    { packageName: 'react-toastify', majorUpdate: true },
+    { packageName: 'typescript', majorUpdate: false },
+  ]);
 });

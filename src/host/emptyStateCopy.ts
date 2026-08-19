@@ -9,6 +9,7 @@
  */
 
 import type { DependencyTypeFilter } from './dependencyTypeFilter.js';
+import type { HygieneFilterId } from './hygieneFilter.js';
 import type { SummaryFilterId } from './summaryMetrics.js';
 
 const CARD_EMPTY_TITLE: Record<SummaryFilterId, string> = {
@@ -23,7 +24,16 @@ const TYPE_LABEL: Record<'prod' | 'dev', string> = {
   dev: 'dev',
 };
 
-export function filterEmptyStateTitle(filter: SummaryFilterId, dependencyType: DependencyTypeFilter): string {
+export function filterEmptyStateTitle(
+  filter: SummaryFilterId,
+  dependencyType: DependencyTypeFilter,
+  hygieneFilter: HygieneFilterId = 'all',
+  usageAnalyzed = false
+): string {
+  if (hygieneFilter === 'likely-unused') {
+    return usageAnalyzed ? 'No likely-unused dependencies' : 'Analyze cleanup to find likely-unused dependencies';
+  }
+  if (hygieneFilter === 'duplicate-version') return 'No dependencies introduce duplicate versions';
   if (filter === 'all' && dependencyType !== 'all') {
     return `No ${TYPE_LABEL[dependencyType]} dependencies`;
   }

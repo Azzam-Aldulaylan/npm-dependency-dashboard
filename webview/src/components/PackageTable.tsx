@@ -3,7 +3,7 @@ import type { ReactElement, ReactNode } from 'react';
 
 import type { PackageRow } from '../../../src/core/types.js';
 import type { DependencyFinding } from '../../../src/core/hygiene/types.js';
-import { ownDuplicateFinding } from '../../../src/host/dependencyDetailsCopy.js';
+import { introducedDuplicateFindings, ownDuplicateFinding } from '../../../src/host/dependencyDetailsCopy.js';
 import type { SortColumn, TableSortState } from '../../../src/host/tableSort.js';
 import { resolveActionState } from '../../../src/host/upgradeAction.js';
 import type { TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
@@ -26,9 +26,59 @@ import {
   AvailableHeaderInfo,
   AvailableHeaderLabel,
   AvailableVersionCell,
+  CurrentHeaderInfo,
   CurrentHeaderLabel,
   CurrentVersionCell,
 } from './VersionCell.js';
+
+/**
+ * The "why does this badge show up" explanation for every tag the Package
+ * column can attach to a row — one place, read once, rather than a reader
+ * having to infer meaning from five differently-worded `title` attributes.
+ * Mirrors AvailableHeaderInfo's own dl-of-terms pattern (VersionCell.tsx).
+ */
+function PackageTagsInfo(): ReactElement {
+  return (
+    <InfoTooltip
+      label="What these tags mean"
+      content={
+        <dl>
+          <dt>Dev</dt>
+          <dd>Declared in devDependencies — used while developing, not at runtime.</dd>
+          <dt>Deprecated</dt>
+          <dd>The maintainer marked this exact version unsupported on the registry.</dd>
+          <dt>Duplicate versions</dt>
+          <dd>More than one version of this package is installed somewhere in the dependency tree.</dd>
+          <dt>Introduces duplicates</dt>
+          <dd>A package this one depends on resolves to more than one version elsewhere in the tree — this row is the direct dependency responsible for pulling one of those versions in.</dd>
+          <dt>Likely / possibly unused</dt>
+          <dd>No reference to this package was found in your source files. "Possibly" means the scan was less certain — the file scan hit its cap, or this package is commonly loaded without a direct import (a CLI tool, a config-driven plugin).</dd>
+        </dl>
+      }
+    />
+  );
+}
+
+/** What each distinct Action-column button/state means — see resolveActionState (src/host/upgradeAction.ts) for the exhaustive list this mirrors. */
+function ActionColumnInfo(): ReactElement {
+  return (
+    <InfoTooltip
+      label="What the action buttons mean"
+      content={
+        <dl>
+          <dt>Upgrade</dt>
+          <dd>A routine version bump. Highlighted (outlined) when it crosses a major version — worth a second look before clicking.</dd>
+          <dt>Security fix</dt>
+          <dd>Filled solid: this upgrade resolves a known vulnerability, not just a routine update.</dd>
+          <dt>Check transitive fix</dt>
+          <dd>No direct upgrade exists for this package, but a vulnerable dependency underneath it might resolve on its own — this runs an isolated check to find out.</dd>
+          <dt>Up to date / Unavailable / No direct fix / Remediation unknown</dt>
+          <dd>Informational only — nothing to click. Hover the label itself for the specific reason.</dd>
+        </dl>
+      }
+    />
+  );
+}
 
 /**
  * A `<th>` whose label doubles as a sort trigger — `none -> asc -> desc ->
@@ -54,14 +104,29 @@ function SortableHeader({
   const ariaSort = direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : 'none';
   return (
     <th scope="col" aria-sort={ariaSort} className="sortable-header">
-      <span className="sortable-header__row">
-        <button
-          type="button"
-          className="sort-header"
-          onClick={() => {
-            onSort(column);
-          }}
-        >
+      {/*
+       * The row itself (not just the button) carries the click handler so the
+       * whole header cell stays clickable the way a bare `flex: 1` button
+       * previously achieved — but a stretched button pushed `extra` (the info
+       * trigger) all the way to the cell's far edge, away from `label`. Sizing
+       * the button to its content and letting `extra` sit immediately after it
+       * keeps "CURRENT ⓘ" adjacent while a click anywhere in the row still
+       * sorts.
+       *
+       * The `<button>` itself carries no click handler of its own — a native
+       * click (mouse, or Enter/Space while it's focused) bubbles up to this
+       * row's own onClick, so keyboard activation still works and nothing
+       * fires the sort twice. InfoTooltip's own trigger calls
+       * stopPropagation on click, so clicking the icon opens the popover
+       * instead of also triggering a sort.
+       */}
+      <span
+        className="sortable-header__row"
+        onClick={() => {
+          onSort(column);
+        }}
+      >
+        <button type="button" className="sort-header">
           <span>{label}</span>
           {direction === null ? (
             <IconSortNeutral className="sort-header__icon sort-header__icon--neutral" />
@@ -293,8 +358,20 @@ export function PackageTable({
         <thead>
           <tr>
             <th scope="col" className="packages__disclosure" />
-            <SortableHeader column="package" label="Package" sortState={sortState} onSort={onSort} />
-            <SortableHeader column="current" label={<CurrentHeaderLabel />} sortState={sortState} onSort={onSort} />
+            <SortableHeader
+              column="package"
+              label="Package"
+              extra={<PackageTagsInfo />}
+              sortState={sortState}
+              onSort={onSort}
+            />
+            <SortableHeader
+              column="current"
+              label={<CurrentHeaderLabel />}
+              extra={<CurrentHeaderInfo />}
+              sortState={sortState}
+              onSort={onSort}
+            />
             <SortableHeader
               column="available"
               label={<AvailableHeaderLabel />}
@@ -303,13 +380,19 @@ export function PackageTable({
               onSort={onSort}
             />
             <SortableHeader column="vulnerabilities" label="Vulnerabilities" sortState={sortState} onSort={onSort} />
-            <th scope="col">Action</th>
+            <th scope="col" className="packages__action-header">
+              <span className="column-header-with-info">
+                Action
+                <ActionColumnInfo />
+              </span>
+            </th>
           </tr>
         </thead>
         {rows.map((row) => {
           const expandable = row.advisories.length > 0;
           const isOpen = expandable && expanded.has(row.name);
           const duplicateFinding = ownDuplicateFinding(hygieneFindings, row.name);
+          const introducedDuplicates = introducedDuplicateFindings(hygieneFindings, row.name);
           const unusedFinding = hygieneFindings.find(
             (finding) => finding.kind === 'likely-unused' && finding.packageName === row.name
           );
@@ -333,11 +416,21 @@ export function PackageTable({
                   ) : null}
                 </td>
                 <th scope="row" className="packages__name">
-                  <span className="packages__name-primary">
+                  <button
+                    type="button"
+                    className="packages__name-primary packages__name-button"
+                    onClick={() => {
+                      onOpenDetails(row.name);
+                    }}
+                  >
                     <PackageIcon name={row.name} />
                     <span className="packages__name-text">{row.name}</span>
-                  </span>
-                  {row.dev || row.deprecated !== undefined || duplicateFinding !== undefined || unusedFinding !== undefined ? (
+                  </button>
+                  {row.dev ||
+                  row.deprecated !== undefined ||
+                  duplicateFinding !== undefined ||
+                  introducedDuplicates.length > 0 ||
+                  unusedFinding !== undefined ? (
                     <span className="packages__name-tags">
                       {row.dev ? <StatusBadge label="Dev" /> : null}
                       {row.deprecated !== undefined ? (
@@ -345,6 +438,13 @@ export function PackageTable({
                       ) : null}
                       {duplicateFinding !== undefined ? (
                         <StatusBadge label="Duplicate versions" tone="warning" title={duplicateFinding.summary} />
+                      ) : null}
+                      {introducedDuplicates.length > 0 ? (
+                        <StatusBadge
+                          label="Introduces duplicates"
+                          tone="warning"
+                          title={introducedDuplicates.map((finding) => finding.summary).join('\n')}
+                        />
                       ) : null}
                       {unusedFinding?.evidence.kind === 'likely-unused' ? (
                         <StatusBadge
@@ -365,7 +465,7 @@ export function PackageTable({
                 <td>
                   <SeverityBadge severity={row.worstSeverity} />
                 </td>
-                <td>
+                <td className="packages__action-cell">
                   <div className="packages__actions">
                     <UpgradeAction
                       row={row}

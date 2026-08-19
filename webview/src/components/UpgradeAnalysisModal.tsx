@@ -22,7 +22,14 @@ function primaryAction(
     return analysis.smartPlan !== null ? { label: 'Use coordinated upgrade', onClick: 'use-smart-plan' } : null;
   }
   return {
-    label: analysis.compatibility.status === 'compatible' ? `Upgrade to ${analysis.targetVersion}` : 'Upgrade anyway',
+    label:
+      analysis.changes.length > 1
+        ? analysis.compatibility.status === 'compatible'
+          ? `Upgrade ${analysis.changes.length} dependencies`
+          : `Upgrade ${analysis.changes.length} anyway`
+        : analysis.compatibility.status === 'compatible'
+          ? `Upgrade to ${analysis.targetVersion}`
+          : 'Upgrade anyway',
     onClick: 'confirm',
   };
 }
@@ -67,6 +74,7 @@ export function UpgradeAnalysisModal({
   onCancel,
   onConfigureVerification,
   onOpenAdvisory,
+  pendingChanges,
 }: {
   packageName: string;
   targetVersion: string;
@@ -78,6 +86,7 @@ export function UpgradeAnalysisModal({
   onCancel: () => void;
   onConfigureVerification: () => void;
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  pendingChanges?: readonly { packageName: string; targetVersion: string }[];
 }): ReactElement {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -129,6 +138,9 @@ export function UpgradeAnalysisModal({
   const action = analysis !== null ? primaryAction(analysis) : null;
   const overall = analysis !== null ? compatibilityOutcomeDisplay(analysis.compatibility.status) : null;
   const securityNeedsAttention = analysis?.security?.status === 'remains';
+  const displayedChanges = analysis?.changes ?? pendingChanges ?? [{ packageName, targetVersion }];
+  const bulk = displayedChanges.length > 1;
+  const majorCount = analysis?.changes.filter((change) => change.majorUpdate).length ?? 0;
 
   return (
     <div className="modal-overlay">
@@ -143,18 +155,20 @@ export function UpgradeAnalysisModal({
           <div className="modal__header-text">
             <p className="modal__eyebrow">Review upgrade</p>
             <h2 className="modal__title" id="upgrade-analysis-title">
-              {packageName}
+              {bulk ? `${displayedChanges.length} dependency upgrades` : packageName}
             </h2>
-            <p className="modal__version-line">
+            {!bulk ? <p className="modal__version-line">
               <span className="modal__version modal__version--from">{analysis?.currentVersion ?? '…'}</span>
               <span className="modal__version-arrow" aria-hidden="true">
                 →
               </span>
               <span className="modal__version modal__version--to">{targetVersion}</span>
-            </p>
-            {analysis?.majorUpdate === true ? (
+            </p> : null}
+            {majorCount > 0 || analysis?.majorUpdate === true ? (
               <div className="modal__badges">
-                <span className="status-badge status-badge--warning">Major update</span>
+                <span className="status-badge status-badge--warning">
+                  {bulk ? `${majorCount} major update${majorCount === 1 ? '' : 's'}` : 'Major update'}
+                </span>
               </div>
             ) : null}
           </div>
@@ -172,7 +186,12 @@ export function UpgradeAnalysisModal({
 
         {analysis === null ? (
           <div className="modal__body">
-            <UpgradeAnalysisLoading packageName={packageName} targetVersion={targetVersion} phase={analyzingPhase} />
+            <UpgradeAnalysisLoading
+              packageName={packageName}
+              targetVersion={targetVersion}
+              changeCount={displayedChanges.length}
+              phase={analyzingPhase}
+            />
           </div>
         ) : (
           <div className="modal__body">
@@ -186,6 +205,20 @@ export function UpgradeAnalysisModal({
             ) : null}
 
             {analysis.smartPlan !== null ? <SmartPlanSection smartPlan={analysis.smartPlan} /> : null}
+
+            {analysis.changes.length > 1 ? (
+              <section className="analysis-card analysis-card--full" aria-labelledby="analysis-selected-upgrades-heading">
+                <h3 className="analysis-card__title" id="analysis-selected-upgrades-heading">Selected upgrades</h3>
+                <ol className="smart-plan__changes">
+                  {analysis.changes.map((change) => (
+                    <li className="smart-plan__change" key={change.packageName}>
+                      <span className="smart-plan__package">{change.packageName}</span>
+                      <span className="smart-plan__versions">{change.currentVersion} → {change.targetVersion}</span>
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            ) : null}
 
             <div className="modal__grid">
               <CompatibilitySection

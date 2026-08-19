@@ -35,6 +35,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { buildDependencyGraph } from '../core/lockfile/build.js';
+import { runSequentialBatch } from '../core/async/sequentialBatch.js';
 import { directNodes } from '../core/lockfile/parse.js';
 import { parseManifest } from '../core/manifest/parse.js';
 import { analyzeCompatibility, CompatibilityCancelledError } from '../core/compatibility/preflight.js';
@@ -44,10 +45,11 @@ import type { HttpClient } from '../core/registry/http.js';
 import { fetchPackument } from '../core/registry/versions.js';
 import type { EtagStore } from '../core/registry/versions.js';
 import { planSmartUpgrade } from '../core/upgrade/smartPlan.js';
-import { buildStagedManifest } from '../core/upgrade/stagedManifest.js';
+import { buildStagedManifest, buildStagedManifestForRemoval } from '../core/upgrade/stagedManifest.js';
 import { requiresManifestReconciliation } from '../core/upgrade/plan.js';
-import { describeRejection } from '../core/upgrade/validate.js';
-import type { EligibleUpgrade } from '../core/upgrade/validate.js';
+import { stillRequiredBy } from '../core/upgrade/removeImpact.js';
+import { describeBulkRejection, describeBulkRemoveRejection } from '../core/upgrade/validate.js';
+import type { EligibleRemoval, EligibleUpgrade } from '../core/upgrade/validate.js';
 import { advisoriesByNameFromRows } from '../core/advisories/attribution.js';
 import { resolveRemediationRequest } from '../core/advisories/remediationRequest.js';
 import type { RemediationRequestRejection } from '../core/advisories/remediationRequest.js';
@@ -57,13 +59,15 @@ import type { DashboardController, MessageSink } from './dashboardController.js'
 import { createNodeNpmResolverDeps, resolveNpmInvocation } from './npmResolver.js';
 import { createNodeUpgradeTransactionFileAdapter } from './nodeUpgradeTransactionFiles.js';
 import { resolveInstalledPnpmInvocation } from './pnpmResolver.js';
+import { combineSecurityOutcomes } from './securityOutcomeBatch.js';
 import type { DiscoveredProject, ResolvedProject } from './projectResolution.js';
 import { loadProject } from './projectResolution.js';
 import { IsolatedResolverVerifier, probePackageManagerVersion } from './resolverVerifier.js';
 import { resolveAnalysisForExecution } from './upgradeAnalysisLookup.js';
 import type { AnalysisLookupRejection } from './upgradeAnalysisLookup.js';
 import { buildUpgradeAnalysisPresentation } from './upgradeAnalysisPresentation.js';
-import { describeUpgradeTransactionOutcome } from './upgradeAssistantOutcome.js';
+import { buildRemoveAnalysisPresentation } from './removeAnalysisPresentation.js';
+import { describeRemoveTransactionOutcome, describeUpgradeTransactionOutcome } from './upgradeAssistantOutcome.js';
 import { UpgradeExecutionSession } from './upgradeRunner.js';
 import { runUpgradeTransaction } from './upgradeTransaction.js';
 import { selectVerificationScripts } from './verificationPolicy.js';
@@ -80,8 +84,24 @@ export interface UpgradeMessage {
   target: string;
 }
 
+export interface BulkUpgradeMessage {
+  changes: UpgradeMessage[];
+}
+
+export interface RemoveMessage {
+  package: string;
+}
+
+export interface BulkRemoveMessage {
+  changes: RemoveMessage[];
+}
+
 export interface RemediationMessage {
   package: string;
+}
+
+export interface RemediationBatchMessage {
+  packages: string[];
 }
 
 export interface AnalysisMessage {
@@ -150,8 +170,8 @@ export function compatibilitySummary(analysis: Awaited<ReturnType<typeof analyze
 
 interface StoredAnalysis {
   id: string;
-  /** The original {package, target} request — re-validated fresh at confirm time, never trusted from here. */
-  request: UpgradeMessage;
+  /** Original lookup keys — every item is re-validated fresh at confirm time. */
+  requests: UpgradeMessage[];
   eligibility: EligibleUpgrade;
   /** The disk snapshot preflight ran against — the baseline the post-confirm recheck below compares fresh disk reads to. */
   snapshot: ResolvedProject;
@@ -164,14 +184,29 @@ interface StoredAnalysis {
   expiresAt: number;
 }
 
+/** Same shape/lifecycle discipline as StoredAnalysis, minus everything specific to compatibility preflight/smart-plan — a removal has neither. */
+interface StoredRemoval {
+  id: string;
+  requests: RemoveMessage[];
+  /** The first, host-validated removal — the session's reserve/release key, same convention as StoredAnalysis.eligibility. */
+  eligibility: EligibleRemoval;
+  eligibilities: EligibleRemoval[];
+  snapshot: ResolvedProject;
+  ignoreScripts: boolean;
+  verificationScripts: VerificationScript[];
+  expiresAt: number;
+}
+
 export class UpgradeAssistantCoordinator {
   private readonly session = new UpgradeExecutionSession();
   private readonly projectLoader: (candidate: DiscoveredProject) => Promise<ResolvedProject>;
   private analysis: StoredAnalysis | undefined;
+  private removal: StoredRemoval | undefined;
   /** The package a handleAnalyzeUpgrade call is currently in flight for, or null — the target `cancel-upgrade { analysisId: null }` refers to, since no analysisId exists yet at that point. */
   private pendingAnalyzePackage: string | null = null;
   /** Set by a cancel-upgrade with `analysisId: null` that arrived mid-analysis — handleAnalyzeUpgrade checks this right before storing/posting its result and drops it instead. */
   private cancelRequestedFor: string | null = null;
+  private activeRemediationAbort: AbortController | undefined;
 
   constructor(private readonly options: UpgradeAssistantCoordinatorOptions) {
     this.projectLoader = options.loadProject ?? loadProject;
@@ -181,8 +216,13 @@ export class UpgradeAssistantCoordinator {
     return this.session.isBusy();
   }
 
+  isRemediationBusy(): boolean {
+    return this.activeRemediationAbort !== undefined;
+  }
+
   /** Dispose immediately only when no mutation is in flight. */
   disposeWhenIdle(): void {
+    this.activeRemediationAbort?.abort();
     if (!this.session.isBusy()) this.session.dispose();
   }
 
@@ -194,29 +234,55 @@ export class UpgradeAssistantCoordinator {
     }
   }
 
+  /** Same reclaim as reclaimExpiredAnalysis, for an abandoned removal review. */
+  private reclaimExpiredRemoval(): void {
+    if (this.removal !== undefined && Date.now() >= this.removal.expiresAt) {
+      this.session.release(this.removal.eligibility.packageName);
+      this.removal = undefined;
+    }
+  }
+
   /**
    * Phase 1: eligibility, lock, preflight, smart-plan search, security
    * outcome. Ends by storing the analysis and posting it — never by
    * executing anything.
    */
   async handleAnalyzeUpgrade(message: UpgradeMessage): Promise<void> {
+    await this.handleAnalyzeUpgradeRequests([message]);
+  }
+
+  async handleAnalyzeBulkUpgrade(message: BulkUpgradeMessage): Promise<void> {
+    await this.handleAnalyzeUpgradeRequests(message.changes);
+  }
+
+  private async handleAnalyzeUpgradeRequests(messages: readonly UpgradeMessage[]): Promise<void> {
     this.reclaimExpiredAnalysis();
+    this.reclaimExpiredRemoval();
+
+    if (this.activeRemediationAbort !== undefined) {
+      this.options.sink.postMessage({
+        status: 'upgrade-error',
+        package: messages[0]?.package ?? 'unknown',
+        error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Wait for remediation analysis to finish before upgrading.' },
+      });
+      return;
+    }
 
     const controller = await this.options.ensureController();
     if (controller === undefined) return;
 
-    const eligibility = controller.validateUpgradeRequest({
-      package: message.package,
-      target: message.target,
-    });
-    if (!eligibility.ok) {
+    const batch = controller.validateBulkUpgradeRequest(messages);
+    if (!batch.ok) {
       this.options.sink.postMessage({
         status: 'upgrade-error',
-        package: message.package,
-        error: describeRejection(eligibility.reason),
+        package: batch.packageName ?? messages[0]?.package ?? 'unknown',
+        error: describeBulkRejection(batch),
       });
       return;
     }
+    const eligibility = batch.upgrades[0];
+    if (eligibility === undefined) return;
+    const eligibilities = batch.upgrades;
 
     // Reserve across preflight and however long the analysis modal stays
     // open, not merely process execution: forged requests cannot stack
@@ -266,14 +332,12 @@ export class UpgradeAssistantCoordinator {
           targetVersion: eligibility.target,
           classification: eligibility.classification,
         },
-        changes: [
-          {
-            packageName: eligibility.packageName,
-            currentVersion: eligibility.currentVersion,
-            targetVersion: eligibility.target,
-            classification: eligibility.classification,
-          },
-        ],
+        changes: eligibilities.map((item) => ({
+          packageName: item.packageName,
+          currentVersion: item.currentVersion,
+          targetVersion: item.target,
+          classification: item.classification,
+        })),
       };
       const manifest = parseManifest(preflightProject.manifestText);
       const graph = buildDependencyGraph({
@@ -321,7 +385,10 @@ export class UpgradeAssistantCoordinator {
       const analysis = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: `Checking compatibility for ${eligibility.packageName}@${eligibility.target}`,
+          title:
+            eligibilities.length === 1
+              ? `Checking compatibility for ${eligibility.packageName}@${eligibility.target}`
+              : `Checking compatibility for ${eligibilities.length} dependency upgrades`,
           cancellable: true,
         },
         async (_progress, token) => {
@@ -404,9 +471,12 @@ export class UpgradeAssistantCoordinator {
 
       // --- security outcome (best-effort; never blocks the rest of the analysis) ---
       const rows = controller.lastResultRows();
-      const before = rows.find((row) => row.name === eligibility.packageName)?.advisories ?? [];
       let security: SecurityOutcome | null = null;
-      if (before.length > 0) {
+      const securityInputs = eligibilities.flatMap((item) => {
+        const before = rows.find((row) => row.name === item.packageName)?.advisories ?? [];
+        return before.length === 0 ? [] : [{ item, before }];
+      });
+      if (securityInputs.length > 0) {
         let after: Parameters<typeof evaluateSecurityOutcome>[0]['after'] = 'no-resolver-evidence';
         if (analysis.status !== 'conflict' && resolverVerifier !== undefined) {
           try {
@@ -418,12 +488,16 @@ export class UpgradeAssistantCoordinator {
             // Left as 'no-resolver-evidence' — never a hard failure of the analysis.
           }
         }
-        security = evaluateSecurityOutcome({
-          before,
-          targetVersion: eligibility.target,
-          rootPackageName: eligibility.packageName,
-          after,
-        });
+        security = combineSecurityOutcomes(
+          securityInputs.map(({ item, before }) =>
+            evaluateSecurityOutcome({
+              before,
+              targetVersion: item.target,
+              rootPackageName: item.packageName,
+              after,
+            })
+          )
+        );
       }
 
       // A cancel-upgrade with `analysisId: null` arrived while the above was
@@ -442,7 +516,7 @@ export class UpgradeAssistantCoordinator {
       const analysisId = randomBytes(16).toString('hex');
       this.analysis = {
         id: analysisId,
-        request: message,
+        requests: [...messages],
         eligibility,
         snapshot: preflightProject,
         proposal,
@@ -461,6 +535,12 @@ export class UpgradeAssistantCoordinator {
           currentVersion: eligibility.currentVersion,
           targetVersion: eligibility.target,
           classification: eligibility.classification,
+          changes: eligibilities.map((item) => ({
+            packageName: item.packageName,
+            currentVersion: item.currentVersion,
+            targetVersion: item.target,
+            classification: item.classification,
+          })),
           compatibility: {
             status: analysis.status,
             completeness: analysis.completeness,
@@ -527,6 +607,162 @@ export class UpgradeAssistantCoordinator {
   }
 
   /**
+   * Analyze phase for a coordinated removal — eligibility, the same
+   * panel-wide lock an upgrade reserves, and a non-blocking dependency-graph
+   * impact check (does anything else still resolve through what's being
+   * removed). No compatibility preflight, no smart-plan search, no security
+   * outcome — none apply to removing a declared dependency outright. Ends by
+   * storing the analysis and posting it, exactly like handleAnalyzeUpgrade —
+   * never by executing anything.
+   */
+  async handleAnalyzeBulkRemove(message: BulkRemoveMessage): Promise<void> {
+    this.reclaimExpiredAnalysis();
+    this.reclaimExpiredRemoval();
+
+    if (this.activeRemediationAbort !== undefined) {
+      this.options.sink.postMessage({
+        status: 'remove-error',
+        package: message.changes[0]?.package ?? 'unknown',
+        error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Wait for remediation analysis to finish before removing dependencies.' },
+      });
+      return;
+    }
+
+    const controller = await this.options.ensureController();
+    if (controller === undefined) return;
+
+    const batch = controller.validateBulkRemoveRequest(message.changes);
+    if (!batch.ok) {
+      this.options.sink.postMessage({
+        status: 'remove-error',
+        package: batch.packageName ?? message.changes[0]?.package ?? 'unknown',
+        error: describeBulkRemoveRejection(batch),
+      });
+      return;
+    }
+    const eligibility = batch.removals[0];
+    if (eligibility === undefined) return;
+    const eligibilities = batch.removals;
+
+    // Same reservation discipline as an upgrade — held across analysis and
+    // however long the review modal stays open, not merely execution.
+    if (!this.session.reserve(eligibility.packageName)) {
+      this.options.sink.postMessage({
+        status: 'remove-error',
+        package: eligibility.packageName,
+        // Reuses the upgrade flow's own code: it is the same panel-wide
+        // lock, so the webview's existing upgradeErrorClearsActiveState/
+        // upgradeErrorIsUserVisible already treat this race the right way
+        // (quiet, doesn't clear whatever this webview is itself tracking).
+        error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another dependency operation is already in progress for this project.' },
+      });
+      return;
+    }
+
+    let succeeded = false;
+    try {
+      const selected = this.options.getSelectedProject();
+      if (selected === undefined) return;
+      const source = controller.upgradeSource;
+      const preflightProject = await this.projectLoader(selected);
+      if (
+        preflightProject.root !== controller.root ||
+        preflightProject.manifestText !== source.manifestText ||
+        preflightProject.lockfileText !== source.lockfileText ||
+        preflightProject.lockfilePath !== source.lockfilePath ||
+        preflightProject.registry !== source.registry ||
+        preflightProject.packageManager !== source.packageManager ||
+        preflightProject.importerId !== source.importerId
+      ) {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: eligibility.packageName,
+          error: { code: 'STALE_SOURCE', message: 'Project dependency files changed. Refresh and try again.' },
+        });
+        return;
+      }
+
+      this.options.sink.postMessage({ status: 'remove-analyzing', package: eligibility.packageName });
+
+      const manifest = parseManifest(preflightProject.manifestText);
+      const graph = buildDependencyGraph({
+        root: preflightProject.root,
+        manifest,
+        lockfileText: preflightProject.lockfileText,
+        packageManager: preflightProject.packageManager,
+        importerId: preflightProject.importerId,
+      });
+      const removingNames = new Set(eligibilities.map((item) => item.packageName));
+      const changes = eligibilities.map((item) => ({
+        packageName: item.packageName,
+        classification: item.classification,
+        stillRequiredBy: stillRequiredBy(graph, manifest.dependencies, item.packageName, removingNames),
+      }));
+
+      const manifestPath = path.join(controller.root, 'package.json');
+      const expectedLockfilePath =
+        source.lockfilePath ??
+        path.join(controller.root, source.packageManager === 'pnpm' ? 'pnpm-lock.yaml' : 'package-lock.json');
+
+      const ignoreScripts = vscode.workspace
+        .getConfiguration('dependencyDashboard')
+        .get<boolean>('upgrade.ignoreScripts', true);
+      const configuredVerification = vscode.workspace
+        .getConfiguration('dependencyDashboard')
+        .get<unknown[]>('upgrade.verificationScripts', []);
+      const verificationScripts = selectVerificationScripts(source.manifestText, configuredVerification);
+
+      const analysisId = randomBytes(16).toString('hex');
+      this.removal = {
+        id: analysisId,
+        requests: [...message.changes],
+        eligibility,
+        eligibilities,
+        snapshot: preflightProject,
+        ignoreScripts,
+        verificationScripts,
+        expiresAt: Date.now() + ANALYSIS_TTL_MS,
+      };
+
+      this.options.sink.postMessage({
+        status: 'remove-analysis',
+        analysis: buildRemoveAnalysisPresentation({
+          analysisId,
+          packageName: eligibility.packageName,
+          changes,
+          verificationScriptNames: verificationScripts.map((script) => script.scriptName),
+          manifestPath,
+          lockfilePath: expectedLockfilePath,
+        }),
+      });
+      // Lock intentionally NOT released here — held until confirm, cancel, or TTL reclaim.
+      succeeded = true;
+      return;
+    } catch (cause) {
+      if (!this.options.isDisposed()) {
+        this.options.sink.postMessage({ status: 'remove-error', package: eligibility.packageName, error: toProtocolError(cause) });
+      }
+      return;
+    } finally {
+      if (!succeeded) this.session.release(eligibility.packageName);
+    }
+  }
+
+  async handleConfirmRemove(message: AnalysisMessage): Promise<void> {
+    await this.executeStoredRemoval(message.analysisId);
+  }
+
+  handleCancelRemove(message: CancelUpgradeMessage): void {
+    // Removal's analyze phase has nothing long-running to drop mid-flight
+    // (no network preflight, unlike an upgrade) — only a real, already-
+    // delivered analysis is ever cancellable.
+    if (message.analysisId === null) return;
+    if (this.removal === undefined || this.removal.id !== message.analysisId) return;
+    this.session.release(this.removal.eligibility.packageName);
+    this.removal = undefined;
+  }
+
+  /**
    * "Analyze remediation" for a transitive vulnerability with no direct
    * upgrade target — see resolveRemediationRequest
    * (src/core/advisories/remediationRequest.ts) for the eligibility check
@@ -551,6 +787,68 @@ export class UpgradeAssistantCoordinator {
    * `no-direct-fix`, never guessed at further.
    */
   async handleAnalyzeRemediation(message: RemediationMessage): Promise<void> {
+    if (this.activeRemediationAbort !== undefined) {
+      this.options.sink.postMessage({
+        status: 'remediation-error',
+        package: message.package,
+        error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Another remediation analysis is already in progress.' },
+      });
+      return;
+    }
+    const abort = new AbortController();
+    this.activeRemediationAbort = abort;
+    try {
+      await this.analyzeRemediation(message, abort.signal);
+    } finally {
+      if (this.activeRemediationAbort === abort) this.activeRemediationAbort = undefined;
+    }
+  }
+
+  async handleAnalyzeRemediations(message: RemediationBatchMessage): Promise<void> {
+    if (this.activeRemediationAbort !== undefined) {
+      this.options.sink.postMessage({
+        status: 'remediation-batch-error',
+        error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Another remediation analysis is already in progress.' },
+      });
+      return;
+    }
+    const abort = new AbortController();
+    this.activeRemediationAbort = abort;
+    const total = message.packages.length;
+    try {
+      const result = await runSequentialBatch({
+        items: message.packages,
+        signal: abort.signal,
+        onStart: (packageName, completed) => {
+          this.options.sink.postMessage({ status: 'remediation-batch-progress', completed, total, current: packageName });
+        },
+        run: async (packageName, signal) => this.analyzeRemediation({ package: packageName }, signal),
+        onError: (packageName, cause) => {
+          if (!this.options.isDisposed()) {
+            this.options.sink.postMessage({
+              status: 'remediation-error',
+              package: packageName,
+              error: toProtocolError(cause),
+            });
+          }
+        },
+      });
+      this.options.sink.postMessage({
+        status: 'remediation-batch-complete',
+        completed: result.completed,
+        total,
+        cancelled: result.cancelled,
+      });
+    } finally {
+      if (this.activeRemediationAbort === abort) this.activeRemediationAbort = undefined;
+    }
+  }
+
+  handleCancelRemediation(): void {
+    this.activeRemediationAbort?.abort();
+  }
+
+  private async analyzeRemediation(message: RemediationMessage, signal: AbortSignal): Promise<void> {
     const controller = await this.options.ensureController();
     if (controller === undefined) return;
 
@@ -630,10 +928,14 @@ export class UpgradeAssistantCoordinator {
         async (_progress, token) => {
           const abort = new AbortController();
           const cancellation = token.onCancellationRequested(() => abort.abort());
+          const externalCancellation = (): void => abort.abort();
+          signal.addEventListener('abort', externalCancellation, { once: true });
+          if (signal.aborted) abort.abort();
           try {
             return await resolverVerifier.materializeResolvedGraph(noOpProposal, abort.signal);
           } finally {
             cancellation.dispose();
+            signal.removeEventListener('abort', externalCancellation);
           }
         }
       );
@@ -676,7 +978,7 @@ export class UpgradeAssistantCoordinator {
         result: { status: toRemediationOutcomeStatus(security.status), security },
       });
     } catch (cause) {
-      if (!this.options.isDisposed()) {
+      if (!this.options.isDisposed() && !signal.aborted) {
         this.options.sink.postMessage({ status: 'remediation-error', package: row.name, error: toProtocolError(cause) });
       }
     }
@@ -748,7 +1050,7 @@ export class UpgradeAssistantCoordinator {
         disk.importerId === stored.snapshot.importerId &&
         JSON.stringify(disk.peerPolicy) === JSON.stringify(stored.snapshot.peerPolicy) &&
         JSON.stringify(disk.resolvedRegistry) === JSON.stringify(stored.snapshot.resolvedRegistry);
-      const rechecked = controller.validateUpgradeRequest(stored.request);
+      const rechecked = controller.validateBulkUpgradeRequest(stored.requests);
       if (!sourceStillMatches || !rechecked.ok) {
         this.options.sink.postMessage({
           status: 'upgrade-error',
@@ -903,6 +1205,176 @@ export class UpgradeAssistantCoordinator {
     } finally {
       this.session.release(stored.eligibility.packageName);
       // Watcher events received during the lock are deferred, never dropped.
+      await this.options.flushDeferredChanges();
+      if (this.options.isDisposed()) this.session.dispose();
+    }
+  }
+
+  /**
+   * Phase 2 for a removal: look up the stored analysis, re-run the same
+   * disk-reread + eligibility recheck executeStoredAnalysis runs for an
+   * upgrade, then stage package.json with the removed keys deleted and
+   * reconcile via the same manifest-reconciliation path a mixed-
+   * classification coordinated upgrade already uses — see
+   * UpgradeExecutionSession.prepareManifestReconciliation, which accepts no
+   * package/version input at all and simply reconciles whatever the host
+   * already staged.
+   */
+  private async executeStoredRemoval(analysisId: string): Promise<void> {
+    const stored = this.removal;
+    if (stored === undefined || stored.id !== analysisId || Date.now() >= stored.expiresAt) {
+      this.options.sink.postMessage({
+        status: 'remove-error',
+        package: stored?.eligibility.packageName ?? 'unknown',
+        error: { code: 'STALE_ANALYSIS', message: 'This removal analysis is no longer current. Analyze again.' },
+      });
+      return;
+    }
+
+    // Single-use: cleared now, regardless of outcome, so a retry always goes through a fresh handleAnalyzeBulkRemove.
+    this.removal = undefined;
+
+    const controller = await this.options.ensureController();
+    if (controller === undefined) {
+      this.session.release(stored.eligibility.packageName);
+      return;
+    }
+
+    try {
+      const selected = this.options.getSelectedProject();
+      if (selected === undefined) return;
+
+      const disk = await this.projectLoader(selected);
+      const sourceStillMatches =
+        disk.root === controller.root &&
+        disk.manifestText === stored.snapshot.manifestText &&
+        disk.lockfileText === stored.snapshot.lockfileText &&
+        disk.lockfilePath === stored.snapshot.lockfilePath &&
+        disk.registry === stored.snapshot.registry &&
+        disk.packageManager === stored.snapshot.packageManager &&
+        disk.importerId === stored.snapshot.importerId;
+      const rechecked = controller.validateBulkRemoveRequest(stored.requests);
+      if (!sourceStillMatches || !rechecked.ok) {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: stored.eligibility.packageName,
+          error: {
+            code: 'STALE_SOURCE',
+            message: 'Project dependency files changed while the analysis was open. Refresh and try again.',
+          },
+        });
+        return;
+      }
+
+      const source = controller.upgradeSource;
+      const manifestPath = path.join(controller.root, 'package.json');
+      const expectedLockfilePath =
+        source.lockfilePath ??
+        path.join(controller.root, source.packageManager === 'pnpm' ? 'pnpm-lock.yaml' : 'package-lock.json');
+      const allowlistedPaths = [manifestPath, expectedLockfilePath];
+
+      const stagedManifest = buildStagedManifestForRemoval(
+        disk.manifestText,
+        stored.eligibilities.map((item) => ({ packageName: item.packageName, classification: item.classification }))
+      );
+
+      const files = await createNodeUpgradeTransactionFileAdapter({
+        workspaceRoot: selected.folder.uri.fsPath,
+        allowlistedPaths,
+      });
+
+      const prepared = this.session.prepareManifestReconciliation({
+        cwd: controller.root,
+        ignoreScripts: stored.ignoreScripts,
+        packageManager: source.packageManager,
+      });
+      if (!prepared.ok) {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: stored.eligibility.packageName,
+          error: { code: prepared.code, message: prepared.message },
+        });
+        return;
+      }
+
+      const transaction = await runUpgradeTransaction({
+        allowlistedPaths,
+        files,
+        manifestStage: {
+          path: manifestPath,
+          expectedContents: Buffer.from(disk.manifestText, 'utf8'),
+          contents: Buffer.from(stagedManifest, 'utf8'),
+        },
+        install: {
+          execute: async () => {
+            const outcome = await prepared.execute();
+            return outcome.ok
+              ? { status: 'succeeded' as const }
+              : { status: 'failed' as const, code: outcome.code, message: outcome.message };
+          },
+        },
+        ...(stored.verificationScripts.length === 0
+          ? {}
+          : {
+              verifier: {
+                verify: () =>
+                  this.session.verify({
+                    packageName: stored.eligibility.packageName,
+                    cwd: controller.root,
+                    packageManager: source.packageManager,
+                    scripts: stored.verificationScripts,
+                  }),
+              },
+              verificationFailureDecider: {
+                decide: async () => {
+                  if (this.options.isDisposed()) return 'rollback' as const;
+                  const choice = await vscode.window.showWarningMessage(
+                    'The dependencies were removed, but post-removal verification failed.',
+                    {
+                      modal: true,
+                      detail:
+                        'Rollback restores only package.json and the active lockfile captured by this removal transaction; ' +
+                        'it does not restore node_modules or files changed by lifecycle/verification scripts.',
+                    },
+                    'Rollback',
+                    'Keep Changes'
+                  );
+                  return choice === 'Keep Changes' ? ('keep' as const) : ('rollback' as const);
+                },
+              },
+            }),
+      });
+
+      // Reload the kept/restored/partial state while the coordinator still owns the project-wide mutation lock.
+      if (!this.options.isDisposed()) await this.options.reloadFinalState();
+      if (this.options.isDisposed()) return;
+
+      const presentation = describeRemoveTransactionOutcome(
+        stored.eligibilities.map((item) => item.packageName),
+        source.packageManager,
+        transaction
+      );
+      if (presentation.kind === 'verified') {
+        void vscode.window.showInformationMessage(presentation.message);
+      } else if (presentation.kind === 'error') {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: stored.eligibility.packageName,
+          error: presentation.error,
+        });
+      } else {
+        void vscode.window.showWarningMessage(presentation.message);
+      }
+    } catch (cause) {
+      if (!this.options.isDisposed()) {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: stored.eligibility.packageName,
+          error: toProtocolError(cause),
+        });
+      }
+    } finally {
+      this.session.release(stored.eligibility.packageName);
       await this.options.flushDeferredChanges();
       if (this.options.isDisposed()) this.session.dispose();
     }

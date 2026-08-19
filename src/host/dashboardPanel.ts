@@ -44,6 +44,7 @@ import type { PerformanceRecorder } from '../core/performance/measurement.js';
 import { createPerformanceSession } from '../core/performance/measurement.js';
 import { DashboardController } from './dashboardController.js';
 import type { MessageSink } from './dashboardController.js';
+import type { BuildInfo } from './dashboardData.js';
 import type { ReloadSource } from './fileChangeReload.js';
 import { reloadControllerFromDisk } from './fileChangeReload.js';
 import { pickProject } from './projectPicker.js';
@@ -126,6 +127,8 @@ export class DashboardPanel {
   private readonly projectCacheStore: PersistentProjectCacheStore;
   private readonly auditRunner = new NodeAuditRunner();
   private readonly backgroundTimer: BackgroundRefreshTimer;
+  /** Computed once at construction — the same value for every controller/reload this panel session ever builds. See DashboardData's own doc for why this exists (confirming a dev's rebuild actually loaded). */
+  private readonly buildInfo: BuildInfo;
   /** Set once onDidDispose fires, so an async continuation mid-flight can bail before posting into a gone webview. */
   private disposed = false;
   /** The candidate a plain refresh (or a post-upgrade reload) re-reads — set on selection, untouched by refresh itself. */
@@ -164,6 +167,10 @@ export class DashboardPanel {
 
   private constructor(panel: vscode.WebviewPanel, context: vscode.ExtensionContext) {
     this.panel = panel;
+    this.buildInfo = {
+      extensionVersion: String(context.extension.packageJSON['version'] ?? 'unknown'),
+      builtAt: __BUILD_TIME__,
+    };
     this.sink = {
       postMessage: (message) => {
         if (this.performanceEnabled()) {
@@ -194,6 +201,7 @@ export class DashboardPanel {
       getSelectedProject: () => this.selectedProject,
       isDisposed: () => this.disposed,
       performanceEnabled: this.performanceEnabled,
+      isUpgradeBusy: () => this.upgradeCoordinator.isBusy(),
     });
     this.backgroundTimer = new BackgroundRefreshTimer(realTimerScheduler, BACKGROUND_REFRESH_INTERVAL_MS, () => {
       this.onBackgroundTick();
@@ -264,6 +272,10 @@ export class DashboardPanel {
       await this.upgradeCoordinator.handleAnalyzeUpgrade(message);
       return;
     }
+    if (message.type === 'bulk-upgrade') {
+      await this.upgradeCoordinator.handleAnalyzeBulkUpgrade(message);
+      return;
+    }
     if (message.type === 'confirm-upgrade') {
       await this.upgradeCoordinator.handleConfirmUpgrade(message);
       return;
@@ -274,6 +286,18 @@ export class DashboardPanel {
     }
     if (message.type === 'cancel-upgrade') {
       this.upgradeCoordinator.handleCancelUpgrade(message);
+      return;
+    }
+    if (message.type === 'bulk-remove') {
+      await this.upgradeCoordinator.handleAnalyzeBulkRemove(message);
+      return;
+    }
+    if (message.type === 'confirm-remove') {
+      await this.upgradeCoordinator.handleConfirmRemove(message);
+      return;
+    }
+    if (message.type === 'cancel-remove') {
+      this.upgradeCoordinator.handleCancelRemove(message);
       return;
     }
     if (message.type === 'configure-verification') {
@@ -293,6 +317,21 @@ export class DashboardPanel {
         return;
       }
       await this.upgradeCoordinator.handleAnalyzeRemediation(message);
+      return;
+    }
+    if (message.type === 'analyze-remediations') {
+      if (this.upgradeCoordinator.isBusy()) {
+        this.sink.postMessage({
+          status: 'remediation-batch-error',
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+        });
+        return;
+      }
+      await this.upgradeCoordinator.handleAnalyzeRemediations(message);
+      return;
+    }
+    if (message.type === 'cancel-remediation-analysis') {
+      this.upgradeCoordinator.handleCancelRemediation();
       return;
     }
     if (message.type === 'where-used') {
@@ -344,7 +383,7 @@ export class DashboardPanel {
       // Same rule as refresh below: a project switch mid-upgrade would race
       // a scan (and a controller replacement) against a package.json/
       // lockfile an upgrade task is still writing to.
-      if (this.upgradeCoordinator.isBusy()) return;
+      if (this.upgradeCoordinator.isBusy() || this.upgradeCoordinator.isRemediationBusy()) return;
       await this.changeProject();
       return;
     }
@@ -355,12 +394,16 @@ export class DashboardPanel {
       // Palette's "Dependency Dashboard: Refresh", which bypasses the
       // webview entirely and would otherwise race a scan against a
       // package.json/lockfile an upgrade task is still writing to.
-      if (this.upgradeCoordinator.isBusy()) return;
+      if (this.upgradeCoordinator.isBusy() || this.upgradeCoordinator.isRemediationBusy()) return;
       // Manual refresh always re-reads the *currently selected* project's
       // package.json/lockfile from disk — see reloadAndScan — so externally
       // changed dependencies show up, without silently reverting to
       // whichever candidate discovery happened to find first.
-      await this.reloadAndScan();
+      // `forceUsageRecheck: true` — an explicit Refresh click re-verifies
+      // usage in the background the same way a first-ever open does,
+      // bypassing the fingerprint gate other reload paths respect. See
+      // autoAnalyzeCleanupIfStale's own doc for why forcing is safe here.
+      await this.reloadAndScan(this.selectedProject, { forceUsageRecheck: true });
       return;
     }
     if (message.type === 'open-advisory') {
@@ -370,6 +413,7 @@ export class DashboardPanel {
     const controller = await this.ensureController();
     if (controller === undefined) return; // ensureController already posted the failure.
     await controller.handleReady(this.sink);
+    void this.usageCoordinator.autoAnalyzeCleanupIfStale(controller);
   }
 
   /**
@@ -503,7 +547,10 @@ export class DashboardPanel {
    * all — the newer call already owns (or is about to own) that job for
    * whatever project is now actually selected.
    */
-  private async reloadAndScan(candidate: DiscoveredProject | undefined = this.selectedProject): Promise<void> {
+  private async reloadAndScan(
+    candidate: DiscoveredProject | undefined = this.selectedProject,
+    options: { forceUsageRecheck?: boolean } = {}
+  ): Promise<void> {
     if (candidate === undefined) return; // nothing selected yet; only reachable before init ever completes
 
     const sameProjectReload = isSameProjectReload(this.selectedProject?.id, candidate.id);
@@ -592,6 +639,7 @@ export class DashboardPanel {
     // belongs to whatever project is now actually selected, not the one this
     // call was for. Bail without flushing anything.
     if (this.disposed || generation !== this.reloadGeneration) return;
+    void this.usageCoordinator.autoAnalyzeCleanupIfStale(controller, { force: options.forceUsageRecheck === true });
 
     // Whatever is pending now is guaranteed to be from the *currently
     // active* watchers — any old-project leftover was already cleared above
@@ -698,6 +746,7 @@ export class DashboardPanel {
       auditRunner: this.auditRunner,
       projectInfo,
       canChangeProject,
+      buildInfo: this.buildInfo,
       projectCacheStore: this.projectCacheStore,
       cacheKey,
       ttlMinutesProvider: this.ttlMinutesProvider,
@@ -735,7 +784,11 @@ export class DashboardPanel {
   private onBackgroundTick(): void {
     if (this.disposed || this.controller === undefined || this.upgradeCoordinator.isBusy()) return;
     if (!this.controller.needsBackgroundRefresh()) return;
-    void this.controller.refreshInBackground(this.sink);
+    const controller = this.controller;
+    void controller.refreshInBackground(this.sink).then(() => {
+      if (this.disposed || this.controller !== controller) return;
+      void this.usageCoordinator.autoAnalyzeCleanupIfStale(controller);
+    });
   }
 
   private disposeWatchers(): void {

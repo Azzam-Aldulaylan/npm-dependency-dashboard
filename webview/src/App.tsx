@@ -3,9 +3,11 @@ import type { ReactElement } from 'react';
 
 import type { DependencyFinding } from '../../src/core/hygiene/types.js';
 import type { DependencyTypeFilter as DependencyTypeFilterValue } from '../../src/host/dependencyTypeFilter.js';
-import { dependencyTypeFilterPredicate } from '../../src/host/dependencyTypeFilter.js';
+import { dependencyTypeFilterCounts, dependencyTypeFilterPredicate } from '../../src/host/dependencyTypeFilter.js';
 import { dependencyCountLabel } from '../../src/host/dependencySummary.js';
 import { filterEmptyStateTitle } from '../../src/host/emptyStateCopy.js';
+import type { HygieneFilterId } from '../../src/host/hygieneFilter.js';
+import { hygieneFilterCounts, hygieneFilterPredicate } from '../../src/host/hygieneFilter.js';
 import type { PageSize } from '../../src/host/pagination.js';
 import { DEFAULT_PAGE_SIZE, paginate } from '../../src/host/pagination.js';
 import type { SummaryFilterId } from '../../src/host/summaryMetrics.js';
@@ -13,8 +15,15 @@ import { summaryFilterPredicate, summaryMetrics } from '../../src/host/summaryMe
 import type { SortColumn, TableSortState } from '../../src/host/tableSort.js';
 import { nextColumnSortState, sortRows } from '../../src/host/tableSort.js';
 import type { TransitiveRemediationUiState } from '../../src/host/upgradeAction.js';
+import { resolveActionState } from '../../src/host/upgradeAction.js';
 import { upgradeErrorClearsActiveState, upgradeErrorIsUserVisible } from '../../src/host/upgradeUiState.js';
-import type { DashboardData, HostToWebviewMessage, ScanProgressStage, UpgradeAnalysisPresentation } from '../../src/host/webviewProtocol.js';
+import type {
+  DashboardData,
+  HostToWebviewMessage,
+  RemoveAnalysisPresentation,
+  ScanProgressStage,
+  UpgradeAnalysisPresentation,
+} from '../../src/host/webviewProtocol.js';
 import { isHostToWebviewMessage } from '../../src/host/webviewProtocol.js';
 import { DashboardToolbar } from './components/DashboardToolbar.js';
 import { DependencyDetailsModal } from './components/DependencyDetailsModal.js';
@@ -23,11 +32,15 @@ import { DependencyEmptyState } from './components/DependencyEmptyState.js';
 import { DependencyLoadingState } from './components/DependencyLoadingState.js';
 import { DependencySearch } from './components/DependencySearch.js';
 import { DependencyTypeFilter } from './components/DependencyTypeFilter.js';
+import { HygieneFilter } from './components/HygieneFilter.js';
+import { ManageDependenciesModal } from './components/ManageDependenciesModal.js';
+import type { BulkUpgradeCandidate } from './components/ManageDependenciesModal.js';
 import { Pagination } from './components/Pagination.js';
 import { PackageTable } from './components/PackageTable.js';
+import { RemoveAnalysisModal } from './components/RemoveAnalysisModal.js';
 import { SummaryCards } from './components/SummaryCards.js';
 import { UpgradeAnalysisModal } from './components/UpgradeAnalysisModal.js';
-import { IconAlertTriangle, IconBroom, IconRefresh } from './icons.js';
+import { IconAlertTriangle, IconListChecks, IconRefresh } from './icons.js';
 import { vscode } from './vscodeApi.js';
 
 function formatTime(iso: string): string {
@@ -71,15 +84,15 @@ export function App(): ReactElement {
   } | undefined>(undefined);
   const initialRenderStartedAt = useRef<number | null>(null);
   const initialRenderMeasured = useRef(false);
-  // The one package this webview itself most recently asked to upgrade, or
-  // null. The host allows only one upgrade at a time for the whole panel —
-  // see UpgradeLock — so this mirrors that as a single value, not a set, and
-  // disables every Upgrade button (not just the one clicked) while set.
+  // The anchor package for the upgrade flow this webview most recently
+  // requested, or null. A coordinated request may contain more changes, but
+  // the host still owns one project-wide transaction/lock and identifies the
+  // flow by its first, host-validated change.
   const [activeUpgrade, setActiveUpgrade] = useState<string | null>(null);
-  // The target version of `activeUpgrade` — kept alongside it purely so the
-  // Upgrade Analysis modal has something to show ("Analyzing X 11.1.0…")
-  // before the host's `upgrade-analysis` reply carries the real analysis.
+  // The anchor target plus the selected set let the modal show honest loading
+  // copy before the host's `upgrade-analysis` reply carries the real analysis.
   const [activeTarget, setActiveTarget] = useState<string | null>(null);
+  const [activeUpgradeChanges, setActiveUpgradeChanges] = useState<readonly BulkUpgradeCandidate[]>([]);
   const [upgradeError, setUpgradeError] = useState<UpgradeErrorState | null>(null);
   // The host-owned analysis for `activeUpgrade`, once it arrives — never
   // constructed or edited here, only ever stored as received and echoed
@@ -99,6 +112,23 @@ export function App(): ReactElement {
     activeUpgradeRef.current = activeUpgrade;
   }, [activeUpgrade]);
 
+  // Same anchor/lock discipline as the upgrade state above, for a
+  // coordinated removal — the two share one host-side panel-wide lock, so
+  // only one of activeUpgrade/activeRemove is ever non-null at a time.
+  const [activeRemove, setActiveRemove] = useState<string | null>(null);
+  const [activeRemoveChanges, setActiveRemoveChanges] = useState<readonly string[]>([]);
+  // "Why matched" tags from the criteria picker's own selection at the
+  // moment Remove was clicked — display-only, computed client-side, never
+  // sent to or trusted from the host.
+  const [removeMatchTags, setRemoveMatchTags] = useState<ReadonlyMap<string, readonly string[]>>(() => new Map());
+  const [removeAnalysis, setRemoveAnalysis] = useState<RemoveAnalysisPresentation | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState<UpgradeErrorState | null>(null);
+  const activeRemoveRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeRemoveRef.current = activeRemove;
+  }, [activeRemove]);
+
   // UI-only, entirely derived from data already on screen — see
   // src/host/{summaryMetrics,dependencyTypeFilter,tableSort,pagination}.ts.
   // None of this ever triggers a re-scan or a postMessage; all of it simply
@@ -110,6 +140,7 @@ export function App(): ReactElement {
   const [search, setSearch] = useState('');
   const [selectedFilter, setSelectedFilter] = useState<SummaryFilterId>('all');
   const [dependencyType, setDependencyType] = useState<DependencyTypeFilterValue>('all');
+  const [hygieneFilter, setHygieneFilter] = useState<HygieneFilterId>('all');
   // The dashboard opens sorted by vulnerability severity, worst first — the
   // one piece of information most worth seeing before any interaction, even
   // though the default "all" card's own implied order is alphabetical (see
@@ -131,12 +162,26 @@ export function App(): ReactElement {
     () => new Map()
   );
   const [remediationError, setRemediationError] = useState<{ package: string; message: string } | null>(null);
+  const [remediationBatch, setRemediationBatch] = useState<
+    | { phase: 'idle' }
+    | { phase: 'running'; completed: number; total: number; current: string | null }
+  >({ phase: 'idle' });
+  const [bulkActionsOpen, setBulkActionsOpen] = useState(false);
 
   // The row this webview session currently has "Dependency details" open
   // for, and its own on-demand usage-analysis state per package — see
   // DependencyDetailsModal.tsx. Never a fact from the host's own scan.
   const [detailsPackage, setDetailsPackage] = useState<string | null>(null);
   const [usageByPackage, setUsageByPackage] = useState<ReadonlyMap<string, UsageRequestState>>(() => new Map());
+  // Read inside the auto-scan effect below without making it a dependency —
+  // the effect must only re-run when `detailsPackage` itself changes (a new
+  // modal open), never merely because some package's usage state updated,
+  // or it would re-request on every progress tick / error for whichever
+  // package's modal happens to still be open.
+  const usageByPackageRef = useRef<ReadonlyMap<string, UsageRequestState>>(new Map());
+  useEffect(() => {
+    usageByPackageRef.current = usageByPackage;
+  }, [usageByPackage]);
   const [cleanupState, setCleanupState] = useState<
     | { phase: 'idle' }
     | { phase: 'analyzing'; scanned: number; total: number }
@@ -144,6 +189,7 @@ export function App(): ReactElement {
   >({ phase: 'idle' });
   const [cleanupFindings, setCleanupFindings] = useState<DependencyFinding[]>([]);
   const [cleanupError, setCleanupError] = useState<string | null>(null);
+  const cleanupShouldSelectFilter = useRef(false);
   const [minuteClock, setMinuteClock] = useState(() => Date.now());
 
   useEffect(() => {
@@ -175,8 +221,10 @@ export function App(): ReactElement {
         // Never touches `message` — the rendered table/banners are exactly
         // what they were before this arrived.
         if (upgradeErrorClearsActiveState(incoming.error.code)) {
+          activeUpgradeRef.current = null;
           setActiveUpgrade(null);
           setActiveTarget(null);
+          setActiveUpgradeChanges([]);
           setAnalysis(null);
           setAnalyzingPhase(null);
           setConfirmBusy(false);
@@ -200,6 +248,40 @@ export function App(): ReactElement {
         if (incoming.analysis.package === activeUpgradeRef.current) {
           setAnalysis(incoming.analysis);
           setAnalyzingPhase(null);
+        }
+        return;
+      }
+
+      if (incoming.status === 'remove-error') {
+        // Same shared-lock discipline as upgrade-error — reused directly
+        // since UPGRADE_IN_PROGRESS is the one code both flows post when the
+        // panel-wide lock is held by the other, and neither predicate looks
+        // at anything but the code string.
+        if (upgradeErrorClearsActiveState(incoming.error.code)) {
+          activeRemoveRef.current = null;
+          setActiveRemove(null);
+          setActiveRemoveChanges([]);
+          setRemoveMatchTags(new Map());
+          setRemoveAnalysis(null);
+          setRemoveBusy(false);
+        }
+        if (upgradeErrorIsUserVisible(incoming.error.code)) {
+          setRemoveError({ package: incoming.package, code: incoming.error.code, message: incoming.error.message });
+        }
+        return;
+      }
+
+      if (incoming.status === 'remove-analyzing') {
+        // Already reflected by removeAnalysis === null while activeRemove is
+        // set — this flow has no observable multi-phase preflight the way an
+        // upgrade's compatibility/smart-plan check does, so there's nothing
+        // further to update here.
+        return;
+      }
+
+      if (incoming.status === 'remove-analysis') {
+        if (incoming.analysis.package === activeRemoveRef.current) {
+          setRemoveAnalysis(incoming.analysis);
         }
         return;
       }
@@ -234,6 +316,27 @@ export function App(): ReactElement {
           return next;
         });
         setRemediationError({ package: incoming.package, message: incoming.error.message });
+        return;
+      }
+
+      if (incoming.status === 'remediation-batch-progress') {
+        setRemediationBatch({
+          phase: 'running',
+          completed: incoming.completed,
+          total: incoming.total,
+          current: incoming.current,
+        });
+        return;
+      }
+
+      if (incoming.status === 'remediation-batch-complete') {
+        setRemediationBatch({ phase: 'idle' });
+        return;
+      }
+
+      if (incoming.status === 'remediation-batch-error') {
+        setRemediationBatch({ phase: 'idle' });
+        setRemediationError({ package: 'selected dependencies', message: incoming.error.message });
         return;
       }
 
@@ -282,10 +385,16 @@ export function App(): ReactElement {
           cacheExpiresAt: incoming.cacheExpiresAt,
         });
         setCleanupFindings(incoming.findings);
+        if (cleanupShouldSelectFilter.current) {
+          cleanupShouldSelectFilter.current = false;
+          setHygieneFilter('likely-unused');
+          setPage(1);
+        }
         return;
       }
 
       if (incoming.status === 'cleanup-error') {
+        cleanupShouldSelectFilter.current = false;
         setCleanupState({ phase: 'idle' });
         setCleanupError(incoming.error.message);
         return;
@@ -293,14 +402,25 @@ export function App(): ReactElement {
 
       // Any other message is a fresh snapshot that supersedes whatever
       // optimistic upgrade state was showing.
+      activeUpgradeRef.current = null;
       setActiveUpgrade(null);
       setActiveTarget(null);
+      setActiveUpgradeChanges([]);
       setAnalysis(null);
       setAnalyzingPhase(null);
       setConfirmBusy(false);
       setUpgradeError(null);
+      activeRemoveRef.current = null;
+      setActiveRemove(null);
+      setActiveRemoveChanges([]);
+      setRemoveMatchTags(new Map());
+      setRemoveAnalysis(null);
+      setRemoveBusy(false);
+      setRemoveError(null);
       setRemediationByPackage(new Map());
       setRemediationError(null);
+      setRemediationBatch({ phase: 'idle' });
+      setBulkActionsOpen(false);
       // Usage-analysis results and unused findings are relative to the rows
       // a scan just replaced — never carried forward as if they still
       // describe the current dependency set. `cleanupState` itself is left
@@ -309,6 +429,8 @@ export function App(): ReactElement {
       setUsageByPackage(new Map());
       setCleanupFindings([]);
       setCleanupError(null);
+      cleanupShouldSelectFilter.current = false;
+      setCleanupState((previous) => previous.phase === 'analyzing' ? previous : { phase: 'idle' });
       setScanProgress(undefined);
       if (
         initialRenderStartedAt.current === null &&
@@ -364,12 +486,30 @@ export function App(): ReactElement {
   }, []);
 
   const requestUpgrade = useCallback((packageName: string, target: string) => {
+    activeUpgradeRef.current = packageName;
     setActiveUpgrade(packageName);
     setActiveTarget(target);
+    setActiveUpgradeChanges([{ packageName, currentVersion: '', targetVersion: target, major: false }]);
     setAnalysis(null);
     setAnalyzingPhase(null);
     setConfirmBusy(false);
     vscode.postMessage({ type: 'upgrade', package: packageName, target });
+  }, []);
+
+  const requestBulkUpgrade = useCallback((changes: readonly BulkUpgradeCandidate[]) => {
+    const first = changes[0];
+    if (first === undefined) return;
+    activeUpgradeRef.current = first.packageName;
+    setActiveUpgrade(first.packageName);
+    setActiveTarget(first.targetVersion);
+    setActiveUpgradeChanges(changes);
+    setAnalysis(null);
+    setAnalyzingPhase(null);
+    setConfirmBusy(false);
+    vscode.postMessage({
+      type: 'bulk-upgrade',
+      changes: changes.map((change) => ({ package: change.packageName, target: change.targetVersion })),
+    });
   }, []);
 
   const requestConfirmUpgrade = useCallback(() => {
@@ -393,7 +533,9 @@ export function App(): ReactElement {
   const requestCancelUpgrade = useCallback(() => {
     vscode.postMessage({ type: 'cancel-upgrade', analysisId: analysis?.analysisId ?? null });
     setActiveUpgrade(null);
+    activeUpgradeRef.current = null;
     setActiveTarget(null);
+    setActiveUpgradeChanges([]);
     setAnalysis(null);
     setAnalyzingPhase(null);
     setConfirmBusy(false);
@@ -402,6 +544,38 @@ export function App(): ReactElement {
   const requestConfigureVerification = useCallback(() => {
     vscode.postMessage({ type: 'configure-verification' });
   }, []);
+
+  const requestBulkRemove = useCallback(
+    (packageNames: readonly string[], matchTags: ReadonlyMap<string, readonly string[]>) => {
+      const first = packageNames[0];
+      if (first === undefined) return;
+      activeRemoveRef.current = first;
+      setActiveRemove(first);
+      setActiveRemoveChanges(packageNames);
+      setRemoveMatchTags(matchTags);
+      setRemoveAnalysis(null);
+      setRemoveBusy(false);
+      vscode.postMessage({ type: 'bulk-remove', changes: packageNames.map((name) => ({ package: name })) });
+    },
+    []
+  );
+
+  const requestConfirmRemove = useCallback(() => {
+    if (removeAnalysis === null) return;
+    setRemoveBusy(true);
+    vscode.postMessage({ type: 'confirm-remove', analysisId: removeAnalysis.analysisId });
+  }, [removeAnalysis]);
+
+  // Same immediate-client-side-close discipline as requestCancelUpgrade.
+  const requestCancelRemove = useCallback(() => {
+    vscode.postMessage({ type: 'cancel-remove', analysisId: removeAnalysis?.analysisId ?? null });
+    setActiveRemove(null);
+    activeRemoveRef.current = null;
+    setActiveRemoveChanges([]);
+    setRemoveMatchTags(new Map());
+    setRemoveAnalysis(null);
+    setRemoveBusy(false);
+  }, [removeAnalysis]);
 
   // Selecting a card re-asserts that card's own intelligent default sort
   // (see cardDefaultComparator) over any manual header sort — a fresh
@@ -422,6 +596,11 @@ export function App(): ReactElement {
 
   const handleDependencyTypeChange = useCallback((value: DependencyTypeFilterValue) => {
     setDependencyType(value);
+    setPage(1);
+  }, []);
+
+  const handleHygieneFilterChange = useCallback((value: HygieneFilterId) => {
+    setHygieneFilter(value);
     setPage(1);
   }, []);
 
@@ -449,17 +628,51 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'analyze-remediation', package: packageName });
   }, []);
 
+  const requestAnalyzeRemediations = useCallback((packages: readonly string[]) => {
+    if (packages.length === 0) return;
+    setRemediationError(null);
+    setRemediationBatch({ phase: 'running', completed: 0, total: packages.length, current: null });
+    vscode.postMessage({ type: 'analyze-remediations', packages: [...packages] });
+  }, []);
+
+  const requestCancelRemediationBatch = useCallback(() => {
+    vscode.postMessage({ type: 'cancel-remediation-analysis' });
+  }, []);
+
   const openDetails = useCallback((packageName: string) => {
     setDetailsPackage(packageName);
   }, []);
 
+  // Cancels an in-flight scan only when this modal's own request is what's
+  // actually running — never a scan something else started (the background
+  // auto-cleanup pass, say), since the host's usage coordinator allows only
+  // one scan at a time and `phase === 'analyzing'` here is set only by a
+  // `usage-analyzing` reply this webview itself is tracking for this exact
+  // package.
   const closeDetails = useCallback(() => {
+    if (detailsPackage !== null && usageByPackageRef.current.get(detailsPackage)?.phase === 'analyzing') {
+      vscode.postMessage({ type: 'cancel-usage-analysis' });
+    }
     setDetailsPackage(null);
-  }, []);
+  }, [detailsPackage]);
 
-  // The details modal's "Scan workspace" action sends only the package name
-  // (see webviewProtocol.ts's own doc on 'where-used'). Never
-  // re-requested once a result already exists for this package this session.
+  // Opening the details modal for a package scans its usage automatically —
+  // no button press needed. Only fires when `detailsPackage` itself changes
+  // (a new modal open), and skips it entirely when a result is already
+  // cached for this package this session; the host's own fingerprint/TTL
+  // cache (usageCoordinator.ts) is the backstop either way, so a redundant
+  // request here would still resolve instantly rather than rescanning.
+  useEffect(() => {
+    if (detailsPackage === null) return;
+    if (usageByPackageRef.current.get(detailsPackage)?.phase === 'done') return;
+    vscode.postMessage({ type: 'where-used', package: detailsPackage });
+  }, [detailsPackage]);
+
+  // The details modal's "Scan workspace" fallback / "Re-analyze" action
+  // sends only the package name (see webviewProtocol.ts's own doc on
+  // 'where-used'). Never re-requested once a result already exists for this
+  // package this session — the effect above is what normally triggers the
+  // first scan; this stays as the explicit manual retry/override path.
   const requestWhereUsed = useCallback(
     (packageName: string) => {
       setDetailsPackage(packageName);
@@ -482,7 +695,8 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'open-usage-reference', usageId, referenceIndex });
   }, []);
 
-  const requestAnalyzeCleanup = useCallback(() => {
+  const requestBulkAnalyzeCleanup = useCallback(() => {
+    cleanupShouldSelectFilter.current = true;
     setCleanupError(null);
     vscode.postMessage({ type: 'analyze-cleanup' });
   }, []);
@@ -494,12 +708,35 @@ export function App(): ReactElement {
   // No message yet is the same user-visible state as an explicit loading one.
   const loading = message === undefined || message.status === 'loading';
   const data = message !== undefined && 'data' in message ? message.data : undefined;
-  // Disabled while an upgrade is active — a manual refresh or project switch
-  // mid-upgrade would race the scan (and, for a project switch, a controller
-  // replacement) against a package.json/lockfile the task is still writing
-  // to; the host rejects both too (see DashboardPanel.handle), this just
-  // keeps the buttons from inviting a click that can't do anything anyway.
-  const actionsDisabled = loading || activeUpgrade !== null;
+  const allHygieneFindings = useMemo(
+    () => [...(data?.hygieneFindings ?? []), ...cleanupFindings],
+    [data?.hygieneFindings, cleanupFindings]
+  );
+  // Which rows currently offer "Check transitive fix" — the one legal
+  // action ManageDependenciesModal can't derive from `rows` alone, since it
+  // depends on this session's own remediationByPackage state.
+  const remediationEligibleNames = useMemo(
+    () =>
+      new Set(
+        (data?.rows ?? []).flatMap((row) => {
+          const action = resolveActionState(row, remediationByPackage.get(row.name));
+          return action.kind === 'transitive-remediation' || action.kind === 'remediation-unknown' ? [row.name] : [];
+        })
+      ),
+    [data?.rows, remediationByPackage]
+  );
+  // Disabled while an upgrade or removal is active — a manual refresh or
+  // project switch mid-operation would race the scan (and, for a project
+  // switch, a controller replacement) against a package.json/lockfile the
+  // task is still writing to; the host rejects both too (see
+  // DashboardPanel.handle), this just keeps the buttons from inviting a
+  // click that can't do anything anyway.
+  const actionsDisabled =
+    loading ||
+    activeUpgrade !== null ||
+    activeRemove !== null ||
+    cleanupState.phase === 'analyzing' ||
+    remediationBatch.phase === 'running';
 
   return (
     <main className="dashboard">
@@ -541,6 +778,21 @@ export function App(): ReactElement {
           <p className="banner__text">
             Couldn't upgrade {upgradeError.package}: {upgradeError.message}
           </p>
+          <button className="button button--secondary" type="button" onClick={refresh} disabled={actionsDisabled}>
+            Refresh
+          </button>
+        </div>
+      ) : null}
+
+      {removeError !== null ? (
+        <div className="banner banner--error" role="alert">
+          <IconAlertTriangle className="banner__icon" />
+          <p className="banner__text">
+            Couldn't remove {removeError.package}: {removeError.message}
+          </p>
+          <button className="button button--secondary" type="button" onClick={refresh} disabled={actionsDisabled}>
+            Refresh
+          </button>
         </div>
       ) : null}
 
@@ -550,6 +802,9 @@ export function App(): ReactElement {
           <p className="banner__text">
             Couldn't analyze remediation for {remediationError.package}: {remediationError.message}
           </p>
+          <button className="button button--secondary" type="button" onClick={refresh} disabled={actionsDisabled}>
+            Refresh
+          </button>
         </div>
       ) : null}
 
@@ -557,6 +812,9 @@ export function App(): ReactElement {
         <div className="banner banner--error" role="alert">
           <IconAlertTriangle className="banner__icon" />
           <p className="banner__text">Couldn't analyze dependency usage: {cleanupError}</p>
+          <button className="button button--secondary" type="button" onClick={refresh} disabled={actionsDisabled}>
+            Refresh
+          </button>
         </div>
       ) : null}
 
@@ -573,11 +831,25 @@ export function App(): ReactElement {
         </div>
       ) : null}
 
+      {remediationBatch.phase === 'running' ? (
+        <div className="banner banner--info">
+          <IconRefresh className="banner__icon banner__icon--spin" />
+          <p className="banner__text">
+            Checking transitive fixes — {remediationBatch.completed} of {remediationBatch.total} analyzed
+            {remediationBatch.current === null ? '' : ` · ${remediationBatch.current}`}
+          </p>
+          <button className="button button--secondary" type="button" onClick={requestCancelRemediationBatch}>
+            Cancel
+          </button>
+        </div>
+      ) : null}
+
       {message !== undefined && 'data' in message ? (
         <Dashboard
           status={message.status}
           data={message.data}
           activeUpgrade={activeUpgrade}
+          activeRemove={activeRemove}
           onUpgrade={requestUpgrade}
           onOpenAdvisory={requestOpenAdvisory}
           remediationByPackage={remediationByPackage}
@@ -588,6 +860,8 @@ export function App(): ReactElement {
           onSelectFilter={handleSelectFilter}
           dependencyType={dependencyType}
           onDependencyTypeChange={handleDependencyTypeChange}
+          hygieneFilter={hygieneFilter}
+          onHygieneFilterChange={handleHygieneFilterChange}
           sortState={sortState}
           onSort={handleSort}
           page={page}
@@ -599,11 +873,24 @@ export function App(): ReactElement {
           onRefresh={refresh}
           actionsDisabled={actionsDisabled}
           cleanupFindings={cleanupFindings}
-          cleanupBusy={cleanupState.phase === 'analyzing'}
           cleanupAnalysis={cleanupState.phase === 'done' ? cleanupState : null}
           now={minuteClock}
-          onAnalyzeCleanup={requestAnalyzeCleanup}
+          onOpenBulkActions={() => setBulkActionsOpen(true)}
           onOpenDetails={openDetails}
+        />
+      ) : null}
+
+      {bulkActionsOpen && data !== undefined ? (
+        <ManageDependenciesModal
+          rows={data.rows}
+          hygieneFindings={allHygieneFindings}
+          remediationEligibleNames={remediationEligibleNames}
+          cleanupBusy={cleanupState.phase === 'analyzing'}
+          onRecheckHealth={requestBulkAnalyzeCleanup}
+          onBulkUpgrade={requestBulkUpgrade}
+          onBulkRemove={requestBulkRemove}
+          onAnalyzeRemediations={requestAnalyzeRemediations}
+          onClose={() => setBulkActionsOpen(false)}
         />
       ) : null}
 
@@ -613,12 +900,25 @@ export function App(): ReactElement {
           targetVersion={activeTarget}
           analyzingPhase={analyzingPhase}
           analysis={analysis}
+          pendingChanges={activeUpgradeChanges}
           busy={confirmBusy}
           onConfirm={requestConfirmUpgrade}
           onUseSmartPlan={requestUseSmartPlan}
           onCancel={requestCancelUpgrade}
           onConfigureVerification={requestConfigureVerification}
           onOpenAdvisory={requestOpenAdvisory}
+        />
+      ) : null}
+
+      {activeRemove !== null ? (
+        <RemoveAnalysisModal
+          packages={activeRemoveChanges}
+          analysis={removeAnalysis}
+          matchTags={removeMatchTags}
+          busy={removeBusy}
+          onConfirm={requestConfirmRemove}
+          onCancel={requestCancelRemove}
+          onConfigureVerification={requestConfigureVerification}
         />
       ) : null}
 
@@ -648,6 +948,7 @@ function Dashboard({
   status,
   data,
   activeUpgrade,
+  activeRemove,
   onUpgrade,
   onOpenAdvisory,
   remediationByPackage,
@@ -658,6 +959,8 @@ function Dashboard({
   onSelectFilter,
   dependencyType,
   onDependencyTypeChange,
+  hygieneFilter,
+  onHygieneFilterChange,
   sortState,
   onSort,
   page,
@@ -669,15 +972,16 @@ function Dashboard({
   onRefresh,
   actionsDisabled,
   cleanupFindings,
-  cleanupBusy,
   cleanupAnalysis,
   now,
-  onAnalyzeCleanup,
+  onOpenBulkActions,
   onOpenDetails,
 }: {
   status: 'empty' | 'ready' | 'stale' | 'partial-error';
   data: DashboardData;
   activeUpgrade: string | null;
+  /** Non-null while a coordinated removal holds the same panel-wide lock an upgrade does — disables Upgrade actions the same way activeUpgrade does. */
+  activeRemove: string | null;
   onUpgrade: (packageName: string, target: string) => void;
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
   remediationByPackage: ReadonlyMap<string, TransitiveRemediationUiState>;
@@ -688,6 +992,8 @@ function Dashboard({
   onSelectFilter: (filter: SummaryFilterId) => void;
   dependencyType: DependencyTypeFilterValue;
   onDependencyTypeChange: (value: DependencyTypeFilterValue) => void;
+  hygieneFilter: HygieneFilterId;
+  onHygieneFilterChange: (value: HygieneFilterId) => void;
   sortState: TableSortState;
   onSort: (column: SortColumn) => void;
   page: number;
@@ -700,10 +1006,9 @@ function Dashboard({
   actionsDisabled: boolean;
   /** Likely-unused findings from the last completed "Analyze cleanup" run this session — see App.tsx. */
   cleanupFindings: readonly DependencyFinding[];
-  cleanupBusy: boolean;
   cleanupAnalysis: { analyzedAt: string; cacheExpiresAt: string } | null;
   now: number;
-  onAnalyzeCleanup: () => void;
+  onOpenBulkActions: () => void;
   onOpenDetails: (packageName: string) => void;
 }): ReactElement {
   const degraded = status === 'partial-error' ? partialErrorText(data) : null;
@@ -717,28 +1022,50 @@ function Dashboard({
   // anything else, so this single check covers all of them: `stale` is up
   // for the entire duration a revalidation is in flight, and a failed one
   // (which posts nothing further) leaves it up until the next attempt.
-  const upgradesDisabled = status === 'stale';
+  // Also disabled while a removal holds the shared panel-wide lock — the
+  // same "the host would refuse this anyway" reasoning as `stale` above.
+  const upgradesDisabled = status === 'stale' || activeRemove !== null;
 
   const metrics = useMemo(() => summaryMetrics(data.rows), [data.rows]);
+
+  const hygieneFindings = useMemo(
+    () => [...data.hygieneFindings, ...cleanupFindings],
+    [data.hygieneFindings, cleanupFindings]
+  );
+  // Faceted against each other: the Type filter's own selection is
+  // deliberately excluded when computing Finding's counts (and vice versa)
+  // so picking "Production" immediately lowers what Likely unused/Duplicate
+  // versions show, reflecting the actual combined match — not a count
+  // frozen against the whole table. The summary-card filter and search are
+  // deliberately left out of this narrowing: those are global/transient,
+  // not part of this pair's own AND relationship.
+  const findingCounts = useMemo(
+    () => hygieneFilterCounts(data.rows.filter(dependencyTypeFilterPredicate(dependencyType)), hygieneFindings),
+    [data.rows, dependencyType, hygieneFindings]
+  );
+  const typeCounts = useMemo(
+    () => dependencyTypeFilterCounts(data.rows.filter(hygieneFilterPredicate(hygieneFilter, hygieneFindings))),
+    [data.rows, hygieneFilter, hygieneFindings]
+  );
 
   const query = search.trim().toLowerCase();
   const filteredRows = useMemo(() => {
     const matchesCard = summaryFilterPredicate(selectedFilter);
     const matchesType = dependencyTypeFilterPredicate(dependencyType);
+    const matchesHygiene = hygieneFilterPredicate(hygieneFilter, hygieneFindings);
     const rows = data.rows.filter(
-      (row) => matchesCard(row) && matchesType(row) && (query === '' || row.name.toLowerCase().includes(query))
+      (row) =>
+        matchesCard(row) &&
+        matchesType(row) &&
+        matchesHygiene(row) &&
+        (query === '' || row.name.toLowerCase().includes(query))
     );
     return sortRows(rows, sortState, selectedFilter);
-  }, [data.rows, selectedFilter, dependencyType, query, sortState]);
+  }, [data.rows, selectedFilter, dependencyType, hygieneFilter, hygieneFindings, query, sortState]);
 
   const pageResult = useMemo(
     () => paginate(filteredRows, page, pageSize),
     [filteredRows, page, pageSize]
-  );
-
-  const hygieneFindings = useMemo(
-    () => [...data.hygieneFindings, ...cleanupFindings],
-    [data.hygieneFindings, cleanupFindings]
   );
 
   return (
@@ -770,8 +1097,6 @@ function Dashboard({
           <SummaryCards metrics={metrics} selected={selectedFilter} onSelect={onSelectFilter} />
 
           <DashboardToolbar
-            visibleCount={filteredRows.length}
-            totalCount={data.rows.length}
             canChangeProject={canChangeProject}
             onChangeProject={onChangeProject}
             onRefresh={onRefresh}
@@ -786,17 +1111,23 @@ function Dashboard({
                 <button
                   className="button button--secondary"
                   type="button"
-                  onClick={onAnalyzeCleanup}
-                  disabled={actionsDisabled || cleanupBusy}
-                  title="Scan the workspace for likely-unused direct dependencies"
+                  onClick={onOpenBulkActions}
+                  disabled={actionsDisabled || upgradesDisabled}
+                  title="Upgrade, remove, or check multiple dependencies at once"
                 >
-                  <IconBroom />
-                  {cleanupBusy ? 'Analyzing…' : cleanupAnalysis === null ? 'Analyze cleanup' : 'Re-analyze'}
+                  <IconListChecks />
+                  Manage dependencies
                 </button>
               </div>
             }
           >
-            <DependencyTypeFilter value={dependencyType} onChange={onDependencyTypeChange} />
+            <DependencyTypeFilter value={dependencyType} counts={typeCounts} onChange={onDependencyTypeChange} />
+            <HygieneFilter
+              value={hygieneFilter}
+              likelyUnusedCount={findingCounts['likely-unused']}
+              duplicateCount={findingCounts['duplicate-version']}
+              onChange={onHygieneFilterChange}
+            />
           </DashboardToolbar>
 
           {filteredRows.length === 0 ? (
@@ -812,7 +1143,12 @@ function Dashboard({
             ) : (
               <DependencyEmptyState
                 icon="filter"
-                title={filterEmptyStateTitle(selectedFilter, dependencyType)}
+                title={filterEmptyStateTitle(
+                  selectedFilter,
+                  dependencyType,
+                  hygieneFilter,
+                  cleanupAnalysis !== null
+                )}
                 detail="Nothing matches this filter."
               />
             )
@@ -846,6 +1182,9 @@ function Dashboard({
 
       <p className="dashboard__footer">
         {dependencyCountLabel(data.rows.length)} • Updated {formatTime(data.generatedAt)}
+        <span className="dashboard__build-stamp" title="Confirms which build of the extension is currently loaded">
+          {' '}• v{data.extensionVersion} · built {formatTime(data.builtAt)}
+        </span>
       </p>
     </>
   );

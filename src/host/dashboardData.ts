@@ -16,6 +16,12 @@
 import type { ScanSnapshot } from '../core/cache/schema.js';
 import type { DashboardData, HostToWebviewMessage, SelectedProjectInfo } from './webviewProtocol.js';
 
+/** Static per-session identity for the running extension build — see DashboardData's own doc. */
+export interface BuildInfo {
+  extensionVersion: string;
+  builtAt: string;
+}
+
 /**
  * `generatedAt` is a parameter rather than always `Date.now()` because a
  * cached result gets re-sent later as `stale`, and that message must carry the
@@ -29,6 +35,7 @@ export function toDashboardData(
   result: ScanSnapshot,
   project: SelectedProjectInfo,
   canChangeProject: boolean,
+  buildInfo: BuildInfo,
   generatedAt: string = new Date().toISOString()
 ): DashboardData {
   const data: DashboardData = {
@@ -37,6 +44,8 @@ export function toDashboardData(
     project,
     canChangeProject,
     hygieneFindings: result.hygieneFindings ?? [],
+    extensionVersion: buildInfo.extensionVersion,
+    builtAt: buildInfo.builtAt,
   };
   if (result.advisoriesError !== undefined) {
     data.advisoriesError = {
@@ -63,9 +72,10 @@ export function toHostToWebviewMessage(
   options: { isEmpty: boolean; isStale: boolean },
   project: SelectedProjectInfo,
   canChangeProject: boolean,
+  buildInfo: BuildInfo,
   generatedAt?: string
 ): HostToWebviewMessage {
-  const data = toDashboardData(result, project, canChangeProject, generatedAt);
+  const data = toDashboardData(result, project, canChangeProject, buildInfo, generatedAt);
   if (options.isEmpty) return { status: 'empty', data };
   if (options.isStale) return { status: 'stale', data };
   if (result.advisoriesError !== undefined || result.auditUnavailable === true) {

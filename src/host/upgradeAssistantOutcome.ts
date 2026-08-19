@@ -89,3 +89,85 @@ export function describeUpgradeTransactionOutcome(
     },
   };
 }
+
+function describeRemovedPackages(packageNames: readonly string[]): string {
+  return packageNames.length === 1 ? (packageNames[0] ?? '') : `${packageNames.length} dependencies`;
+}
+
+/** describeUpgradeTransactionOutcome's removal analog — same transaction result shape, same precedence rules, remove-specific wording. */
+export function describeRemoveTransactionOutcome(
+  packageNames: readonly string[],
+  packageManager: 'npm' | 'pnpm',
+  transaction: UpgradeTransactionResult
+): UpgradeCompletionPresentation {
+  const removed = describeRemovedPackages(packageNames);
+
+  if (transaction.rollback.status === 'conflict') {
+    return {
+      kind: 'error',
+      error: {
+        code: 'ROLLBACK_CONFLICT',
+        message:
+          'Rollback was incomplete because dependency files changed concurrently; newer edits were preserved. ' +
+          'Some transaction-owned files may already have been restored. node_modules was not restored. ' +
+          `Review package.json and the active lockfile before running ${packageManager} install.`,
+      },
+    };
+  }
+  if (transaction.rollback.status === 'failed') {
+    return {
+      kind: 'error',
+      error: {
+        code: 'ROLLBACK_FAILED',
+        message:
+          'Rollback failed for one or more dependency files. Some transaction-owned files may already have been restored. ' +
+          'node_modules was not restored. ' +
+          `Review package.json and the active lockfile before running ${packageManager} install.`,
+      },
+    };
+  }
+
+  if (transaction.reason === 'manifest-stage-failed' && transaction.manifestStage.status === 'failed') {
+    return transaction.manifestStage.code === 'CONFLICT'
+      ? {
+          kind: 'error',
+          error: {
+            code: 'STALE_SOURCE',
+            message: 'package.json changed before the removal could start. No files were modified; refresh and try again.',
+          },
+        }
+      : {
+          kind: 'error',
+          error: {
+            code: 'MANIFEST_STAGE_FAILED',
+            message: 'The package.json removal could not be staged, so the package-manager install was not started.',
+          },
+        };
+  }
+
+  if (transaction.completion === 'kept' && transaction.reason === 'verified') {
+    return { kind: 'verified', message: `Removed ${removed}; verification passed.` };
+  }
+  if (transaction.completion === 'kept') {
+    return {
+      kind: 'unverified',
+      message: `Removed ${removed}, but the application is not verified after removal.`,
+    };
+  }
+  if (transaction.completion === 'rolled-back') {
+    return {
+      kind: 'rolled-back',
+      message:
+        `Dependency files for ${removed} were restored to their pre-removal state. ` +
+        `node_modules was not restored; run ${packageManager} install to reconcile installed packages with the restored lockfile.`,
+    };
+  }
+
+  return {
+    kind: 'error',
+    error: {
+      code: 'REMOVE_TRANSACTION_FAILED',
+      message: 'The removal transaction did not reach a verified or fully restored state. Review package.json and the lockfile.',
+    },
+  };
+}

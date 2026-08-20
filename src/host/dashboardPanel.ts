@@ -384,6 +384,20 @@ export class DashboardPanel {
       this.usageCoordinator.handleCancel();
       return;
     }
+    if (message.type === 'analyze-removal-impact') {
+      // Same rule as where-used/analyze-cleanup: read-only, but a concurrent
+      // read could still race an in-flight upgrade's file writes.
+      if (this.upgradeCoordinator.isBusy()) {
+        this.sink.postMessage({
+          status: 'removal-impact-error',
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+        });
+        return;
+      }
+      await this.usageCoordinator.cancelBackgroundAnalysis();
+      await this.usageCoordinator.handleAnalyzeRemovalImpact(message);
+      return;
+    }
     if (message.type === 'open-usage-reference') {
       this.usageCoordinator.handleOpenReference(message);
       return;

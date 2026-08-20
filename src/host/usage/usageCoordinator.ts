@@ -31,20 +31,30 @@
 
 import * as vscode from 'vscode';
 
+import { buildDependencyGraph } from '../../core/lockfile/build.js';
+import { parseManifest } from '../../core/manifest/parse.js';
 import { computeSourceFingerprint, sourceFingerprintsMatch } from '../../core/cache/sourceFingerprint.js';
 import type { ProjectSourceFingerprint } from '../../core/cache/sourceFingerprint.js';
 import { buildUnusedFinding } from '../../core/usage/unused.js';
 import type { DependencyUsageResult } from '../../core/usage/types.js';
 import type { DependencyFinding } from '../../core/hygiene/types.js';
+import { peerRequirementsFor } from '../../core/upgrade/peerRequirement.js';
+import { stillRequiredBy } from '../../core/upgrade/removeImpact.js';
+import { assessRemoval } from '../../core/upgrade/removalAssessment.js';
 import { createPerformanceSession } from '../../core/performance/measurement.js';
 import type { DashboardController, MessageSink } from '../dashboardController.js';
 import type { DiscoveredProject } from '../projectResolution.js';
+import type { RemovalImpactAssessment } from '../webviewProtocol.js';
 import { shouldAutoAnalyzeCleanup } from './autoCleanupGate.js';
 import { analyzeDependencyUsage } from './usageAnalyzer.js';
 import { UsageReferenceStore } from './usageReferenceStore.js';
 
 export interface WhereUsedMessage {
   package: string;
+}
+
+export interface AnalyzeRemovalImpactMessage {
+  packages: string[];
 }
 
 export interface OpenUsageReferenceMessage {
@@ -338,6 +348,117 @@ export class UsageAnalysisCoordinator {
         this.activeCts = undefined;
       }
       performance.finish();
+    }
+  }
+
+  /**
+   * A read-only removal-impact preview for one or more packages — the single
+   * "Analyze removal" card in the Manage dependency modal, and the bulk
+   * Review step's inline impact check (see Part 5 of the redesign brief),
+   * both funnel through here. Shares this coordinator's own single-flight
+   * `activeCts` guard, the identical one-pass `analyzeDependencyUsage` batch
+   * scan `handleAnalyzeCleanup` already uses (one workspace read regardless
+   * of how many packages are requested), and the same `UsageReferenceStore`
+   * — "View references" on a source-reference evidence entry opens through
+   * the existing `open-usage-reference` trust boundary, never a new one.
+   *
+   * Deliberately lighter-weight than the upgrade/removal execution path:
+   * this never mutates anything and never gates the actual removal
+   * transaction, so — like `handleWhereUsed`/`handleAnalyzeCleanup` — it
+   * trusts `controller.upgradeSource` (the source that produced the current
+   * scan) directly rather than re-reading disk. The real security boundary
+   * for execution is unchanged: `bulk-remove` -> `confirm-remove` always
+   * re-reads disk and re-validates eligibility fresh, regardless of what
+   * this preview showed.
+   *
+   * Package names that aren't a real direct dependency of the current scan
+   * are silently dropped, never trusted as-is — the same discipline
+   * `handleWhereUsed` applies to a single package name.
+   */
+  async handleAnalyzeRemovalImpact(message: AnalyzeRemovalImpactMessage): Promise<void> {
+    if (this.isBusy()) {
+      this.options.sink.postMessage({
+        status: 'removal-impact-error',
+        error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Another usage analysis is already in progress for this project.' },
+      });
+      return;
+    }
+
+    const controller = await this.options.ensureController();
+    if (controller === undefined) return;
+    const rowNames = new Set(controller.lastResultRows().map((row) => row.name));
+    const packageNames = [...new Set(message.packages)].filter((name) => rowNames.has(name));
+    const selected = this.options.getSelectedProject();
+    if (selected === undefined) return;
+
+    if (packageNames.length === 0) {
+      this.options.sink.postMessage({ status: 'removal-impact-result', assessments: [], generatedAt: new Date().toISOString() });
+      return;
+    }
+
+    const cts = new vscode.CancellationTokenSource();
+    this.activeCts = cts;
+    const performance = createPerformanceSession(
+      'Dependency Dashboard removal impact analysis',
+      this.options.performanceEnabled?.() ?? false
+    );
+    performance.setMetadata('candidates', packageNames.length);
+    this.options.sink.postMessage({ status: 'removal-impact-analyzing', scanned: 0, total: 0 });
+
+    try {
+      const source = controller.upgradeSource;
+      const manifest = parseManifest(source.manifestText);
+      const graph = buildDependencyGraph({
+        root: controller.root,
+        manifest,
+        lockfileText: source.lockfileText,
+        packageManager: source.packageManager,
+        importerId: source.importerId,
+      });
+      const removing = new Set(packageNames);
+
+      const resultsByPackage = await analyzeDependencyUsage({
+        folder: selected.folder,
+        dir: selected.dir,
+        manifestText: source.manifestText,
+        packageNames,
+        token: cts.token,
+        performance,
+        onProgress: (scanned, total) => {
+          this.options.sink.postMessage({ status: 'removal-impact-analyzing', scanned, total });
+        },
+      });
+      // Cancellation means the user closed the review before results were
+      // ready — same discipline as a cancelled background cleanup scan:
+      // never publish a partial result as if it were complete.
+      if (this.options.isDisposed() || this.activeCts !== cts || cts.token.isCancellationRequested) return;
+
+      // analyzeDependencyUsage always returns an entry for every name it was
+      // given (see its own implementation), so `usageResult` is only ever
+      // undefined here as a defensive fallback, never in practice.
+      const assessments: RemovalImpactAssessment[] = packageNames.flatMap((name) => {
+        const usageResult = resultsByPackage.get(name);
+        if (usageResult === undefined) return [];
+        const usageId = this.referenceStore.store(name, usageResult, selected.folder);
+        const assessment = assessRemoval({
+          usage: { references: usageResult.references, truncated: usageResult.truncated },
+          peerRequirements: peerRequirementsFor(graph, name, removing),
+          stillRequiredBy: stillRequiredBy(graph, manifest.dependencies, name, removing),
+        });
+        return [{ packageName: name, assessment, usageId }];
+      });
+
+      this.options.sink.postMessage({ status: 'removal-impact-result', assessments, generatedAt: new Date().toISOString() });
+    } catch (cause) {
+      if (!this.options.isDisposed()) {
+        this.options.sink.postMessage({ status: 'removal-impact-error', error: toProtocolError(cause) });
+      }
+    } finally {
+      if (this.activeCts === cts) {
+        cts.dispose();
+        this.activeCts = undefined;
+      }
+      performance.finish({ packages: packageNames.length });
     }
   }
 

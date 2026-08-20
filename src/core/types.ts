@@ -167,6 +167,49 @@ export interface PackageRow {
   upgradeReason: UpgradeReason | null;
 }
 
+/**
+ * One piece of evidence behind a `RemovalAssessment` — always a fact the host
+ * actually observed (a usage-analyzer reference, a peer-dependency edge from
+ * the dependency graph, a `stillRequiredBy` transitive path), never a raw
+ * file path or anything the webview could use to forge a different claim.
+ * `summary` is the only thing rendered directly; source-reference detail
+ * (actual file paths/lines) is opened exclusively through the existing
+ * `open-usage-reference` trust boundary, keyed by a host-issued `usageId` —
+ * see src/host/usage/usageReferenceStore.ts.
+ */
+export type RemovalEvidenceKind =
+  | 'source-reference'
+  | 'script-reference'
+  | 'config-reference'
+  | 'peer-requirement'
+  | 'transitive-dependency';
+
+export interface RemovalEvidence {
+  kind: RemovalEvidenceKind;
+  summary: string;
+}
+
+/**
+ * The structured result of a removal-impact assessment for one package — see
+ * `assessRemoval` in src/core/upgrade/removalAssessment.ts for how each
+ * status is derived. Four distinct outcomes, never collapsed:
+ *  - `low-risk` — no known reference, script, config, or peer requirement
+ *    found. Never "safe to remove" as an absolute fact — static analysis
+ *    cannot guarantee runtime safety.
+ *  - `review`   — some non-blocking evidence exists (source usage, a script,
+ *    an optional peer). The user may still choose to remove after seeing it.
+ *  - `blocked`  — a strong, deterministic blocker: another still-installed,
+ *    not-also-being-removed package requires this one as a required (non-
+ *    optional) peer dependency.
+ *  - `unknown`  — the underlying workspace scan was incomplete, cancelled,
+ *    or never ran. Never treated as `low-risk` by omission.
+ */
+export type RemovalAssessment =
+  | { status: 'low-risk'; evidence: RemovalEvidence[] }
+  | { status: 'review'; evidence: RemovalEvidence[] }
+  | { status: 'blocked'; evidence: RemovalEvidence[] }
+  | { status: 'unknown'; evidence: RemovalEvidence[] };
+
 /** Registry origin, surfaced in the UI so a redirect is never silent. */
 export interface ResolvedRegistry {
   url: string;

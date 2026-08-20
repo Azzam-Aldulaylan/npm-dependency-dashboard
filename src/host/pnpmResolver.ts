@@ -9,7 +9,7 @@ import type { PackageManagerInvocation } from './resolverVerifier.js';
 
 export interface PnpmResolverDeps {
   exists(path: string): boolean;
-  probe(executable: string, prefixArgs: readonly string[]): boolean;
+  probe(executable: string, prefixArgs: readonly string[]): string | undefined;
 }
 
 export function pnpmInvocationCandidates(npm: NpmInvocation): PackageManagerInvocation[] {
@@ -31,7 +31,8 @@ export function resolvePnpmInvocation(
   for (const candidate of pnpmInvocationCandidates(npm)) {
     const cli = candidate.prefixArgs[0];
     if (cli === undefined || !deps.exists(cli)) continue;
-    if (deps.probe(candidate.executable, candidate.prefixArgs)) return candidate;
+    const version = deps.probe(candidate.executable, candidate.prefixArgs);
+    if (version !== undefined) return { ...candidate, version };
   }
   return null;
 }
@@ -44,15 +45,16 @@ export function resolveInstalledPnpmInvocation(
     exists: existsSync,
     probe(executable, prefixArgs) {
       try {
-        execFileSync(executable, [...prefixArgs, '--version'], {
+        const output = execFileSync(executable, [...prefixArgs, '--version'], {
           cwd,
           encoding: 'utf8',
           timeout: 5000,
           stdio: ['ignore', 'pipe', 'ignore'],
         });
-        return true;
+        const version = output.trim();
+        return version.length === 0 ? undefined : version.slice(0, 100);
       } catch {
-        return false;
+        return undefined;
       }
     },
   });

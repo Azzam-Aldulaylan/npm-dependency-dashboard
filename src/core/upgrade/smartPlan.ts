@@ -469,7 +469,8 @@ function buildPlan(state: SearchState): UpgradePlan {
 
 function analysisOptions(
   options: PlanSmartUpgradeOptions,
-  proposal: UpgradeProposal
+  proposal: UpgradeProposal,
+  includeResolver: boolean
 ): AnalyzeCompatibilityOptions {
   const result: AnalyzeCompatibilityOptions = {
     graph: options.graph,
@@ -477,7 +478,7 @@ function analysisOptions(
     policy: options.policy,
   };
   if (options.metadataProvider !== undefined) result.metadataProvider = options.metadataProvider;
-  if (options.resolverVerifier !== undefined) result.resolverVerifier = options.resolverVerifier;
+  if (includeResolver && options.resolverVerifier !== undefined) result.resolverVerifier = options.resolverVerifier;
   if (options.staticMetadataCompleteness !== undefined) {
     result.staticMetadataCompleteness = options.staticMetadataCompleteness;
   }
@@ -603,7 +604,16 @@ export async function planSmartUpgrade(options: PlanSmartUpgradeOptions): Promis
           requested: options.initialAnalysis.proposal.requested,
           changes,
         };
-        const analysis = await analyzeCompatibility(analysisOptions(options, proposal));
+        // Static graph/metadata conflicts already prove this state cannot be
+        // executed and also identify which direct package can resolve the
+        // conflict. Running npm/pnpm for every such intermediate state adds
+        // seconds without changing the search. Invoke the real resolver only
+        // once a state is statically viable; that final candidate remains
+        // fully resolver-verified before it can be offered.
+        let analysis = await analyzeCompatibility(analysisOptions(options, proposal, false));
+        if (statusAcceptsPlan(analysis) && options.resolverVerifier !== undefined) {
+          analysis = await analyzeCompatibility(analysisOptions(options, proposal, true));
+        }
         statistics.compatibilityChecks += 1;
         statistics.statesAnalyzed += 1;
         queue.push({ analysis, changes, reasons });

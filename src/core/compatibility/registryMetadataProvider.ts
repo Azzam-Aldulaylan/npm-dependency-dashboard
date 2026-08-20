@@ -18,6 +18,12 @@ export function registryForPackage(registry: ResolvedRegistry, packageName: stri
  * for that proposed version.
  */
 export class RegistryPackageMetadataProvider implements PackageMetadataProvider {
+  /** One provider is scoped to one host-owned preflight. Smart-plan search
+   * revisits the same exact package/version across proposal states, so retain
+   * pending and successful promises for that logical action only. Failed
+   * requests are removed so a later state may revalidate a transient error. */
+  private readonly pending = new Map<string, Promise<PackageVersionMetadata>>();
+
   constructor(
     private readonly client: HttpClient,
     private readonly store: EtagStore,
@@ -29,7 +35,10 @@ export class RegistryPackageMetadataProvider implements PackageMetadataProvider 
     version: string,
     signal?: AbortSignal
   ): Promise<PackageVersionMetadata> {
-    return await fetchPackageVersionMetadata(
+    const key = `${packageName}\0${version}`;
+    const existing = this.pending.get(key);
+    if (existing !== undefined) return await existing;
+    const request = fetchPackageVersionMetadata(
       this.client,
       this.store,
       registryForPackage(this.registry, packageName),
@@ -37,5 +46,12 @@ export class RegistryPackageMetadataProvider implements PackageMetadataProvider 
       version,
       signal
     );
+    this.pending.set(key, request);
+    try {
+      return await request;
+    } catch (cause) {
+      if (this.pending.get(key) === request) this.pending.delete(key);
+      throw cause;
+    }
   }
 }

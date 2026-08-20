@@ -25,6 +25,7 @@ import {
 const HOME_POSIX = '/Users/dev';
 const HOME_WIN = 'C:\\Users\\dev';
 const PROJECT_CWD = '/Users/dev/projects/my-app';
+const NPM_VERSION = '10.9.8';
 
 function noopListDir() {
   return [];
@@ -200,7 +201,7 @@ function baseDeps(overrides = {}) {
     isExecutable: () => false,
     resolveRealNodePath: () => undefined,
     resolveGlobalNpmRoot: () => undefined,
-    probeVersion: () => false,
+    probeVersion: () => undefined,
     probeLoginShellNode: () => undefined,
     ...overrides,
   };
@@ -218,11 +219,11 @@ test('POSIX: the first candidate that passes every check wins', () => {
       isExecutable: (p) => p === node,
       resolveRealNodePath: (n) => (n === node ? node : undefined),
       resolveGlobalNpmRoot: (n) => (n === node ? npmRoot : undefined),
-      probeVersion: (n, cli) => n === node && cli === npmCliJs,
+      probeVersion: (n, cli) => (n === node && cli === npmCliJs ? NPM_VERSION : undefined),
     })
   );
 
-  assert.deepEqual(result, { ok: true, invocation: { node, npmCliJs } });
+  assert.deepEqual(result, { ok: true, invocation: { node, npmCliJs, version: NPM_VERSION } });
 });
 
 test('a node that exists but is not executable is skipped', () => {
@@ -266,7 +267,7 @@ test('existence and the executable bit are not sufficient: a failing version pro
       isExecutable: (p) => p === node,
       resolveRealNodePath: (n) => n,
       resolveGlobalNpmRoot: (n) => (n === node ? npmRoot : undefined),
-      probeVersion: () => false,
+      probeVersion: () => undefined,
     })
   );
   assert.deepEqual(result, { ok: false });
@@ -292,11 +293,11 @@ test('windows resolution never calls resolveGlobalNpmRoot — npm.cmd is never i
         called = true;
         return undefined;
       },
-      probeVersion: (n, cli) => n === node && cli === npmCliJs,
+      probeVersion: (n, cli) => (n === node && cli === npmCliJs ? NPM_VERSION : undefined),
     })
   );
 
-  assert.deepEqual(result, { ok: true, invocation: { node, npmCliJs } });
+  assert.deepEqual(result, { ok: true, invocation: { node, npmCliJs, version: NPM_VERSION } });
   assert.equal(called, false, 'resolveGlobalNpmRoot (which would run npm.cmd) must never be called on Windows');
 });
 
@@ -320,11 +321,11 @@ test('windows derives npm-cli.js from the *real* resolved node path, using the f
       exists: (p) => p === shimNode || p === npmCliJs,
       isExecutable: (p) => p === shimNode,
       resolveRealNodePath: (n) => (n === shimNode ? realNode : undefined),
-      probeVersion: (n, cli) => n === shimNode && cli === npmCliJs,
+      probeVersion: (n, cli) => (n === shimNode && cli === npmCliJs ? NPM_VERSION : undefined),
     })
   );
 
-  assert.deepEqual(result, { ok: true, invocation: { node: shimNode, npmCliJs } });
+  assert.deepEqual(result, { ok: true, invocation: { node: shimNode, npmCliJs, version: NPM_VERSION } });
   assert.notEqual(result.invocation.npmCliJs, wrongGuess);
 });
 
@@ -372,11 +373,11 @@ test('regression: a Volta shim resolves correctly via the two probes, not via a 
       isExecutable: (p) => p === shimNode,
       resolveRealNodePath: (n) => (n === shimNode ? realNode : undefined),
       resolveGlobalNpmRoot: (n) => (n === shimNode ? npmRoot : undefined),
-      probeVersion: (n, cli) => n === shimNode && cli === npmCliJs,
+      probeVersion: (n, cli) => (n === shimNode && cli === npmCliJs ? NPM_VERSION : undefined),
     })
   );
 
-  assert.deepEqual(result, { ok: true, invocation: { node: shimNode, npmCliJs } });
+  assert.deepEqual(result, { ok: true, invocation: { node: shimNode, npmCliJs, version: NPM_VERSION } });
   assert.notEqual(result.invocation.npmCliJs, wrongGuess);
 });
 
@@ -393,11 +394,11 @@ test('regression: modern fnm (node-versions/<version>/installation, no default a
       isExecutable: (p) => p === node,
       resolveRealNodePath: (n) => (n === node ? node : undefined),
       resolveGlobalNpmRoot: (n) => (n === node ? npmRoot : undefined),
-      probeVersion: (n, cli) => n === node && cli === npmCliJs,
+      probeVersion: (n, cli) => (n === node && cli === npmCliJs ? NPM_VERSION : undefined),
     })
   );
 
-  assert.deepEqual(result, { ok: true, invocation: { node, npmCliJs } });
+  assert.deepEqual(result, { ok: true, invocation: { node, npmCliJs, version: NPM_VERSION } });
 });
 
 test('regression: FNM_DIR-based modern fnm layout resolves', () => {
@@ -414,11 +415,11 @@ test('regression: FNM_DIR-based modern fnm layout resolves', () => {
       isExecutable: (p) => p === node,
       resolveRealNodePath: (n) => (n === node ? node : undefined),
       resolveGlobalNpmRoot: (n) => (n === node ? npmRoot : undefined),
-      probeVersion: (n, cli) => n === node && cli === npmCliJs,
+      probeVersion: (n, cli) => (n === node && cli === npmCliJs ? NPM_VERSION : undefined),
     })
   );
 
-  assert.deepEqual(result, { ok: true, invocation: { node, npmCliJs } });
+  assert.deepEqual(result, { ok: true, invocation: { node, npmCliJs, version: NPM_VERSION } });
 });
 
 test('regression: GUI PATH puts a broken Homebrew node first — resolution falls through to a working absolute nvm node/npm', () => {
@@ -442,11 +443,11 @@ test('regression: GUI PATH puts a broken Homebrew node first — resolution fall
       isExecutable: (p) => p === homebrewNode || p === nvmNode,
       resolveRealNodePath: (n) => n, // both resolve fine on their own
       resolveGlobalNpmRoot: (n) => (n === nvmNode ? nvmNpmRoot : undefined), // Homebrew's wrapper can't answer
-      probeVersion: (n, cli) => n === nvmNode && cli === nvmNpmCliJs,
+      probeVersion: (n, cli) => (n === nvmNode && cli === nvmNpmCliJs ? NPM_VERSION : undefined),
     })
   );
 
-  assert.deepEqual(result, { ok: true, invocation: { node: nvmNode, npmCliJs: nvmNpmCliJs } });
+  assert.deepEqual(result, { ok: true, invocation: { node: nvmNode, npmCliJs: nvmNpmCliJs, version: NPM_VERSION } });
 });
 
 // ------------------------------------------------------- login-shell fallback
@@ -462,12 +463,12 @@ test('when nothing on disk matches, the login-shell probe is tried (POSIX only)'
       isExecutable: (p) => p === probedNode,
       resolveRealNodePath: (n) => (n === probedNode ? probedNode : undefined),
       resolveGlobalNpmRoot: (n) => (n === probedNode ? npmRoot : undefined),
-      probeVersion: (n, cli) => n === probedNode && cli === npmCliJs,
+      probeVersion: (n, cli) => (n === probedNode && cli === npmCliJs ? NPM_VERSION : undefined),
       probeLoginShellNode: () => probedNode,
     })
   );
 
-  assert.deepEqual(result, { ok: true, invocation: { node: probedNode, npmCliJs } });
+  assert.deepEqual(result, { ok: true, invocation: { node: probedNode, npmCliJs, version: NPM_VERSION } });
 });
 
 test('a probed node that fails validation is not accepted', () => {

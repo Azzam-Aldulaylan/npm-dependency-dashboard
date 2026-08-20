@@ -194,6 +194,7 @@ export class DashboardPanel {
       isDisposed: () => this.disposed,
       reloadFinalState: () => this.reloadAndScan(),
       flushDeferredChanges: () => this.fileChangeCoordinator.flushDeferred(),
+      performanceEnabled: this.performanceEnabled,
     });
     this.usageCoordinator = new UsageAnalysisCoordinator({
       sink: this.sink,
@@ -269,10 +270,12 @@ export class DashboardPanel {
 
   private async handle(message: WebviewToHostMessage): Promise<void> {
     if (message.type === 'upgrade') {
+      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeUpgrade(message);
       return;
     }
     if (message.type === 'bulk-upgrade') {
+      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeBulkUpgrade(message);
       return;
     }
@@ -289,6 +292,7 @@ export class DashboardPanel {
       return;
     }
     if (message.type === 'bulk-remove') {
+      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeBulkRemove(message);
       return;
     }
@@ -316,6 +320,7 @@ export class DashboardPanel {
         });
         return;
       }
+      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeRemediation(message);
       return;
     }
@@ -327,6 +332,7 @@ export class DashboardPanel {
         });
         return;
       }
+      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeRemediations(message);
       return;
     }
@@ -345,6 +351,7 @@ export class DashboardPanel {
         });
         return;
       }
+      await this.usageCoordinator.joinBackgroundAnalysis();
       await this.usageCoordinator.handleWhereUsed(message);
       return;
     }
@@ -357,6 +364,7 @@ export class DashboardPanel {
         });
         return;
       }
+      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.usageCoordinator.handleWhereUsed(message, true);
       return;
     }
@@ -368,7 +376,8 @@ export class DashboardPanel {
         });
         return;
       }
-      await this.usageCoordinator.handleAnalyzeCleanup();
+      const joinedFreshScan = await this.usageCoordinator.promoteAndJoinBackgroundAnalysis();
+      if (!joinedFreshScan) await this.usageCoordinator.handleAnalyzeCleanup();
       return;
     }
     if (message.type === 'cancel-usage-analysis') {
@@ -533,7 +542,7 @@ export class DashboardPanel {
    *     selected project. Skipped for a same-project reload: there is no
    *     "old" vs "new" selection to disambiguate, so nothing here would ever
    *     be anything but relevant.
-   *   - After the scan (`handleRefresh`) completes, unconditionally: by then
+   *   - After the forced scan completes, unconditionally: by then
    *     any old-project leftover has already been cleared (the step above),
    *     so whatever is pending is guaranteed to be a *genuine* event from the
    *     currently active watchers — for the project this method just
@@ -541,7 +550,7 @@ export class DashboardPanel {
    *
    * One more supersession point sits right before that final flush: this
    * call's own `generation` is re-checked against `this.reloadGeneration`
-   * one last time, after `handleRefresh`'s network scan has had the whole
+   * one last time, after the network scan has had the whole
    * length of that scan to be overtaken by an entirely newer, faster
    * reloadAndScan call. Superseded here, this call must flush nothing at
    * all — the newer call already owns (or is about to own) that job for
@@ -611,7 +620,7 @@ export class DashboardPanel {
       // chance to fire on the new ones yet. Discard it here, synchronously,
       // rather than at the end of this method — waiting would let it also
       // catch a *genuine* new-project event that the new watchers queue
-      // while `handleRefresh` below is in flight, discarding a legitimate
+      // while the scan below is in flight, discarding a legitimate
       // reload instead of applying it.
       this.fileChangeCoordinator.discardPending();
     }
@@ -627,9 +636,18 @@ export class DashboardPanel {
         revalidation.generationAtReadStart
       );
     }
-    await controller.handleRefresh(this.sink);
+    // A same-project manual/post-action refresh already has useful rows on
+    // screen. Keep them visible (marked stale by the revalidation announcement
+    // above) while the forced scan runs. A genuine project switch must still
+    // clear the old project's rows so they are never presented under the new
+    // project identity.
+    if (sameProjectReload) {
+      await controller.refreshInBackground(this.sink);
+    } else {
+      await controller.handleRefresh(this.sink);
+    }
 
-    // `handleRefresh`'s own network scan can take long enough for an
+    // The network scan can take long enough for an
     // entirely separate, newer reloadAndScan call (a faster project switch,
     // or another refresh) to start AND finish while this one was still
     // awaiting it — that newer call already ran (or is about to run) its

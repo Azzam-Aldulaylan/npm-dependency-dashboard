@@ -697,6 +697,38 @@ test('npm audit starts before version metadata settles so independent work overl
   await buildPackageRows(baseOptions(client, { auditRunner: runner }));
 });
 
+test('bulk advisories and version metadata are in flight together after graph construction', async () => {
+  let markLatestStarted;
+  let markAdvisoriesStarted;
+  let releaseLatest;
+  let releaseAdvisories;
+  const latestStarted = new Promise((resolve) => { markLatestStarted = resolve; });
+  const advisoriesStarted = new Promise((resolve) => { markAdvisoriesStarted = resolve; });
+  const latestGate = new Promise((resolve) => { releaseLatest = resolve; });
+  const advisoriesGate = new Promise((resolve) => { releaseAdvisories = resolve; });
+
+  const client = {
+    async get(url) {
+      markLatestStarted();
+      await latestGate;
+      return LATEST_ROUTES[url] ?? json({ version: '1.0.0' });
+    },
+    async post() {
+      markAdvisoriesStarted();
+      await advisoriesGate;
+      return BULK_RESPONSE;
+    },
+  };
+
+  const pending = buildPackageRows(baseOptions(client));
+  await Promise.all([latestStarted, advisoriesStarted]);
+  releaseLatest();
+  releaseAdvisories();
+
+  const result = await pending;
+  assert.equal(result.rows.length, 2);
+});
+
 test('scan instrumentation reports request kinds and scan-local packument reuse without sensitive values', async () => {
   let report;
   const performance = new PerformanceSession('test scan', {
@@ -719,7 +751,10 @@ test('scan instrumentation reports request kinds and scan-local packument reuse 
   assert.equal(report.metadata['/latest requests'], 2);
   assert.equal(report.metadata['packument requests'], 1);
   assert.equal(report.metadata['bulk advisory requests'], 1);
+  assert.ok(report.metadata['bulk advisory request bytes'] > 0);
+  assert.ok(report.metadata['registry response wire bytes'] > 0);
   assert.equal(report.metadata['advisory packages'], 1);
+  assert.equal(report.metadata['packument requests for patched version'], 1);
   assert.equal(report.metadata['scan-local packument hits'], 1);
   assert.equal(Object.values(report.metadata).some((value) => String(value).includes(REGISTRY)), false);
 });

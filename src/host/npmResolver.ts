@@ -240,6 +240,8 @@ export const NPM_VERSION_PROBE_ARG = '--version';
 export interface NpmInvocation {
   node: string;
   npmCliJs: string;
+  /** Captured by the same health probe that validates this exact pair. */
+  version: string;
 }
 
 export interface NpmResolverDeps extends CandidateEnv {
@@ -267,13 +269,13 @@ export interface NpmResolverDeps extends CandidateEnv {
   resolveGlobalNpmRoot: (node: string) => string | undefined;
   /**
    * Runs `<node> <npmCliJs> --version` (argv array, no shell, a timeout,
-   * `cwd`) and reports whether it succeeded. Existence and the executable
+   * `cwd`) and returns the version it printed. Existence and the executable
    * bit are necessary but not sufficient — a `node` that can't run this
    * specific `npm-cli.js` (version mismatch, a partially-removed install, a
    * stub) must be rejected, not accepted just because the files are
    * present.
    */
-  probeVersion: (node: string, npmCliJs: string) => boolean;
+  probeVersion: (node: string, npmCliJs: string) => string | undefined;
   /** Absolute `node` path from the login-shell probe, or undefined if it found nothing. */
   probeLoginShellNode: () => string | undefined;
 }
@@ -300,17 +302,19 @@ function validatePair(
   if (platform === 'win32') {
     const npmCliJs = p.join(p.dirname(realNode), 'node_modules', 'npm', 'bin', 'npm-cli.js');
     if (!deps.exists(npmCliJs)) return undefined;
-    if (!deps.probeVersion(node, npmCliJs)) return undefined;
-    return { node, npmCliJs };
+    const version = deps.probeVersion(node, npmCliJs);
+    if (version === undefined) return undefined;
+    return { node, npmCliJs, version };
   }
 
   const npmRoot = deps.resolveGlobalNpmRoot(node);
   if (npmRoot === undefined) return undefined;
   const npmCliJs = p.join(npmRoot, 'npm', 'bin', 'npm-cli.js');
   if (!deps.exists(npmCliJs)) return undefined;
-  if (!deps.probeVersion(node, npmCliJs)) return undefined;
+  const version = deps.probeVersion(node, npmCliJs);
+  if (version === undefined) return undefined;
 
-  return { node, npmCliJs };
+  return { node, npmCliJs, version };
 }
 
 /**
@@ -390,8 +394,8 @@ function realResolveGlobalNpmRoot(node: string, platform: NodeJS.Platform, cwd: 
   return runFixedProbe(npmBin, NPM_ROOT_PROBE_ARGS, { cwd, env });
 }
 
-function realProbeVersion(node: string, npmCliJs: string, cwd: string): boolean {
-  return runFixedProbe(node, [npmCliJs, NPM_VERSION_PROBE_ARG], { cwd }) !== undefined;
+function realProbeVersion(node: string, npmCliJs: string, cwd: string): string | undefined {
+  return runFixedProbe(node, [npmCliJs, NPM_VERSION_PROBE_ARG], { cwd })?.slice(0, 100);
 }
 
 function realProbeLoginShellNode(cwd: string): string | undefined {

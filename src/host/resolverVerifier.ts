@@ -7,7 +7,7 @@
  * lifecycle scripts are disabled, and the real project is never the cwd.
  */
 
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -27,23 +27,8 @@ import type { DependencyGraph } from '../core/types.js';
 export interface PackageManagerInvocation {
   executable: string;
   prefixArgs: readonly string[];
-}
-
-/** Fixed argv probe; returns null rather than weakening verification when unavailable. */
-export function probePackageManagerVersion(
-  invocation: PackageManagerInvocation,
-  cwd: string
-): string | null {
-  try {
-    const output = execFileSync(
-      invocation.executable,
-      [...invocation.prefixArgs, '--version'],
-      { cwd, encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }
-    ).trim();
-    return output.length === 0 ? null : output.slice(0, 100);
-  } catch {
-    return null;
-  }
+  /** May be captured by the invocation resolver's existing health probe. */
+  version?: string;
 }
 
 export interface ResolverProcessResult {

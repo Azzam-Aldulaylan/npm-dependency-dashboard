@@ -121,13 +121,16 @@ function instrumentHttpClient(client: HttpClient, recorder: PerformanceRecorder)
       recorder.increment('registry requests');
       recorder.increment(url.endsWith('/latest') ? '/latest requests' : 'packument requests');
       const response = await client.get(url, options);
+      recorder.increment('registry response wire bytes', response.wireBytes);
       if (response.status === 304) recorder.increment('304 responses');
       return response;
     },
     async post(url, body, options) {
       recorder.increment('registry requests');
       recorder.increment('bulk advisory requests');
+      recorder.increment('bulk advisory request bytes', Buffer.byteLength(body));
       const response = await client.post(url, body, options);
+      recorder.increment('registry response wire bytes', response.wireBytes);
       if (response.status === 304) recorder.increment('304 responses');
       return response;
     },
@@ -162,12 +165,17 @@ export async function buildPackageRows(
   recorder.setMetadata('graph nodes', graph.nodes.size);
 
   const packumentPromises = new Map<string, Promise<PackumentDoc>>();
-  const loadPackument = (name: string, requestSignal?: AbortSignal): Promise<PackumentDoc> => {
+  const loadPackument = (
+    name: string,
+    reason: 'version resolution' | 'patched version' | 'upgrade-target fallback',
+    requestSignal?: AbortSignal
+  ): Promise<PackumentDoc> => {
     const cached = packumentPromises.get(name);
     if (cached !== undefined) {
       recorder.increment('scan-local packument hits');
       return cached;
     }
+    recorder.increment(`packument requests for ${reason}`);
     const pending = fetchPackument(httpClient, etagStore, registry, name, requestSignal);
     packumentPromises.set(name, pending);
     return pending;
@@ -192,6 +200,33 @@ export async function buildPackageRows(
       });
   })();
 
+  // The bulk advisory request depends only on the normalized graph. Start it
+  // alongside version metadata instead of placing its network latency behind
+  // every /latest request. This adds one bounded request (to npm's advisory
+  // endpoint) while the registry pool is active; patched-version work still
+  // waits for attribution and therefore cannot amplify that overlap.
+  const bulkRequestBody = buildBulkRequestBody(graph);
+  let advisoryRequestSettled = false;
+  options.onProgress?.({ stage: 'advisories' });
+  const advisoryPromise: Promise<{ advisoriesByName: Map<string, Advisory[]>; advisoriesError?: FetchError }> = (async () => {
+    const endAdvisoryRequest = recorder.start('bulk advisory request');
+    let advisoriesByName = new Map<string, Advisory[]>();
+    let advisoriesError: FetchError | undefined;
+    try {
+      advisoriesByName = await fetchBulkAdvisories(httpClient, bulkRequestBody, signal);
+    } catch (cause) {
+      advisoriesError =
+        cause instanceof FetchError
+          ? cause
+          : new FetchError('NETWORK', cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      advisoryRequestSettled = true;
+    }
+    endAdvisoryRequest({ packages: advisoriesByName.size });
+    recorder.setMetadata('advisory packages', advisoriesByName.size);
+    return advisoriesError === undefined ? { advisoriesByName } : { advisoriesByName, advisoriesError };
+  })();
+
   // --- versions -------------------------------------------------------
   // Unresolvable nodes (workspace links, file:/git: specifiers, no lockfile)
   // have no registry entry; asking would be a guaranteed 404 presented to the
@@ -204,7 +239,7 @@ export async function buildPackageRows(
     client: httpClient,
     store: etagStore,
     registry,
-    packumentLoader: loadPackument,
+    packumentLoader: (name, requestSignal) => loadPackument(name, 'version resolution', requestSignal),
   };
   if (options.concurrency !== undefined) fetchOptions.limit = options.concurrency;
   if (signal !== undefined) fetchOptions.signal = signal;
@@ -228,20 +263,10 @@ export async function buildPackageRows(
   throwIfAborted(signal);
 
   // --- advisories -----------------------------------------------------
-  options.onProgress?.({ stage: 'advisories' });
-  const endAdvisoryRequest = recorder.start('bulk advisory request');
-  let advisoriesByName = new Map<string, Advisory[]>();
-  let advisoriesError: FetchError | undefined;
-  try {
-    advisoriesByName = await fetchBulkAdvisories(httpClient, buildBulkRequestBody(graph), signal);
-  } catch (cause) {
-    advisoriesError =
-      cause instanceof FetchError
-        ? cause
-        : new FetchError('NETWORK', cause instanceof Error ? cause.message : String(cause));
-  }
-  endAdvisoryRequest({ packages: advisoriesByName.size });
-  recorder.setMetadata('advisory packages', advisoriesByName.size);
+  // If versions won the race, make the remaining wait explicit in the
+  // loading UI instead of leaving it at "versions N of N".
+  if (!advisoryRequestSettled) options.onProgress?.({ stage: 'advisories' });
+  const { advisoriesByName, advisoriesError } = await advisoryPromise;
   throwIfAborted(signal);
 
   const endAttribution = recorder.start('advisory attribution');
@@ -264,7 +289,7 @@ export async function buildPackageRows(
     const endPatchedVersions = recorder.start('patched-version metadata');
     const patchedSettled = await runPool(
       names,
-      (name, poolSignal) => loadPackument(name, poolSignal),
+      (name, poolSignal) => loadPackument(name, 'patched version', poolSignal),
       {
         limit: options.concurrency ?? DEFAULT_CONCURRENCY,
         ...(signal === undefined ? {} : { signal }),
@@ -308,7 +333,7 @@ export async function buildPackageRows(
   });
   const fallbackSettled = await runPool(
     fallbackNodes,
-    (node, poolSignal) => loadPackument(node.name, poolSignal),
+    (node, poolSignal) => loadPackument(node.name, 'upgrade-target fallback', poolSignal),
     {
       limit: options.concurrency ?? DEFAULT_CONCURRENCY,
       ...(signal === undefined ? {} : { signal }),

@@ -82,17 +82,22 @@ export class UsageAnalysisCoordinator {
   /** root -> fingerprint last auto-analyzed by autoAnalyzeCleanupIfStale — see autoCleanupGate.ts. */
   private readonly lastAutoCleanupFingerprint = new Map<string, ProjectSourceFingerprint>();
   private activeCts: vscode.CancellationTokenSource | undefined;
+  private backgroundRun: Promise<boolean> | undefined;
+  private backgroundCancellationRequested = false;
+  private backgroundPromoted = false;
 
   constructor(private readonly options: UsageCoordinatorOptions) {}
 
   isBusy(): boolean {
-    return this.activeCts !== undefined;
+    return this.activeCts !== undefined || this.backgroundRun !== undefined;
   }
 
   dispose(): void {
     this.activeCts?.cancel();
     this.activeCts?.dispose();
     this.activeCts = undefined;
+    this.backgroundCancellationRequested = true;
+    this.backgroundRun = undefined;
     this.referenceStore.clear();
   }
 
@@ -230,7 +235,7 @@ export class UsageAnalysisCoordinator {
    * nothing. An explicit click always runs with `background: false`
    * (today's visible progress/error UI, unchanged).
    */
-  async handleAnalyzeCleanup(options: { background?: boolean } = {}): Promise<void> {
+  async handleAnalyzeCleanup(options: { background?: boolean } = {}): Promise<boolean> {
     const background = options.background ?? false;
     if (this.isBusy()) {
       if (!background) {
@@ -239,15 +244,15 @@ export class UsageAnalysisCoordinator {
           error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Another usage analysis is already in progress for this project.' },
         });
       }
-      return;
+      return false;
     }
 
     const controller = await this.options.ensureController();
-    if (controller === undefined) return;
+    if (controller === undefined) return false;
     const rows = controller.lastResultRows();
     const packageNames = rows.map((row) => row.name);
     const selected = this.options.getSelectedProject();
-    if (selected === undefined) return;
+    if (selected === undefined) return false;
 
     if (packageNames.length === 0) {
       const analyzedAt = new Date().toISOString();
@@ -257,11 +262,12 @@ export class UsageAnalysisCoordinator {
         analyzedAt,
         cacheExpiresAt: new Date(Date.now() + USAGE_CACHE_TTL_MS).toISOString(),
       });
-      return;
+      return true;
     }
 
     const cts = new vscode.CancellationTokenSource();
     this.activeCts = cts;
+    if (background && this.backgroundCancellationRequested) cts.cancel();
     const performance = createPerformanceSession(
       'Dependency Dashboard cleanup usage analysis',
       this.options.performanceEnabled?.() ?? false
@@ -287,7 +293,7 @@ export class UsageAnalysisCoordinator {
             token: cts.token,
             performance,
             onProgress: (scanned, total) => {
-              if (background) return;
+              if (background && !this.backgroundPromoted) return;
               const increment = total > 0 ? ((scanned - lastScanned) / total) * 100 : 0;
               lastScanned = scanned;
               progress?.report({ message: `${scanned} of ${total} files checked`, increment });
@@ -304,7 +310,9 @@ export class UsageAnalysisCoordinator {
             { location: vscode.ProgressLocation.Notification, title: 'Analyzing dependency usage', cancellable: true },
             (progress, token) => runScan(progress, token)
           );
-      if (this.options.isDisposed() || this.activeCts !== cts) return;
+      // Cancellation means the user chose a foreground action. Never publish
+      // or cache a partial background scan as if it were complete.
+      if (cts.token.isCancellationRequested || this.options.isDisposed() || this.activeCts !== cts) return false;
 
       const fingerprint = this.fingerprintFor(controller);
       const findings: DependencyFinding[] = [];
@@ -318,10 +326,12 @@ export class UsageAnalysisCoordinator {
         if (finding !== null) findings.push(finding);
       }
       this.options.sink.postMessage({ status: 'cleanup-result', findings, analyzedAt, cacheExpiresAt });
+      return true;
     } catch (cause) {
-      if (!background && !this.options.isDisposed()) {
+      if ((!background || this.backgroundPromoted) && !this.options.isDisposed()) {
         this.options.sink.postMessage({ status: 'cleanup-error', error: toProtocolError(cause) });
       }
+      return false;
     } finally {
       if (this.activeCts === cts) {
         cts.dispose();
@@ -356,8 +366,46 @@ export class UsageAnalysisCoordinator {
       options.force === true
     );
     if (!shouldRun) return;
-    this.lastAutoCleanupFingerprint.set(controller.root, fingerprint);
-    await this.handleAnalyzeCleanup({ background: true });
+    this.backgroundCancellationRequested = false;
+    this.backgroundPromoted = false;
+    const run = this.handleAnalyzeCleanup({ background: true });
+    this.backgroundRun = run;
+    try {
+      const completed = await run;
+      if (completed) this.lastAutoCleanupFingerprint.set(controller.root, fingerprint);
+    } finally {
+      if (this.backgroundRun === run) this.backgroundRun = undefined;
+      this.backgroundCancellationRequested = false;
+      this.backgroundPromoted = false;
+    }
+  }
+
+  /** Explicit actions outrank the invisible auto-cleanup pass. Waits only for
+   * the currently active bounded read batch to observe cancellation. */
+  async cancelBackgroundAnalysis(): Promise<void> {
+    const run = this.backgroundRun;
+    if (run === undefined) return;
+    this.backgroundCancellationRequested = true;
+    this.activeCts?.cancel();
+    await run;
+  }
+
+  /** A foreground usage request can consume the identical full-project scan
+   * already in flight instead of cancelling it and rereading every file. */
+  async joinBackgroundAnalysis(): Promise<boolean> {
+    const run = this.backgroundRun;
+    if (run === undefined) return false;
+    return await run;
+  }
+
+  /** Turns the invisible auto pass into the user's visible cleanup request,
+   * retaining its completed work while enabling real progress messages. */
+  async promoteAndJoinBackgroundAnalysis(): Promise<boolean> {
+    const run = this.backgroundRun;
+    if (run === undefined) return false;
+    this.backgroundPromoted = true;
+    this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned: 0, total: 0 });
+    return await run;
   }
 
   handleCancel(): void {

@@ -315,6 +315,75 @@ test('resolver verification is retained as separate evidence and can report auth
   assert.equal(result.resolverVerification.code, 'ERESOLVE');
 });
 
+test('exact metadata and resolver verification start concurrently', async () => {
+  const pkgId = 'node_modules/pkg';
+  let releaseMetadata;
+  let releaseResolver;
+  let markMetadataStarted;
+  let resolverDidStart = false;
+  const metadataStarted = new Promise((resolve) => { markMetadataStarted = resolve; });
+  const metadataGate = new Promise((resolve) => { releaseMetadata = resolve; });
+  const resolverGate = new Promise((resolve) => { releaseResolver = resolve; });
+
+  const pending = analyzeCompatibility({
+    graph: graph([[pkgId, node('pkg', '1.0.0', { direct: true, path: pkgId })]]),
+    proposal: proposal(change('pkg', '1.0.0', '1.1.0')),
+    metadataProvider: {
+      async getPackageVersionMetadata() {
+        markMetadataStarted();
+        await metadataGate;
+        return emptyMetadata('pkg', '1.1.0');
+      },
+    },
+    resolverVerifier: {
+      async verify() {
+        resolverDidStart = true;
+        await resolverGate;
+        return {
+          status: 'compatible', packageManager: 'npm', packageManagerVersion: '10.0.0',
+          code: 'RESOLVED', explanation: 'resolved',
+        };
+      },
+    },
+    policy: defaultPolicy,
+  });
+
+  await metadataStarted;
+  await Promise.resolve();
+  const overlapped = resolverDidStart;
+  releaseMetadata();
+  releaseResolver();
+  const result = await pending;
+  assert.equal(overlapped, true, 'resolver starts before metadata settles');
+  assert.equal(result.status, 'compatible');
+});
+
+test('bulk target metadata uses bounded registry concurrency', async () => {
+  const changes = Array.from({ length: 25 }, (_, index) => change(`pkg-${index}`, '1.0.0', '1.1.0'));
+  let inFlight = 0;
+  let peak = 0;
+  const result = await analyzeCompatibility({
+    graph: graph(changes.map((entry) => [
+      `node_modules/${entry.packageName}`,
+      node(entry.packageName, entry.currentVersion, { direct: true, path: `node_modules/${entry.packageName}` }),
+    ])),
+    proposal: { requested: changes[0], changes },
+    metadataProvider: {
+      async getPackageVersionMetadata(name, version) {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        inFlight -= 1;
+        return emptyMetadata(name, version);
+      },
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.equal(result.status, 'compatible');
+  assert.equal(peak, 8);
+});
+
 test('cancellation propagates distinctly instead of becoming unknown', async () => {
   const pkgId = 'node_modules/pkg';
   const controller = new AbortController();

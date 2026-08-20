@@ -41,6 +41,7 @@ import { RemoveAnalysisModal } from './components/RemoveAnalysisModal.js';
 import { SummaryCards } from './components/SummaryCards.js';
 import { UpgradeAnalysisModal } from './components/UpgradeAnalysisModal.js';
 import { IconAlertTriangle, IconListChecks, IconRefresh } from './icons.js';
+import type { RemovalImpactState } from './removalImpactState.js';
 import { vscode } from './vscodeApi.js';
 
 function formatTime(iso: string): string {
@@ -189,6 +190,10 @@ export function App(): ReactElement {
   >({ phase: 'idle' });
   const [cleanupFindings, setCleanupFindings] = useState<DependencyFinding[]>([]);
   const [cleanupError, setCleanupError] = useState<string | null>(null);
+  // The one shared removal-impact preview state — see removalImpactState.ts's
+  // own doc for why the bulk Review step and the single-package "Analyze
+  // removal" card share it rather than each keeping their own copy.
+  const [removalImpact, setRemovalImpact] = useState<RemovalImpactState>({ phase: 'idle' });
   const cleanupShouldSelectFilter = useRef(false);
   const [minuteClock, setMinuteClock] = useState(() => Date.now());
 
@@ -400,6 +405,27 @@ export function App(): ReactElement {
         return;
       }
 
+      if (incoming.status === 'removal-impact-analyzing') {
+        setRemovalImpact({ phase: 'analyzing', scanned: incoming.scanned, total: incoming.total });
+        return;
+      }
+
+      if (incoming.status === 'removal-impact-result') {
+        setRemovalImpact({
+          phase: 'done',
+          assessments: new Map(
+            incoming.assessments.map((entry) => [entry.packageName, { assessment: entry.assessment, usageId: entry.usageId }])
+          ),
+          generatedAt: incoming.generatedAt,
+        });
+        return;
+      }
+
+      if (incoming.status === 'removal-impact-error') {
+        setRemovalImpact({ phase: 'error', message: incoming.error.message });
+        return;
+      }
+
       // Any other message is a fresh snapshot that supersedes whatever
       // optimistic upgrade state was showing.
       activeUpgradeRef.current = null;
@@ -430,6 +456,7 @@ export function App(): ReactElement {
       setCleanupFindings([]);
       setCleanupError(null);
       cleanupShouldSelectFilter.current = false;
+      setRemovalImpact({ phase: 'idle' });
       setCleanupState((previous) => previous.phase === 'analyzing' ? previous : { phase: 'idle' });
       setScanProgress(undefined);
       if (
@@ -705,6 +732,21 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'cancel-usage-analysis' });
   }, []);
 
+  // Read-only removal-impact preview — shared by the bulk Review step and
+  // the single-package "Analyze removal" card (see removalImpactState.ts).
+  // Never gates the actual removal transaction; bulk-remove/confirm-remove
+  // still re-validates everything fresh regardless of what this shows.
+  const requestAnalyzeRemovalImpact = useCallback((packageNames: readonly string[]) => {
+    if (packageNames.length === 0) return;
+    setRemovalImpact({ phase: 'analyzing', scanned: 0, total: 0 });
+    vscode.postMessage({ type: 'analyze-removal-impact', packages: [...packageNames] });
+  }, []);
+
+  const requestCancelRemovalImpact = useCallback(() => {
+    vscode.postMessage({ type: 'cancel-usage-analysis' });
+    setRemovalImpact({ phase: 'idle' });
+  }, []);
+
   // No message yet is the same user-visible state as an explicit loading one.
   const loading = message === undefined || message.status === 'loading';
   const data = message !== undefined && 'data' in message ? message.data : undefined;
@@ -890,7 +932,13 @@ export function App(): ReactElement {
           onBulkUpgrade={requestBulkUpgrade}
           onBulkRemove={requestBulkRemove}
           onAnalyzeRemediations={requestAnalyzeRemediations}
-          onClose={() => setBulkActionsOpen(false)}
+          removalImpact={removalImpact}
+          onAnalyzeRemovalImpact={requestAnalyzeRemovalImpact}
+          onCancelRemovalImpact={requestCancelRemovalImpact}
+          onClose={() => {
+            if (removalImpact.phase === 'analyzing') requestCancelRemovalImpact();
+            setBulkActionsOpen(false);
+          }}
         />
       ) : null}
 

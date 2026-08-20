@@ -194,6 +194,11 @@ button {
   cursor: default;
 }
 
+.button--small {
+  padding: 0.15rem 0.55rem;
+  font-size: 0.82em;
+}
+
 .button--secondary {
   color: var(--vscode-foreground);
   background: transparent;
@@ -2111,6 +2116,67 @@ button {
 .review-list__tags {
   color: var(--vscode-descriptionForeground);
   font-size: 0.82em;
+}
+
+/*
+ * Per-row removal-impact badge, from the read-only analyze-removal-impact
+ * preview — see removalImpactState.ts. Color communicates the assessment
+ * status by *category* the same way severity/compatibility badges do
+ * elsewhere; the text label is never omitted, so status is never carried by
+ * color alone.
+ */
+.review-list__impact {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-top: 0.15rem;
+}
+
+.review-list__impact-badge {
+  display: inline-block;
+  width: fit-content;
+  padding: 0.02rem 0.35rem;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  font-size: 0.68em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.review-list__impact[data-status='low-risk'] .review-list__impact-badge {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.review-list__impact[data-status='review'] .review-list__impact-badge {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.review-list__impact[data-status='blocked'] .review-list__impact-badge {
+  color: var(--vscode-editorError-foreground);
+}
+
+.review-list__impact[data-status='unknown'] .review-list__impact-badge {
+  color: var(--vscode-descriptionForeground);
+}
+
+.review-list__impact-evidence {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.82em;
+}
+
+.review-controls__impact-progress {
+  margin: 0;
+}
+
+.review-controls__impact-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
 }
 
 .analysis-card--full {

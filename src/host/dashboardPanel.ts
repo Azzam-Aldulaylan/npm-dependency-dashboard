@@ -194,6 +194,7 @@ export class DashboardPanel {
       isDisposed: () => this.disposed,
       reloadFinalState: () => this.reloadAndScan(),
       flushDeferredChanges: () => this.fileChangeCoordinator.flushDeferred(),
+      performanceEnabled: this.performanceEnabled,
     });
     this.usageCoordinator = new UsageAnalysisCoordinator({
       sink: this.sink,
@@ -269,10 +270,12 @@ export class DashboardPanel {
 
   private async handle(message: WebviewToHostMessage): Promise<void> {
     if (message.type === 'upgrade') {
+      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeUpgrade(message);
       return;
     }
     if (message.type === 'bulk-upgrade') {
+      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeBulkUpgrade(message);
       return;
     }
@@ -289,6 +292,7 @@ export class DashboardPanel {
       return;
     }
     if (message.type === 'bulk-remove') {
+      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeBulkRemove(message);
       return;
     }
@@ -316,6 +320,7 @@ export class DashboardPanel {
         });
         return;
       }
+      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeRemediation(message);
       return;
     }
@@ -327,6 +332,7 @@ export class DashboardPanel {
         });
         return;
       }
+      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeRemediations(message);
       return;
     }
@@ -345,6 +351,7 @@ export class DashboardPanel {
         });
         return;
       }
+      await this.usageCoordinator.joinBackgroundAnalysis();
       await this.usageCoordinator.handleWhereUsed(message);
       return;
     }
@@ -357,6 +364,7 @@ export class DashboardPanel {
         });
         return;
       }
+      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.usageCoordinator.handleWhereUsed(message, true);
       return;
     }
@@ -368,7 +376,8 @@ export class DashboardPanel {
         });
         return;
       }
-      await this.usageCoordinator.handleAnalyzeCleanup();
+      const joinedFreshScan = await this.usageCoordinator.promoteAndJoinBackgroundAnalysis();
+      if (!joinedFreshScan) await this.usageCoordinator.handleAnalyzeCleanup();
       return;
     }
     if (message.type === 'cancel-usage-analysis') {

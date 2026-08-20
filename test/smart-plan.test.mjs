@@ -153,6 +153,7 @@ test('coordinates multiple related direct dependency upgrades', async () => {
     'plugin@3.0.0': metadata('plugin', '3.0.0', { react: '^19' }),
   });
   const initial = await initialAnalysis(inputGraph, requested, provider);
+  let resolverCalls = 0;
 
   const result = await planSmartUpgrade({
     graph: inputGraph,
@@ -166,6 +167,15 @@ test('coordinates multiple related direct dependency upgrades', async () => {
       plugin: { versions: ['3.0.0'], complete: true },
     }),
     metadataProvider: provider,
+    resolverVerifier: {
+      async verify() {
+        resolverCalls += 1;
+        return {
+          status: 'compatible', packageManager: 'npm', packageManagerVersion: '10.0.0',
+          code: 'RESOLVED', explanation: 'resolved',
+        };
+      },
+    },
     policy: defaultPolicy,
   });
 
@@ -175,6 +185,7 @@ test('coordinates multiple related direct dependency upgrades', async () => {
     ['plugin', 'react', 'renderer']
   );
   assert.equal(result.statistics.compatibilityChecks, 3);
+  assert.equal(resolverCalls, 1, 'only the statically viable final state invokes the package manager');
 });
 
 test('reports impossible only after exhaustive complete candidates still conflict', async () => {

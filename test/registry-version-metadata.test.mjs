@@ -70,6 +70,52 @@ test('scoped package names are encoded and use scoped registry routing lazily', 
   assert.deepEqual(calls, ['https://scope.registry.example/@scope%2fplugin/1.2.0']);
 });
 
+test('one preflight provider reuses pending and settled exact-version metadata', async () => {
+  let calls = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const provider = new RegistryPackageMetadataProvider(
+    {
+      async get() {
+        calls += 1;
+        await gate;
+        return response({ name: 'pkg', version: '2.0.0' });
+      },
+    },
+    new MemoryEtagStore(),
+    { url: 'https://registry.example', source: 'default', scoped: {} }
+  );
+
+  const first = provider.getPackageVersionMetadata('pkg', '2.0.0');
+  const concurrent = provider.getPackageVersionMetadata('pkg', '2.0.0');
+  release();
+  assert.deepEqual(await first, await concurrent);
+  await provider.getPackageVersionMetadata('pkg', '2.0.0');
+  assert.equal(calls, 1);
+});
+
+test('one preflight provider retries failed exact-version metadata', async () => {
+  let calls = 0;
+  const provider = new RegistryPackageMetadataProvider(
+    {
+      async get() {
+        calls += 1;
+        if (calls === 1) throw new Error('transient registry failure');
+        return response({ name: 'pkg', version: '2.0.0' });
+      },
+    },
+    new MemoryEtagStore(),
+    { url: 'https://registry.example', source: 'default', scoped: {} }
+  );
+
+  await assert.rejects(
+    () => provider.getPackageVersionMetadata('pkg', '2.0.0'),
+    /transient registry failure/
+  );
+  await provider.getPackageVersionMetadata('pkg', '2.0.0');
+  assert.equal(calls, 2);
+});
+
 test('registry metadata with a mismatched exact version is rejected', async () => {
   const client = {
     async get() {

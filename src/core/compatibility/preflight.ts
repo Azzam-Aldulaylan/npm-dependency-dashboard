@@ -1,5 +1,6 @@
 import semver from 'semver';
 
+import { DEFAULT_CONCURRENCY, runPool } from '../registry/pool.js';
 import type { DependencyGraph, DependencyNode } from '../types.js';
 import { isSafeNpmPackageName, isSafeSemverVersion } from '../upgrade/plan.js';
 import type { PackageVersionMetadata } from '../registry/versions.js';
@@ -314,30 +315,53 @@ async function loadTargetMetadata(
   provider: PackageMetadataProvider | undefined,
   signal: AbortSignal | undefined
 ): Promise<Map<string, PackageVersionMetadata | Error>> {
-  const entries = await Promise.all(
-    [...changes]
-      .sort((a, b) => a.packageName.localeCompare(b.packageName))
-      .map(async (change): Promise<[string, PackageVersionMetadata | Error]> => {
-        throwIfCancelled(signal);
-        if (provider === undefined) return [change.packageName, new Error('metadata provider unavailable')];
-        try {
-          const metadata = await provider.getPackageVersionMetadata(
-            change.packageName,
-            change.targetVersion,
-            signal
-          );
-          throwIfCancelled(signal);
-          return [change.packageName, metadata];
-        } catch (cause) {
-          if (cancellationCause(cause, signal)) throw new CompatibilityCancelledError();
-          return [
-            change.packageName,
-            cause instanceof Error ? cause : new Error('metadata provider failed'),
-          ];
-        }
-      })
+  const ordered = [...changes].sort((a, b) => a.packageName.localeCompare(b.packageName));
+  const settled = await runPool(
+    ordered,
+    async (change, poolSignal): Promise<PackageVersionMetadata> => {
+      throwIfCancelled(signal);
+      if (provider === undefined) throw new Error('metadata provider unavailable');
+      return await provider.getPackageVersionMetadata(
+        change.packageName,
+        change.targetVersion,
+        poolSignal
+      );
+    },
+    {
+      limit: DEFAULT_CONCURRENCY,
+      ...(signal === undefined ? {} : { signal }),
+    }
   );
-  return new Map(entries);
+  throwIfCancelled(signal);
+  return new Map(
+    ordered.map((change, index) => {
+      const result = settled[index];
+      return [
+        change.packageName,
+        result?.ok === true ? result.value : (result?.error ?? new Error('metadata provider failed')),
+      ];
+    })
+  );
+}
+
+async function runResolverVerification(
+  options: AnalyzeCompatibilityOptions
+): Promise<ResolverVerification | undefined> {
+  if (options.resolverVerifier === undefined) return undefined;
+  try {
+    const result = await options.resolverVerifier.verify(options.proposal, options.signal);
+    throwIfCancelled(options.signal);
+    return result;
+  } catch (cause) {
+    if (cancellationCause(cause, options.signal)) throw new CompatibilityCancelledError();
+    return {
+      status: 'unknown',
+      packageManager: graphPackageManager(options.graph),
+      packageManagerVersion: null,
+      code: 'RESOLVER_UNAVAILABLE',
+      explanation: 'Package-manager resolution verification was unavailable.',
+    };
+  }
 }
 
 /**
@@ -407,11 +431,15 @@ export async function analyzeCompatibility(
 
   // A proposed package can introduce or change its own peer requirements, so
   // inspect the exact target manifest rather than reusing installed metadata.
-  const metadataByName = await loadTargetMetadata(
-    options.proposal.changes,
-    options.metadataProvider,
-    options.signal
-  );
+  // Exact target metadata and the isolated package-manager resolver depend
+  // only on the already-validated graph/proposal. Run them together so a
+  // registry/proxy round trip is not placed in front of an already-expensive
+  // resolver subprocess. Promise.all attaches cancellation/error handlers to
+  // both branches even when one settles first.
+  const [metadataByName, resolverVerification] = await Promise.all([
+    loadTargetMetadata(options.proposal.changes, options.metadataProvider, options.signal),
+    runResolverVerification(options),
+  ]);
   for (const change of [...options.proposal.changes].sort((a, b) => a.packageName.localeCompare(b.packageName))) {
     throwIfCancelled(options.signal);
     const metadata = metadataByName.get(change.packageName);
@@ -459,24 +487,6 @@ export async function analyzeCompatibility(
   }
 
   throwIfCancelled(options.signal);
-  let resolverVerification: ResolverVerification | undefined;
-  if (options.resolverVerifier !== undefined) {
-    try {
-      resolverVerification = await options.resolverVerifier.verify(options.proposal, options.signal);
-      throwIfCancelled(options.signal);
-    } catch (cause) {
-      if (cancellationCause(cause, options.signal)) throw new CompatibilityCancelledError();
-      resolverVerification = {
-        status: 'unknown',
-        packageManager: graphPackageManager(options.graph),
-        packageManagerVersion: null,
-        code: 'RESOLVER_UNAVAILABLE',
-        explanation: 'Package-manager resolution verification was unavailable.',
-      };
-    }
-  }
-
-
   if (findings.some((finding) => finding.status === 'unknown')) completeness = 'partial';
 
   const result: CompatibilityAnalysis = {

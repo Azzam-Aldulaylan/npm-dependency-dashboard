@@ -36,6 +36,7 @@ import * as vscode from 'vscode';
 
 import { buildDependencyGraph } from '../core/lockfile/build.js';
 import { runSequentialBatch } from '../core/async/sequentialBatch.js';
+import { SharedPromise } from '../core/async/sharedPromise.js';
 import { directNodes } from '../core/lockfile/parse.js';
 import { parseManifest } from '../core/manifest/parse.js';
 import { analyzeCompatibility, CompatibilityCancelledError } from '../core/compatibility/preflight.js';
@@ -44,6 +45,8 @@ import { RegistryPackageMetadataProvider, registryForPackage } from '../core/com
 import type { HttpClient } from '../core/registry/http.js';
 import { fetchPackument } from '../core/registry/versions.js';
 import type { EtagStore } from '../core/registry/versions.js';
+import type { PerformanceRecorder } from '../core/performance/measurement.js';
+import { createPerformanceSession } from '../core/performance/measurement.js';
 import { planSmartUpgrade } from '../core/upgrade/smartPlan.js';
 import { buildStagedManifest, buildStagedManifestForRemoval } from '../core/upgrade/stagedManifest.js';
 import { requiresManifestReconciliation } from '../core/upgrade/plan.js';
@@ -62,7 +65,7 @@ import { resolveInstalledPnpmInvocation } from './pnpmResolver.js';
 import { combineSecurityOutcomes } from './securityOutcomeBatch.js';
 import type { DiscoveredProject, ResolvedProject } from './projectResolution.js';
 import { loadProject } from './projectResolution.js';
-import { IsolatedResolverVerifier, probePackageManagerVersion } from './resolverVerifier.js';
+import { IsolatedResolverVerifier } from './resolverVerifier.js';
 import { resolveAnalysisForExecution } from './upgradeAnalysisLookup.js';
 import type { AnalysisLookupRejection } from './upgradeAnalysisLookup.js';
 import { buildUpgradeAnalysisPresentation } from './upgradeAnalysisPresentation.js';
@@ -121,6 +124,7 @@ export interface UpgradeAssistantCoordinatorOptions {
   isDisposed(): boolean;
   reloadFinalState(): Promise<void>;
   flushDeferredChanges(): Promise<void>;
+  performanceEnabled?(): boolean;
   /** Test seam; production always uses the host-owned project loader. */
   loadProject?: (candidate: DiscoveredProject) => Promise<ResolvedProject>;
 }
@@ -195,6 +199,14 @@ interface StoredRemoval {
   ignoreScripts: boolean;
   verificationScripts: VerificationScript[];
   expiresAt: number;
+}
+
+interface SharedRemediationWork {
+  performance?: PerformanceRecorder;
+  prepared: SharedPromise<{
+    materialized: Awaited<ReturnType<IsolatedResolverVerifier['materializeResolvedGraph']>>;
+    advisoriesByName: ReturnType<typeof advisoriesByNameFromRows>;
+  }>;
 }
 
 export class UpgradeAssistantCoordinator {
@@ -303,11 +315,18 @@ export class UpgradeAssistantCoordinator {
     // return, a thrown error) since only a stored, still-open analysis is
     // allowed to keep holding it.
     let succeeded = false;
+    const performance = createPerformanceSession(
+      'Dependency Dashboard upgrade analysis',
+      this.options.performanceEnabled?.() ?? false
+    );
+    performance.setMetadata('changes', eligibilities.length);
     try {
       const selected = this.options.getSelectedProject();
       if (selected === undefined) return;
       const source = controller.upgradeSource;
+      const endProjectLoad = performance.start('action project reload');
       const preflightProject = await this.projectLoader(selected);
+      endProjectLoad();
       if (
         preflightProject.root !== controller.root ||
         preflightProject.manifestText !== source.manifestText ||
@@ -339,6 +358,7 @@ export class UpgradeAssistantCoordinator {
           classification: item.classification,
         })),
       };
+      const endGraph = performance.start('action graph rebuild');
       const manifest = parseManifest(preflightProject.manifestText);
       const graph = buildDependencyGraph({
         root: preflightProject.root,
@@ -347,6 +367,8 @@ export class UpgradeAssistantCoordinator {
         packageManager: preflightProject.packageManager,
         importerId: preflightProject.importerId,
       });
+      endGraph({ nodes: graph.nodes.size });
+      const endToolchain = performance.start('package-manager resolution');
       const npmResolution = resolveNpmInvocation(createNodeNpmResolverDeps(controller.root));
       const packageManagerInvocation =
         !npmResolution.ok
@@ -355,12 +377,14 @@ export class UpgradeAssistantCoordinator {
             ? {
                 executable: npmResolution.invocation.node,
                 prefixArgs: [npmResolution.invocation.npmCliJs],
+                version: npmResolution.invocation.version,
               }
             : resolveInstalledPnpmInvocation(npmResolution.invocation, controller.root);
+      endToolchain({ available: packageManagerInvocation !== null });
       const resolverVerifier = packageManagerInvocation !== null
         ? new IsolatedResolverVerifier({
             packageManager: preflightProject.packageManager,
-            packageManagerVersion: probePackageManagerVersion(packageManagerInvocation, controller.root),
+            packageManagerVersion: packageManagerInvocation.version ?? null,
             invocation: packageManagerInvocation,
             manifestText: preflightProject.manifestText,
             ...(preflightProject.lockfileText === null || preflightProject.lockfileName === null
@@ -382,6 +406,7 @@ export class UpgradeAssistantCoordinator {
       );
 
       this.options.sink.postMessage({ status: 'upgrade-analyzing', package: eligibility.packageName, phase: 'compatibility' });
+      const endCompatibility = performance.start('compatibility preflight');
       const analysis = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
@@ -408,6 +433,7 @@ export class UpgradeAssistantCoordinator {
           }
         }
       );
+      endCompatibility({ status: analysis.status });
 
       let smartPlan: UpgradeAnalysisSmartPlan | null = null;
       let smartPlanProposal: UpgradeProposal | null = null;
@@ -423,6 +449,7 @@ export class UpgradeAssistantCoordinator {
           }];
         });
         this.options.sink.postMessage({ status: 'upgrade-analyzing', package: eligibility.packageName, phase: 'smart-plan' });
+        const endSmartPlan = performance.start('smart-plan search');
         const planned = await planSmartUpgrade({
           graph,
           initialAnalysis: analysis,
@@ -443,6 +470,7 @@ export class UpgradeAssistantCoordinator {
           policy: preflightProject.peerPolicy,
           ...(resolverVerifier === undefined ? {} : { resolverVerifier }),
         });
+        endSmartPlan({ outcome: planned.outcome, checks: planned.statistics.compatibilityChecks });
         // A conflict with no coordinated plan is not an error here — the
         // analysis is still shown, honestly, as a conflict with no smart-plan
         // option; the modal offers only Close (see spec's conflict-action
@@ -480,7 +508,9 @@ export class UpgradeAssistantCoordinator {
         let after: Parameters<typeof evaluateSecurityOutcome>[0]['after'] = 'no-resolver-evidence';
         if (analysis.status !== 'conflict' && resolverVerifier !== undefined) {
           try {
+            const endSecurityResolver = performance.start('security graph materialization');
             const materialized = await resolverVerifier.materializeResolvedGraph(proposal);
+            endSecurityResolver({ resolved: materialized.ok });
             if (materialized.ok) {
               after = { graph: materialized.graph, advisoriesByName: advisoriesByNameFromRows(rows) };
             }
@@ -574,6 +604,7 @@ export class UpgradeAssistantCoordinator {
       if (!succeeded) this.session.release(eligibility.packageName);
       if (this.pendingAnalyzePackage === eligibility.packageName) this.pendingAnalyzePackage = null;
       if (this.cancelRequestedFor === eligibility.packageName) this.cancelRequestedFor = null;
+      performance.finish({ completed: succeeded });
     }
   }
 
@@ -797,10 +828,15 @@ export class UpgradeAssistantCoordinator {
     }
     const abort = new AbortController();
     this.activeRemediationAbort = abort;
+    const performance = createPerformanceSession(
+      'Dependency Dashboard remediation analysis',
+      this.options.performanceEnabled?.() ?? false
+    );
     try {
-      await this.analyzeRemediation(message, abort.signal);
+      await this.analyzeRemediation(message, abort.signal, { performance, prepared: new SharedPromise() });
     } finally {
       if (this.activeRemediationAbort === abort) this.activeRemediationAbort = undefined;
+      performance.finish({ packages: 1 });
     }
   }
 
@@ -815,6 +851,16 @@ export class UpgradeAssistantCoordinator {
     const abort = new AbortController();
     this.activeRemediationAbort = abort;
     const total = message.packages.length;
+    const performance = createPerformanceSession(
+      'Dependency Dashboard bulk remediation analysis',
+      this.options.performanceEnabled?.() ?? false
+    );
+    // A lockfile-free remediation resolve depends on the project's declared
+    // ranges, not on which vulnerable row will later be evaluated against the
+    // resulting graph. Share that immutable fresh resolve across this one
+    // logical batch instead of reloading the project, probing npm/pnpm, and
+    // running an identical package-manager subprocess once per row.
+    const sharedWork: SharedRemediationWork = { performance, prepared: new SharedPromise() };
     try {
       const result = await runSequentialBatch({
         items: message.packages,
@@ -822,7 +868,7 @@ export class UpgradeAssistantCoordinator {
         onStart: (packageName, completed) => {
           this.options.sink.postMessage({ status: 'remediation-batch-progress', completed, total, current: packageName });
         },
-        run: async (packageName, signal) => this.analyzeRemediation({ package: packageName }, signal),
+        run: async (packageName, signal) => this.analyzeRemediation({ package: packageName }, signal, sharedWork),
         onError: (packageName, cause) => {
           if (!this.options.isDisposed()) {
             this.options.sink.postMessage({
@@ -841,6 +887,7 @@ export class UpgradeAssistantCoordinator {
       });
     } finally {
       if (this.activeRemediationAbort === abort) this.activeRemediationAbort = undefined;
+      performance.finish({ packages: total });
     }
   }
 
@@ -848,7 +895,11 @@ export class UpgradeAssistantCoordinator {
     this.activeRemediationAbort?.abort();
   }
 
-  private async analyzeRemediation(message: RemediationMessage, signal: AbortSignal): Promise<void> {
+  private async analyzeRemediation(
+    message: RemediationMessage,
+    signal: AbortSignal,
+    sharedWork: SharedRemediationWork
+  ): Promise<void> {
     const controller = await this.options.ensureController();
     if (controller === undefined) return;
 
@@ -870,45 +921,6 @@ export class UpgradeAssistantCoordinator {
     this.options.sink.postMessage({ status: 'remediation-analyzing', package: row.name });
 
     try {
-      const selected = this.options.getSelectedProject();
-      if (selected === undefined) return;
-      const preflightProject = await this.projectLoader(selected);
-      if (preflightProject.root !== controller.root) {
-        this.options.sink.postMessage({
-          status: 'remediation-error',
-          package: row.name,
-          error: { code: 'STALE_SOURCE', message: 'Project dependency files changed. Refresh and try again.' },
-        });
-        return;
-      }
-
-      const npmResolution = resolveNpmInvocation(createNodeNpmResolverDeps(controller.root));
-      const packageManagerInvocation =
-        !npmResolution.ok
-          ? null
-          : preflightProject.packageManager === 'npm'
-            ? { executable: npmResolution.invocation.node, prefixArgs: [npmResolution.invocation.npmCliJs] }
-            : resolveInstalledPnpmInvocation(npmResolution.invocation, controller.root);
-      if (packageManagerInvocation === null) {
-        this.options.sink.postMessage({
-          status: 'remediation-error',
-          package: row.name,
-          error: { code: 'RESOLVER_UNAVAILABLE', message: 'The package manager could not be located to run this check.' },
-        });
-        return;
-      }
-
-      const resolverVerifier = new IsolatedResolverVerifier({
-        packageManager: preflightProject.packageManager,
-        packageManagerVersion: probePackageManagerVersion(packageManagerInvocation, controller.root),
-        invocation: packageManagerInvocation,
-        manifestText: preflightProject.manifestText,
-        // No `lockfile` — a fresh, lockfile-free resolve is the one thing
-        // this analysis exists to try.
-        registry: preflightProject.registry,
-        policy: preflightProject.peerPolicy,
-      });
-
       const noOpProposal: UpgradeProposal = {
         requested: {
           packageName: row.name,
@@ -918,27 +930,11 @@ export class UpgradeAssistantCoordinator {
         },
         changes: [],
       };
-
-      const materialized = await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: `Checking remediation for ${row.name}`,
-          cancellable: true,
-        },
-        async (_progress, token) => {
-          const abort = new AbortController();
-          const cancellation = token.onCancellationRequested(() => abort.abort());
-          const externalCancellation = (): void => abort.abort();
-          signal.addEventListener('abort', externalCancellation, { once: true });
-          if (signal.aborted) abort.abort();
-          try {
-            return await resolverVerifier.materializeResolvedGraph(noOpProposal, abort.signal);
-          } finally {
-            cancellation.dispose();
-            signal.removeEventListener('abort', externalCancellation);
-          }
-        }
+      const prepared = await sharedWork.prepared.get(() =>
+        this.prepareRemediationWork(controller, noOpProposal, row.name, signal, sharedWork.performance)
       );
+      if (signal.aborted) return;
+      const { materialized } = prepared;
 
       if (this.options.isDisposed()) return;
 
@@ -969,7 +965,7 @@ export class UpgradeAssistantCoordinator {
         before: row.advisories,
         targetVersion: currentVersion,
         rootPackageName: row.name,
-        after: { graph: materialized.graph, advisoriesByName: advisoriesByNameFromRows(controller.lastResultRows()) },
+        after: { graph: materialized.graph, advisoriesByName: prepared.advisoriesByName },
       });
 
       this.options.sink.postMessage({
@@ -982,6 +978,93 @@ export class UpgradeAssistantCoordinator {
         this.options.sink.postMessage({ status: 'remediation-error', package: row.name, error: toProtocolError(cause) });
       }
     }
+  }
+
+  private async prepareRemediationWork(
+    controller: DashboardController,
+    noOpProposal: UpgradeProposal,
+    packageName: string,
+    signal: AbortSignal,
+    performance?: PerformanceRecorder
+  ): Promise<{
+    materialized: Awaited<ReturnType<IsolatedResolverVerifier['materializeResolvedGraph']>>;
+    advisoriesByName: ReturnType<typeof advisoriesByNameFromRows>;
+  }> {
+    const selected = this.options.getSelectedProject();
+    if (selected === undefined) throw Object.assign(new Error('No project is selected.'), { name: 'NO_PROJECT' });
+    const endProjectLoad = performance?.start('remediation project reload') ?? (() => 0);
+    const preflightProject = await this.projectLoader(selected);
+    endProjectLoad();
+    const source = controller.upgradeSource;
+    if (
+      preflightProject.root !== controller.root ||
+      preflightProject.manifestText !== source.manifestText ||
+      preflightProject.lockfileText !== source.lockfileText ||
+      preflightProject.lockfilePath !== source.lockfilePath ||
+      preflightProject.registry !== source.registry ||
+      preflightProject.packageManager !== source.packageManager ||
+      preflightProject.importerId !== source.importerId
+    ) {
+      throw Object.assign(new Error('Project dependency files changed. Refresh and try again.'), {
+        name: 'STALE_SOURCE',
+      });
+    }
+
+    const endToolchain = performance?.start('remediation package-manager resolution') ?? (() => 0);
+    const npmResolution = resolveNpmInvocation(createNodeNpmResolverDeps(controller.root));
+    const packageManagerInvocation =
+      !npmResolution.ok
+        ? null
+        : preflightProject.packageManager === 'npm'
+          ? {
+              executable: npmResolution.invocation.node,
+              prefixArgs: [npmResolution.invocation.npmCliJs],
+              version: npmResolution.invocation.version,
+            }
+          : resolveInstalledPnpmInvocation(npmResolution.invocation, controller.root);
+    endToolchain({ available: packageManagerInvocation !== null });
+    if (packageManagerInvocation === null) {
+      throw Object.assign(new Error('The package manager could not be located to run this check.'), {
+        name: 'RESOLVER_UNAVAILABLE',
+      });
+    }
+
+    const resolverVerifier = new IsolatedResolverVerifier({
+      packageManager: preflightProject.packageManager,
+      packageManagerVersion: packageManagerInvocation.version ?? null,
+      invocation: packageManagerInvocation,
+      manifestText: preflightProject.manifestText,
+      // No lockfile: this intentionally computes one fresh graph from the
+      // unchanged declared ranges for every row in this logical batch.
+      registry: preflightProject.registry,
+      policy: preflightProject.peerPolicy,
+    });
+    const endMaterialization = performance?.start('remediation graph materialization') ?? (() => 0);
+    const materialized = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `Checking remediation for ${packageName}`,
+        cancellable: true,
+      },
+      async (_progress, token) => {
+        const abort = new AbortController();
+        const cancellation = token.onCancellationRequested(() => abort.abort());
+        const externalCancellation = (): void => abort.abort();
+        signal.addEventListener('abort', externalCancellation, { once: true });
+        if (signal.aborted) abort.abort();
+        try {
+          return await resolverVerifier.materializeResolvedGraph(noOpProposal, abort.signal);
+        } finally {
+          cancellation.dispose();
+          signal.removeEventListener('abort', externalCancellation);
+        }
+      }
+    );
+    endMaterialization({ resolved: materialized.ok });
+    return {
+      materialized,
+      advisoriesByName: advisoriesByNameFromRows(controller.lastResultRows()),
+    };
   }
 
   /**

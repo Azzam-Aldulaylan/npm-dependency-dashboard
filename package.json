@@ -104,6 +104,7 @@
     "pretest:live": "npm run build:core",
     "test:live": "node --test scripts/live-checks/advisories-bulk-live.mjs",
     "benchmark:performance": "npm run pretest && npm run build:core && node scripts/performance/benchmark.mjs",
+    "benchmark:actions": "npm run pretest && npm run build:core && node scripts/performance/action-benchmark.mjs",
     "vscode:prepublish": "node esbuild.mjs --production",
     "package": "vsce package",
     "marketplace:publish": "vsce publish"

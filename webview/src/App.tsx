@@ -35,6 +35,7 @@ import { DependencyTypeFilter } from './components/DependencyTypeFilter.js';
 import { HygieneFilter } from './components/HygieneFilter.js';
 import { ManageDependenciesModal } from './components/ManageDependenciesModal.js';
 import type { BulkUpgradeCandidate } from './components/ManageDependenciesModal.js';
+import { ManageDependencyModal } from './components/ManageDependencyModal.js';
 import { Pagination } from './components/Pagination.js';
 import { PackageTable } from './components/PackageTable.js';
 import { RemoveAnalysisModal } from './components/RemoveAnalysisModal.js';
@@ -173,6 +174,12 @@ export function App(): ReactElement {
   // for, and its own on-demand usage-analysis state per package — see
   // DependencyDetailsModal.tsx. Never a fact from the host's own scan.
   const [detailsPackage, setDetailsPackage] = useState<string | null>(null);
+  // The row this webview session currently has "Manage dependency" open
+  // for — see ManageDependencyModal.tsx. Mutually exclusive with
+  // detailsPackage/bulkActionsOpen in practice (only one modal opens at a
+  // time from the table), but nothing here enforces that beyond each open
+  // handler implicitly replacing whichever modal state it sets.
+  const [manageRow, setManageRow] = useState<string | null>(null);
   const [usageByPackage, setUsageByPackage] = useState<ReadonlyMap<string, UsageRequestState>>(() => new Map());
   // Read inside the auto-scan effect below without making it a dependency —
   // the effect must only re-run when `detailsPackage` itself changes (a new
@@ -447,6 +454,7 @@ export function App(): ReactElement {
       setRemediationError(null);
       setRemediationBatch({ phase: 'idle' });
       setBulkActionsOpen(false);
+      setManageRow(null);
       // Usage-analysis results and unused findings are relative to the rows
       // a scan just replaced — never carried forward as if they still
       // describe the current dependency set. `cleanupState` itself is left
@@ -670,6 +678,10 @@ export function App(): ReactElement {
     setDetailsPackage(packageName);
   }, []);
 
+  const openManage = useCallback((packageName: string) => {
+    setManageRow(packageName);
+  }, []);
+
   // Cancels an in-flight scan only when this modal's own request is what's
   // actually running — never a scan something else started (the background
   // auto-cleanup pass, say), since the host's usage coordinator allows only
@@ -746,6 +758,43 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'cancel-usage-analysis' });
     setRemovalImpact({ phase: 'idle' });
   }, []);
+
+  const closeManage = useCallback(() => {
+    if (removalImpact.phase === 'analyzing') requestCancelRemovalImpact();
+    setManageRow(null);
+  }, [removalImpact, requestCancelRemovalImpact]);
+
+  // Closes the Manage modal and hands off to the existing, unchanged
+  // upgrade flow — the identical `{ type: 'upgrade' }` message/preflight/
+  // confirm pipeline the row's own former button already used.
+  const requestReviewUpgradeFromManage = useCallback(
+    (packageName: string, target: string) => {
+      setManageRow(null);
+      requestUpgrade(packageName, target);
+    },
+    [requestUpgrade]
+  );
+
+  // Closes the Manage modal and opens the existing Dependency details
+  // drawer, whose own effect immediately triggers "Where is this used?" —
+  // reusing that full reference browser rather than building a second one.
+  const requestViewReferencesFromManage = useCallback((packageName: string) => {
+    setManageRow(null);
+    setDetailsPackage(packageName);
+  }, []);
+
+  // Single-package removal reuses the identical bulk-remove machinery with
+  // a one-element list — RemoveAnalysisModal already branches on
+  // `packages.length > 1` for its own copy, and the host's
+  // validateBulkRemoveRequest/executeStoredRemoval path is unchanged either
+  // way.
+  const requestRemoveFromManage = useCallback(
+    (packageName: string) => {
+      setManageRow(null);
+      requestBulkRemove([packageName], new Map());
+    },
+    [requestBulkRemove]
+  );
 
   // No message yet is the same user-visible state as an explicit loading one.
   const loading = message === undefined || message.status === 'loading';
@@ -890,12 +939,8 @@ export function App(): ReactElement {
         <Dashboard
           status={message.status}
           data={message.data}
-          activeUpgrade={activeUpgrade}
           activeRemove={activeRemove}
-          onUpgrade={requestUpgrade}
           onOpenAdvisory={requestOpenAdvisory}
-          remediationByPackage={remediationByPackage}
-          onAnalyzeRemediation={requestAnalyzeRemediation}
           search={search}
           onSearchChange={handleSearchChange}
           selectedFilter={selectedFilter}
@@ -919,8 +964,32 @@ export function App(): ReactElement {
           now={minuteClock}
           onOpenBulkActions={() => setBulkActionsOpen(true)}
           onOpenDetails={openDetails}
+          onOpenManage={openManage}
         />
       ) : null}
+
+      {manageRow !== null && data !== undefined
+        ? (() => {
+            const row = data.rows.find((candidate) => candidate.name === manageRow);
+            if (row === undefined) return null;
+            return (
+              <ManageDependencyModal
+                row={row}
+                remediation={remediationByPackage.get(row.name)}
+                removalImpact={removalImpact}
+                actionsDisabled={actionsDisabled}
+                onAnalyzeRemovalImpact={requestAnalyzeRemovalImpact}
+                onCancelRemovalImpact={requestCancelRemovalImpact}
+                onReviewUpgrade={requestReviewUpgradeFromManage}
+                onAnalyzeRemediation={requestAnalyzeRemediation}
+                onRemove={requestRemoveFromManage}
+                onViewReferences={requestViewReferencesFromManage}
+                onOpenAdvisory={requestOpenAdvisory}
+                onClose={closeManage}
+              />
+            );
+          })()
+        : null}
 
       {bulkActionsOpen && data !== undefined ? (
         <ManageDependenciesModal
@@ -995,12 +1064,8 @@ export function App(): ReactElement {
 function Dashboard({
   status,
   data,
-  activeUpgrade,
   activeRemove,
-  onUpgrade,
   onOpenAdvisory,
-  remediationByPackage,
-  onAnalyzeRemediation,
   search,
   onSearchChange,
   selectedFilter,
@@ -1024,16 +1089,13 @@ function Dashboard({
   now,
   onOpenBulkActions,
   onOpenDetails,
+  onOpenManage,
 }: {
   status: 'empty' | 'ready' | 'stale' | 'partial-error';
   data: DashboardData;
-  activeUpgrade: string | null;
-  /** Non-null while a coordinated removal holds the same panel-wide lock an upgrade does — disables Upgrade actions the same way activeUpgrade does. */
+  /** Non-null while a coordinated removal holds the panel-wide lock — disables the bulk "Manage dependencies" entry point the same way a stale scan does. */
   activeRemove: string | null;
-  onUpgrade: (packageName: string, target: string) => void;
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
-  remediationByPackage: ReadonlyMap<string, TransitiveRemediationUiState>;
-  onAnalyzeRemediation: (packageName: string) => void;
   search: string;
   onSearchChange: (value: string) => void;
   selectedFilter: SummaryFilterId;
@@ -1058,6 +1120,7 @@ function Dashboard({
   now: number;
   onOpenBulkActions: () => void;
   onOpenDetails: (packageName: string) => void;
+  onOpenManage: (packageName: string) => void;
 }): ReactElement {
   const degraded = status === 'partial-error' ? partialErrorText(data) : null;
   // A UX nicety only — the host independently rejects any upgrade request
@@ -1204,16 +1267,12 @@ function Dashboard({
             <>
               <PackageTable
                 rows={pageResult.pageRows}
-                activeUpgrade={activeUpgrade}
-                onUpgrade={onUpgrade}
                 onOpenAdvisory={onOpenAdvisory}
-                remediationByPackage={remediationByPackage}
-                onAnalyzeRemediation={onAnalyzeRemediation}
-                upgradesDisabled={upgradesDisabled}
                 sortState={sortState}
                 onSort={onSort}
                 hygieneFindings={hygieneFindings}
                 onOpenDetails={onOpenDetails}
+                onOpenManage={onOpenManage}
               />
               <Pagination
                 currentPage={pageResult.currentPage}

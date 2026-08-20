@@ -322,3 +322,33 @@ export function IconBroom(props: IconProps): ReactElement {
     </Svg>
   );
 }
+
+/** The Remove dependency action card and destructive Remove buttons. */
+export function IconTrash(props: IconProps): ReactElement {
+  return (
+    <Svg {...props}>
+      <>
+        <path d="M3 4.5h10" />
+        <path d="M6 4.5V3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.5" />
+        <path d="M4.25 4.5 4.9 13a1 1 0 0 0 1 .9h4.2a1 1 0 0 0 1-.9l.65-8.5" />
+        <path d="M6.6 7v4M9.4 7v4" />
+      </>
+    </Svg>
+  );
+}
+
+/** The Manage dependency action, and the modal's package-identity header. */
+export function IconSliders(props: IconProps): ReactElement {
+  return (
+    <Svg {...props}>
+      <>
+        <path d="M2 4.5h5.5M10 4.5h4" />
+        <path d="M2 8h2.5M7 8h7" />
+        <path d="M2 11.5h8M13 11.5h1" />
+        <circle cx="8.5" cy="4.5" r="1.5" />
+        <circle cx="5.5" cy="8" r="1.5" />
+        <circle cx="10.5" cy="11.5" r="1.5" />
+      </>
+    </Svg>
+  );
+}

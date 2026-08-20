@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveActionState, UPGRADE_TOOLTIP } from '../out/host/upgradeAction.js';
+import { hasEligibleTransitiveFix, resolveActionState, UPGRADE_TOOLTIP } from '../out/host/upgradeAction.js';
 
 function row(overrides = {}) {
   return {
@@ -173,4 +173,49 @@ test('an "unknown" remediation result reads as remediation-unknown', () => {
     { phase: 'done', status: 'unknown' }
   );
   assert.equal(state.kind, 'remediation-unknown');
+});
+
+// ------------------------------------------------------- hasEligibleTransitiveFix
+// The Manage dependency modal's own gate for whether to render the "Check
+// transitive fixes" card — must exactly match every case resolveActionState
+// itself would reach a transitive-remediation/remediation-* branch through.
+
+test('a row with a transitive vulnerability and no direct upgrade target is eligible', () => {
+  const r = row({ current: '1.0.0', worstSeverity: 'high', advisories: [advisory()] });
+  assert.equal(hasEligibleTransitiveFix(r), true);
+});
+
+test('a row with an available direct upgrade target is never eligible, even with transitive advisories', () => {
+  const r = row({
+    current: '1.0.0',
+    worstSeverity: 'high',
+    advisories: [advisory()],
+    upgradeTo: '1.0.1',
+    upgradeReason: 'security-fix',
+  });
+  assert.equal(hasEligibleTransitiveFix(r), false);
+});
+
+test('a row with no resolved installed version is never eligible', () => {
+  const r = row({ current: null, worstSeverity: 'high', advisories: [advisory()], unresolvable: 'no-lockfile' });
+  assert.equal(hasEligibleTransitiveFix(r), false);
+});
+
+test('a row with no known vulnerability is never eligible', () => {
+  const r = row({ current: '1.0.0', worstSeverity: null, advisories: [] });
+  assert.equal(hasEligibleTransitiveFix(r), false);
+});
+
+test('a row whose every advisory is direct (path length 1) is never eligible', () => {
+  const r = row({ current: '1.0.0', worstSeverity: 'high', advisories: [advisory({ path: ['pkg'] })] });
+  assert.equal(hasEligibleTransitiveFix(r), false);
+});
+
+test('a row with a mix of direct and transitive advisories is eligible', () => {
+  const r = row({
+    current: '1.0.0',
+    worstSeverity: 'high',
+    advisories: [advisory({ path: ['pkg'] }), advisory({ path: ['pkg', 'intermediate', 'flagged-pkg'] })],
+  });
+  assert.equal(hasEligibleTransitiveFix(r), true);
 });

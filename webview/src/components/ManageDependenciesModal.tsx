@@ -4,7 +4,7 @@ import type { MouseEvent as ReactMouseEvent, ReactElement } from 'react';
 import { MAX_BULK_REMOVE_CHANGES, MAX_BULK_UPGRADE_CHANGES } from '../../../src/core/upgrade/validate.js';
 import { rowIsMajorUpdate } from '../../../src/host/summaryMetrics.js';
 import type { DependencyFinding } from '../../../src/core/hygiene/types.js';
-import type { PackageRow, RemovalAssessment } from '../../../src/core/types.js';
+import type { PackageRow } from '../../../src/core/types.js';
 import type {
   HealthCriterion,
   SelectedCriteria,
@@ -35,14 +35,8 @@ import {
   IconTrendUp,
   IconX,
 } from '../icons.js';
+import { REMOVAL_IMPACT_LABEL } from '../removalImpactState.js';
 import type { RemovalImpactState } from '../removalImpactState.js';
-
-const IMPACT_LABEL: Record<RemovalAssessment['status'], string> = {
-  'low-risk': 'Low risk',
-  review: 'Review required',
-  blocked: 'Removal blocked',
-  unknown: 'Unknown',
-};
 
 export interface BulkUpgradeCandidate {
   packageName: string;
@@ -588,7 +582,7 @@ export function ManageDependenciesModal({
                             className="review-list__impact"
                             data-status={impactEntry.assessment.status}
                           >
-                            <span className="review-list__impact-badge">{IMPACT_LABEL[impactEntry.assessment.status]}</span>
+                            <span className="review-list__impact-badge">{REMOVAL_IMPACT_LABEL[impactEntry.assessment.status]}</span>
                             {impactEntry.assessment.evidence.length > 0 ? (
                               <span className="review-list__impact-evidence">
                                 {impactEntry.assessment.evidence.map((entry) => entry.summary).join(' · ')}

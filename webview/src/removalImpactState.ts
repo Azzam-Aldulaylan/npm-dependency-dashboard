@@ -16,3 +16,11 @@ export type RemovalImpactState =
   | { phase: 'analyzing'; scanned: number; total: number }
   | { phase: 'done'; assessments: ReadonlyMap<string, { assessment: RemovalAssessment; usageId: string }>; generatedAt: string }
   | { phase: 'error'; message: string };
+
+/** Shared label vocabulary for a RemovalAssessment's status — one source of truth for both ManageDependenciesModal and ManageDependencyModal. */
+export const REMOVAL_IMPACT_LABEL: Record<RemovalAssessment['status'], string> = {
+  'low-risk': 'Low risk',
+  review: 'Review required',
+  blocked: 'Removal blocked',
+  unknown: 'Unknown',
+};

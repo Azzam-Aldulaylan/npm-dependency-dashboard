@@ -107,7 +107,16 @@ export interface AttributedAdvisory {
   flaggedPackage: string;
   /** Chain from the direct dependency down to flaggedPackage. */
   path: string[];
-  /** The first published version of `flaggedPackage` that fixes this advisory, if provable. */
+  /**
+   * The actual resolved version of `flaggedPackage` in the dependency graph
+   * node this advisory was attributed from — never the direct root
+   * dependency's own version for a transitive advisory. `null` when that
+   * node has no resolved version (unresolvable/workspace-linked). This is
+   * the floor `patchedVersion` must be strictly ahead of — see
+   * `resolveFirstPatchedVersion` in src/core/version/resolve.ts.
+   */
+  flaggedVersion: string | null;
+  /** The first published version of `flaggedPackage` that fixes this advisory, strictly ahead of `flaggedVersion`, if provable. */
   patchedVersion: PatchedVersionResult;
 }
 

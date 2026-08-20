@@ -93,11 +93,13 @@ export function isPatchedVersionResult(value: unknown): value is PatchedVersionR
 export function isAttributedAdvisory(value: unknown): value is AttributedAdvisory {
   if (!isRecord(value)) return false;
   const path = value['path'];
+  const flaggedVersion = value['flaggedVersion'];
   return (
     isAdvisory(value['advisory']) &&
     typeof value['flaggedPackage'] === 'string' &&
     Array.isArray(path) &&
     path.every((segment) => typeof segment === 'string') &&
+    (flaggedVersion === null || typeof flaggedVersion === 'string') &&
     isPatchedVersionResult(value['patchedVersion'])
   );
 }

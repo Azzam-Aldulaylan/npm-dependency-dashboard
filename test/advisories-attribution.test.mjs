@@ -50,6 +50,10 @@ test('a version-scoped advisory attributes only to the direct dep whose subtree 
   const [attributed] = result.get('legacy-thing');
   assert.equal(attributed.flaggedPackage, 'js-tokens');
   assert.deepEqual(attributed.path, ['legacy-thing', 'js-tokens']);
+  // Transitive attribution: the flagged version is the terminal graph node's
+  // own resolved version (nested under legacy-thing), never the direct
+  // dependency's (legacy-thing's own) version.
+  assert.equal(attributed.flaggedVersion, '3.0.2');
 });
 
 test('a broader advisory attributes to every direct dep whose subtree resolves a matching version', () => {
@@ -71,6 +75,7 @@ test('an advisory against a direct dependency itself has a single-element path',
       advisory: byName.get('react')[0],
       flaggedPackage: 'react',
       path: ['react'],
+      flaggedVersion: '18.2.0',
       patchedVersion: { status: 'unknown' },
     },
   ]);

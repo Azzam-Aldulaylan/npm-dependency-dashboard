@@ -27,6 +27,7 @@ const ATTRIBUTED = {
   advisory: ADVISORY,
   flaggedPackage: 'minimatch',
   path: ['glob', 'minimatch'],
+  flaggedVersion: '3.1.3',
   patchedVersion: { status: 'unknown' },
 };
 
@@ -625,6 +626,7 @@ test('a malformed advisory rejects the whole message', () => {
   const bad = [
     'GHSA-1234',
     { ...ATTRIBUTED, flaggedPackage: undefined },
+    { ...ATTRIBUTED, flaggedVersion: 42 },
     { ...ATTRIBUTED, path: 'glob → minimatch' },
     { ...ATTRIBUTED, path: ['glob', 7] },
     { ...ATTRIBUTED, advisory: { ...ADVISORY, id: null } },

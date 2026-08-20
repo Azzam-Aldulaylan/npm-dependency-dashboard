@@ -181,7 +181,7 @@ This separate pass looked for work not predicted by the previous performance rep
 4. Selected-project reload runs a workspace-wide lockfile glob every time to detect a newly nearer lockfile. This can be significant in very large monorepos, but caching it requires correct create/delete/topology invalidation and Extension Host evidence. Deferred.
 5. Manual Refresh deliberately forces a background usage recheck so source-only edits can refresh likely-unused findings even when the manifest/lockfile fingerprint is unchanged. It happens after the table is useful and is now bounded, so the behavior was retained.
 6. Bulk upgrade and bulk remove already load the project once and build one normalized graph for all selected changes. No N× graph/manifest regression was found.
-7. Bulk transitive remediation reloads and revalidates project/package-manager state for each target. Sharing it could save work, but a long sequential batch can overlap external file changes; the repeated freshness boundary was retained rather than returning stale security-sensitive conclusions.
+7. Bulk transitive remediation reloaded the same project, repeated the same npm/pnpm probes, and materialized the same lockfile-free graph once per selected row. The materialized graph depends on the project manifest and registry policy—not the row later evaluated against it—so one fresh, generation-scoped preparation is now shared within a single batch. No result or promise is reused by a later action.
 8. Activation performs command registration only. No registry, filesystem scan, subprocess, or usage analysis runs before the dashboard is requested. The bundled module-loading cost was not measurable without the Extension Host, so no speculative dynamic imports were added.
 
 ## Optimization table
@@ -246,8 +246,45 @@ No optimization changes Workspace Trust, protocol validation, source fingerprint
 - Audit-after-render: audit is fully hidden in the controlled large timeline. Moving it after final rows would create a second security revision and is not justified by current evidence.
 - Shared per-host limiter for version/advisory overlap: current overlap adds only one request and uses different logical endpoints. Add a shared limiter only if corporate-proxy measurements show pressure.
 - Lockfile inventory caching for very large monorepos: requires VS Code `findFiles` measurements and topology-safe invalidation.
-- Bulk remediation context reuse: retain per-target freshness until a generation-bound shared context can prove equivalent safety.
 - Real large npm/pnpm project and GUI profiling: unavailable in this environment and required before claiming production time-to-paint.
+
+## Action performance follow-up (2026-08-20)
+
+After the dashboard-open pass, the Upgrade, Smart Upgrade Plan, transitive-remediation, Where Used, and Analyze Cleanup paths were traced separately. These measurements use the same Node/npm/macOS environment described above. Network/resolver delays in the action benchmark are deterministic models; the npm toolchain probe measurement is a local subprocess observation. A real registry-backed isolated install and Extension Development Host UI were unavailable, so no production end-to-end action latency is claimed.
+
+### Action bottlenecks found
+
+1. Upgrade Preflight awaited exact-version metadata before starting the isolated npm/pnpm resolver even though both consume only the already-validated graph and proposal.
+2. Smart Upgrade Plan invoked the package-manager resolver for every intermediate proposal, including proposals already rejected by static peer metadata. A coordinated three-state example therefore launched three resolver subprocesses.
+3. npm/pnpm discovery health-checked `--version`, discarded that result, and immediately executed the same version probe again for display/verification metadata.
+4. Bulk transitive remediation rebuilt one identical lockfile-free graph for every selected vulnerable row.
+5. A hidden automatic cleanup scan could compete with an explicit upgrade/remediation action for filesystem and CPU resources. Where Used and Analyze Cleanup could also restart work that the identical background scan was already performing.
+6. Exact target metadata for bulk upgrades used unbounded fan-out, while repeated Smart Plan states could request the same exact package/version metadata again.
+
+### Before and after
+
+| Bottleneck | Priority | Before | After | Improvement | Implemented |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Preflight metadata 120 ms + resolver 300 ms | P1 | 423.6 ms | 302.2 ms median | 121.4 ms / 28.7% | Yes |
+| Three-state Smart Plan, 80 ms resolver | P1 | 266.9 ms | 102.2 ms median | 164.7 ms / 61.7%; resolver 3 -> 1 | Yes |
+| npm discovery plus duplicate version probe | P1 | 328.6 ms median | 259.0 ms median | 69.6 ms / 21.2% | Yes |
+| Bulk remediation, 10 selected, 50 ms resolve model | P1 | 520.9 ms | 52.8 ms | 468.1 ms / 89.9%; resolver 10 -> 1 | Yes |
+| Exact metadata for 25 bulk changes | P2 | peak 25 requests | peak 8 requests | bounded connection pressure | Yes |
+| Automatic cleanup competing/restarting | P2 | independent duplicate scan | cancel or join existing scan | duplicate scan avoided | Yes |
+
+The preflight and Smart Plan numbers are from three post-change deterministic runs; the table reports their median. The npm discovery medians use five local runs before and after. The bulk-remediation number is a deterministic comparison embedded in the final benchmark. These models isolate scheduling and duplicate-work changes; they do not represent npm registry production latency.
+
+### Changes and safety boundaries
+
+- Preflight starts bounded exact-metadata retrieval and isolated resolver verification together. Metadata failures remain per-package, resolver failure remains `unknown`, and cancellation reaches both branches.
+- Exact metadata is bounded at eight concurrent requests and memoized by exact package/version only inside one provider instance. It is not persisted or reused for execution.
+- Smart Plan uses static/registry evidence to reject intermediate candidates and runs the real resolver once a proposal is otherwise viable. A plan is never offered without that final resolver verification.
+- The npm/pnpm health probe's captured version is reused instead of spawning a duplicate probe. Upgrade execution still resolves the toolchain again from fresh project state.
+- Bulk remediation performs one fresh project reload, full source comparison, package-manager resolution, and lockfile-free materialization per requested batch. Each row still receives independent advisory evaluation, and a later batch performs fresh preparation.
+- Explicit upgrade/remediation work cancels and drains hidden cleanup work first. Where Used joins an equivalent running whole-workspace scan and then reads its cache; Analyze Cleanup promotes that scan so real progress is shown. A forced Re-analyze still bypasses the cache.
+- Workspace Trust, protocol validation, candidate eligibility, stale-generation checks, the second disk read before execution, resolver verification, snapshots, verification/rollback, and advisory attribution are unchanged.
+
+Structured action instrumentation now reports project reload, graph build, toolchain resolution, compatibility preflight, Smart Plan search, security graph materialization, and total action duration when local performance logging is enabled. It records durations/counts only and contains no telemetry or secrets.
 
 ## Reproduction
 
@@ -255,6 +292,7 @@ Run the deterministic suite with:
 
 ```bash
 npm run benchmark:performance
+npm run benchmark:actions
 ```
 
 Run the real advisory smoke check separately with:

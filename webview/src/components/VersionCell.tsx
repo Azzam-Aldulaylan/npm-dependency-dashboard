@@ -96,11 +96,18 @@ export function AvailableVersionCell({ row }: { row: PackageRow }): ReactElement
  * a sibling passed separately rather than nested inside this label.
  */
 export function CurrentHeaderLabel(): ReactElement {
-  return (
-    <span title={CURRENT_EXPLANATION} aria-label={`Current: ${CURRENT_EXPLANATION}`}>
-      Current
-    </span>
-  );
+  return <>Current</>;
+}
+
+/**
+ * The Current column's terminology affordance — same hover/focus/click
+ * InfoTooltip pattern as AvailableHeaderInfo below, so "Current" is not the
+ * one header explained only through a native `title` (hover-only, not
+ * keyboard-reachable). Rendered as SortableHeader's sibling `extra`, not
+ * nested inside the sort button, for the same reason as AvailableHeaderInfo.
+ */
+export function CurrentHeaderInfo(): ReactElement {
+  return <InfoTooltip label="What Current means" content={<p>{CURRENT_EXPLANATION}</p>} />;
 }
 
 export function AvailableHeaderLabel(): ReactElement {

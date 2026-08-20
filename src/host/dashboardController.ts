@@ -33,9 +33,16 @@ import { FetchError } from '../core/registry/http.js';
 import type { EtagStore } from '../core/registry/versions.js';
 import type { AdvisoryLookupRequest } from '../core/advisories/resolve.js';
 import { resolveTrustedAdvisoryUrl } from '../core/advisories/resolve.js';
-import type { UpgradeEligibility, UpgradeRequestInput } from '../core/upgrade/validate.js';
+import type {
+  BulkRemoveEligibility,
+  BulkUpgradeEligibility,
+  RemoveRequestInput,
+  UpgradeEligibility,
+  UpgradeRequestInput,
+} from '../core/upgrade/validate.js';
 import type { PackageManagerKind, PackageRow } from '../core/types.js';
-import { validateUpgradeRequest } from '../core/upgrade/validate.js';
+import { validateBulkRemoveRequest, validateBulkUpgradeRequest, validateUpgradeRequest } from '../core/upgrade/validate.js';
+import type { BuildInfo } from './dashboardData.js';
 import { toHostToWebviewMessage } from './dashboardData.js';
 import type { HostToWebviewMessage, ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
 
@@ -63,6 +70,8 @@ export interface DashboardControllerOptions {
   projectInfo: SelectedProjectInfo;
   /** S6 — whether more than one project candidate was discovered. */
   canChangeProject: boolean;
+  /** Panel-wide, not project-specific — the running extension's own version/build stamp, sent out with every DashboardData so the footer can show it. */
+  buildInfo: BuildInfo;
   /** S7 — panel-level, shared across every controller instance the panel builds. */
   projectCacheStore: PersistentProjectCacheStore;
   /** S7 — this project's persisted-cache key: derived from S6 project identity + registry. */
@@ -351,6 +360,7 @@ export class DashboardController {
         { isEmpty: this.lastResult.rows.length === 0, isStale: true },
         this.options.projectInfo,
         this.options.canChangeProject,
+        this.options.buildInfo,
         this.lastGeneratedAt
       )
     );
@@ -412,6 +422,28 @@ export class DashboardController {
     if (this.lastResult === undefined) return { ok: false, reason: 'no-scan-result' };
     if (!this.isEligible()) return { ok: false, reason: 'revalidating' };
     return validateUpgradeRequest(this.lastResult.rows, this.declaredDependencies, request);
+  }
+
+  /** Same freshness gate as a single upgrade, applied atomically to every requested change. */
+  validateBulkUpgradeRequest(requests: readonly UpgradeRequestInput[]): BulkUpgradeEligibility {
+    if (this.lastResult === undefined) {
+      return { ok: false, reason: 'change-rejected', changeReason: 'no-scan-result' };
+    }
+    if (!this.isEligible()) {
+      return { ok: false, reason: 'change-rejected', changeReason: 'revalidating' };
+    }
+    return validateBulkUpgradeRequest(this.lastResult.rows, this.declaredDependencies, requests);
+  }
+
+  /** Same freshness gate as a bulk upgrade, applied atomically to every requested removal. */
+  validateBulkRemoveRequest(requests: readonly RemoveRequestInput[]): BulkRemoveEligibility {
+    if (this.lastResult === undefined) {
+      return { ok: false, reason: 'change-rejected', changeReason: 'no-scan-result' };
+    }
+    if (!this.isEligible()) {
+      return { ok: false, reason: 'change-rejected', changeReason: 'revalidating' };
+    }
+    return validateBulkRemoveRequest(this.lastResult.rows, this.declaredDependencies, requests);
   }
 
   /**
@@ -569,6 +601,7 @@ export class DashboardController {
           { isEmpty: cached.rows.length === 0, isStale: false },
           this.options.projectInfo,
           this.options.canChangeProject,
+          this.options.buildInfo,
           this.lastGeneratedAt
         )
       );
@@ -748,6 +781,7 @@ export class DashboardController {
           { isEmpty: snapshot.rows.length === 0, isStale: false },
           this.options.projectInfo,
           this.options.canChangeProject,
+          this.options.buildInfo,
           generatedAt
         )
       );

@@ -77,7 +77,7 @@ export function SecuritySection({
               path={entry.path}
               patchedVersion={entry.patchedVersion}
               resolvedVersion={entry.resolvedVersion}
-              rootPackageName={rootPackageName}
+              rootPackageName={entry.path[0] ?? rootPackageName}
               onOpenAdvisory={onOpenAdvisory}
               key={`${String(entry.advisory.id)}:${entry.flaggedPackage}`}
             />

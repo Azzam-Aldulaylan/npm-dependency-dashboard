@@ -19,6 +19,14 @@
  * project cache is acceptable initially, do not over-engineer" — a stale
  * cache entry is bounded by the TTL, and a manifest/lockfile change
  * invalidates it immediately via the fingerprint mismatch.
+ *
+ * "Analyze cleanup" also runs once automatically per project fingerprint —
+ * see autoAnalyzeCleanupIfStale/autoCleanupGate.ts. That auto-run is always
+ * `background: true`: it skips the VS Code progress notification and the
+ * `cleanup-analyzing` posts, and swallows failures instead of surfacing a
+ * `cleanup-error` banner, so it never disables toolbar actions or announces
+ * itself — badges simply appear once the result lands. An explicit user
+ * click is never `background` and keeps today's visible progress/error UI.
  */
 
 import * as vscode from 'vscode';
@@ -31,6 +39,7 @@ import type { DependencyFinding } from '../../core/hygiene/types.js';
 import { createPerformanceSession } from '../../core/performance/measurement.js';
 import type { DashboardController, MessageSink } from '../dashboardController.js';
 import type { DiscoveredProject } from '../projectResolution.js';
+import { shouldAutoAnalyzeCleanup } from './autoCleanupGate.js';
 import { analyzeDependencyUsage } from './usageAnalyzer.js';
 import { UsageReferenceStore } from './usageReferenceStore.js';
 
@@ -49,6 +58,8 @@ export interface UsageCoordinatorOptions {
   getSelectedProject(): DiscoveredProject | undefined;
   isDisposed(): boolean;
   performanceEnabled?(): boolean;
+  /** Whether the panel-wide upgrade/remove lock is held — see autoAnalyzeCleanupIfStale. */
+  isUpgradeBusy?(): boolean;
 }
 
 interface CachedUsage {
@@ -68,6 +79,8 @@ export class UsageAnalysisCoordinator {
   private readonly referenceStore = new UsageReferenceStore();
   /** root -> packageName -> cached result. */
   private readonly cache = new Map<string, Map<string, CachedUsage>>();
+  /** root -> fingerprint last auto-analyzed by autoAnalyzeCleanupIfStale — see autoCleanupGate.ts. */
+  private readonly lastAutoCleanupFingerprint = new Map<string, ProjectSourceFingerprint>();
   private activeCts: vscode.CancellationTokenSource | undefined;
 
   constructor(private readonly options: UsageCoordinatorOptions) {}
@@ -205,17 +218,27 @@ export class UsageAnalysisCoordinator {
   }
 
   /**
-   * Explicit "Analyze cleanup" entry point — every direct dependency at
-   * once, one pass over the workspace's source files (see
-   * usageAnalyzer.ts's own doc for why this costs the same I/O as a single
-   * package). Never runs automatically.
+   * "Analyze cleanup" — every direct dependency at once, one pass over the
+   * workspace's source files (see usageAnalyzer.ts's own doc for why this
+   * costs the same I/O as a single package).
+   *
+   * `background: true` (only ever set by autoAnalyzeCleanupIfStale) skips
+   * the VS Code progress notification and every `cleanup-analyzing` post,
+   * and swallows a failure instead of posting `cleanup-error` — an
+   * auto-triggered run must never disable toolbar actions or announce
+   * itself; it either quietly succeeds (badges appear) or quietly does
+   * nothing. An explicit click always runs with `background: false`
+   * (today's visible progress/error UI, unchanged).
    */
-  async handleAnalyzeCleanup(): Promise<void> {
+  async handleAnalyzeCleanup(options: { background?: boolean } = {}): Promise<void> {
+    const background = options.background ?? false;
     if (this.isBusy()) {
-      this.options.sink.postMessage({
-        status: 'cleanup-error',
-        error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Another usage analysis is already in progress for this project.' },
-      });
+      if (!background) {
+        this.options.sink.postMessage({
+          status: 'cleanup-error',
+          error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Another usage analysis is already in progress for this project.' },
+        });
+      }
       return;
     }
 
@@ -244,39 +267,43 @@ export class UsageAnalysisCoordinator {
       this.options.performanceEnabled?.() ?? false
     );
     performance.setMetadata('direct dependencies', packageNames.length);
-    this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned: 0, total: 0 });
+    performance.setMetadata('background', background);
+    if (!background) this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned: 0, total: 0 });
 
     try {
       const source = controller.upgradeSource;
-      const resultsByPackage = await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: 'Analyzing dependency usage',
-          cancellable: true,
-        },
-        async (progress, token) => {
-          const cancellation = token.onCancellationRequested(() => cts.cancel());
-          try {
-            let lastScanned = 0;
-            return await analyzeDependencyUsage({
-              folder: selected.folder,
-              dir: selected.dir,
-              manifestText: source.manifestText,
-              packageNames,
-              token: cts.token,
-              performance,
-              onProgress: (scanned, total) => {
-                const increment = total > 0 ? ((scanned - lastScanned) / total) * 100 : 0;
-                lastScanned = scanned;
-                progress.report({ message: `${scanned} of ${total} files checked`, increment });
-                this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned, total });
-              },
-            });
-          } finally {
-            cancellation.dispose();
-          }
+      const runScan = async (
+        progress: vscode.Progress<{ message?: string; increment?: number }> | undefined,
+        onCancellationToken: vscode.CancellationToken | undefined
+      ): Promise<Map<string, DependencyUsageResult>> => {
+        const cancellation = onCancellationToken?.onCancellationRequested(() => cts.cancel());
+        try {
+          let lastScanned = 0;
+          return await analyzeDependencyUsage({
+            folder: selected.folder,
+            dir: selected.dir,
+            manifestText: source.manifestText,
+            packageNames,
+            token: cts.token,
+            performance,
+            onProgress: (scanned, total) => {
+              if (background) return;
+              const increment = total > 0 ? ((scanned - lastScanned) / total) * 100 : 0;
+              lastScanned = scanned;
+              progress?.report({ message: `${scanned} of ${total} files checked`, increment });
+              this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned, total });
+            },
+          });
+        } finally {
+          cancellation?.dispose();
         }
-      );
+      };
+      const resultsByPackage = background
+        ? await runScan(undefined, undefined)
+        : await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: 'Analyzing dependency usage', cancellable: true },
+            (progress, token) => runScan(progress, token)
+          );
       if (this.options.isDisposed() || this.activeCts !== cts) return;
 
       const fingerprint = this.fingerprintFor(controller);
@@ -292,7 +319,7 @@ export class UsageAnalysisCoordinator {
       }
       this.options.sink.postMessage({ status: 'cleanup-result', findings, analyzedAt, cacheExpiresAt });
     } catch (cause) {
-      if (!this.options.isDisposed()) {
+      if (!background && !this.options.isDisposed()) {
         this.options.sink.postMessage({ status: 'cleanup-error', error: toProtocolError(cause) });
       }
     } finally {
@@ -302,6 +329,35 @@ export class UsageAnalysisCoordinator {
       }
       performance.finish();
     }
+  }
+
+  /**
+   * Auto-runs "Analyze cleanup" once per project fingerprint — see
+   * autoCleanupGate.ts. Called after every scan reaches the webview
+   * (dashboardPanel.ts); a no-op the vast majority of the time since the
+   * fingerprint rarely changes between calls.
+   *
+   * `force: true` (only ever set for an explicit manual Refresh — see
+   * dashboardPanel.ts's own doc on why) skips the fingerprint-match check
+   * entirely, so a refresh always re-verifies usage in the background even
+   * when nothing on disk changed — "do the full cycle again, like the first
+   * open" is the explicit UX this exists for. Still respects the
+   * busy/upgrade-lock gates either way; those are safety, not a performance
+   * cap this flag is meant to override.
+   */
+  async autoAnalyzeCleanupIfStale(controller: DashboardController, options: { force?: boolean } = {}): Promise<void> {
+    const fingerprint = this.fingerprintFor(controller);
+    const last = this.lastAutoCleanupFingerprint.get(controller.root);
+    const shouldRun = shouldAutoAnalyzeCleanup(
+      last,
+      fingerprint,
+      this.isBusy(),
+      this.options.isUpgradeBusy?.() ?? false,
+      options.force === true
+    );
+    if (!shouldRun) return;
+    this.lastAutoCleanupFingerprint.set(controller.root, fingerprint);
+    await this.handleAnalyzeCleanup({ background: true });
   }
 
   handleCancel(): void {

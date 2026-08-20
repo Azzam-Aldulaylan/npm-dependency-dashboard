@@ -16,17 +16,19 @@ const PHASE_LABEL: Record<'compatibility' | 'smart-plan', string> = {
 export function UpgradeAnalysisLoading({
   packageName,
   targetVersion,
+  changeCount = 1,
   phase,
 }: {
   packageName: string;
   targetVersion: string;
+  changeCount?: number;
   phase: 'compatibility' | 'smart-plan' | null;
 }): ReactElement {
   return (
     <div className="analysis-loading" role="status" aria-live="polite">
       <LoadingRing progress={undefined} />
       <p className="analysis-loading__title">
-        Analyzing {packageName} {targetVersion}
+        {changeCount > 1 ? `Analyzing ${changeCount} dependency upgrades` : `Analyzing ${packageName} ${targetVersion}`}
       </p>
       <p className="analysis-loading__detail">{phase === null ? 'Checking package metadata…' : PHASE_LABEL[phase]}</p>
     </div>

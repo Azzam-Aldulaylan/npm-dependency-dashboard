@@ -28,6 +28,7 @@ const REGISTRY = 'https://registry.npmjs.org';
 const ROOT = '/tmp/project';
 const CACHE_KEY = 'project-a::' + REGISTRY;
 const PROJECT_INFO = { label: 'app', manifestPath: 'package.json' };
+const BUILD_INFO = { extensionVersion: '0.0.1', builtAt: '2026-08-01T09:00:00.000Z' };
 
 const json = (body) => ({ status: 200, headers: {}, body: JSON.stringify(body), wireBytes: JSON.stringify(body).length });
 
@@ -96,6 +97,7 @@ test('a watcher event arriving during reloadAndScan\'s own disk read is drained 
     etagStore: new MemoryEtagStore(),
     projectInfo: PROJECT_INFO,
     canChangeProject: false,
+    buildInfo: BUILD_INFO,
     projectCacheStore,
     cacheKey: CACHE_KEY,
     ttlMinutesProvider: () => 30,
@@ -227,6 +229,7 @@ test('a watcher event arriving during a reloadAndScan for a DIFFERENT project (a
     etagStore: new MemoryEtagStore(),
     projectInfo: PROJECT_INFO,
     canChangeProject: true,
+    buildInfo: BUILD_INFO,
     projectCacheStore,
     cacheKey: CACHE_KEY,
     ttlMinutesProvider: () => 30,
@@ -343,6 +346,7 @@ test('project B changes after B\'s watchers are installed but while B\'s own sca
     etagStore: new MemoryEtagStore(),
     projectInfo: PROJECT_INFO,
     canChangeProject: true,
+    buildInfo: BUILD_INFO,
     projectCacheStore,
     cacheKey: CACHE_KEY,
     ttlMinutesProvider: () => 30,
@@ -470,6 +474,7 @@ test('onWatchedFileEvent announces revalidating synchronously, before its own de
     etagStore: new MemoryEtagStore(),
     projectInfo: PROJECT_INFO,
     canChangeProject: false,
+    buildInfo: BUILD_INFO,
     projectCacheStore,
     cacheKey: CACHE_KEY,
     ttlMinutesProvider: () => 30,
@@ -605,6 +610,7 @@ test('a slow refresh of project A is superseded by a switch to B — A must not 
     etagStore: new MemoryEtagStore(),
     projectInfo: PROJECT_INFO,
     canChangeProject: true,
+    buildInfo: BUILD_INFO,
     projectCacheStore,
     cacheKey: CACHE_KEY,
     ttlMinutesProvider: () => 30,
@@ -688,6 +694,7 @@ test('an old A watcher reload starts while B is loading and resolves after B bec
     etagStore: new MemoryEtagStore(),
     projectInfo: PROJECT_INFO,
     canChangeProject: true,
+    buildInfo: BUILD_INFO,
     projectCacheStore,
     cacheKey: CACHE_KEY,
     ttlMinutesProvider: () => 30,
@@ -833,6 +840,7 @@ test('an old A watcher reload passes its own isStillCurrent check, then is super
     etagStore: new MemoryEtagStore(),
     projectInfo: PROJECT_INFO,
     canChangeProject: true,
+    buildInfo: BUILD_INFO,
     projectCacheStore,
     cacheKey: CACHE_KEY,
     ttlMinutesProvider: () => 30,

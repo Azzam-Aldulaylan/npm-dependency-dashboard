@@ -33,6 +33,7 @@ import {
   isRecord,
 } from '../core/validation.js';
 import type { ProtocolError } from '../core/validation.js';
+import { MAX_BULK_REMOVE_CHANGES, MAX_BULK_UPGRADE_CHANGES } from '../core/upgrade/validate.js';
 
 /**
  * The wire shapes below (`CompatibilityFinding`, `ResolverVerification`,
@@ -161,6 +162,11 @@ export interface UpgradeAnalysisSmartPlanChange {
   targetVersion: string;
 }
 
+export interface UpgradeAnalysisChange extends UpgradeAnalysisSmartPlanChange {
+  classification: DependencyClassification;
+  majorUpdate: boolean;
+}
+
 export interface UpgradeAnalysisSmartPlan {
   changes: UpgradeAnalysisSmartPlanChange[];
   reasonFindingIds: string[];
@@ -190,11 +196,42 @@ export interface UpgradeAnalysisPresentation {
   targetVersion: string;
   classification: DependencyClassification;
   majorUpdate: boolean;
+  /** Every host-validated change in the requested coordinated proposal. */
+  changes: UpgradeAnalysisChange[];
   compatibility: UpgradeAnalysisCompatibility;
   security: SecurityOutcome | null;
   smartPlan: UpgradeAnalysisSmartPlan | null;
   verification: UpgradeAnalysisVerification;
   files: UpgradeAnalysisFiles;
+}
+
+export interface RemoveAnalysisChange {
+  packageName: string;
+  classification: DependencyClassification;
+  /**
+   * Other still-kept declared dependencies whose subtree still resolves
+   * through this package, per the dependency graph — a non-blocking
+   * warning surfaced honestly, never a hard block on a removal the user
+   * explicitly asked for. Empty when nothing else depends on it.
+   */
+  stillRequiredBy: string[];
+}
+
+/** Same shape as UpgradeAnalysisFiles — a removal is the same manifest+lockfile transaction, just staged by deletion instead of version replacement. */
+export interface RemoveAnalysisFiles {
+  manifestPath: string;
+  lockfilePath: string;
+  rollbackAvailable: boolean;
+}
+
+export interface RemoveAnalysisPresentation {
+  analysisId: string;
+  package: string;
+  /** Every host-validated package in the requested coordinated removal. */
+  changes: RemoveAnalysisChange[];
+  /** Same policy/shape as an upgrade's verification — post-removal scripts run the same way a coordinated upgrade's do. */
+  verification: UpgradeAnalysisVerification;
+  files: RemoveAnalysisFiles;
 }
 
 // Re-exported for every existing import site (dashboardController.ts,
@@ -230,6 +267,10 @@ export interface DashboardData {
   auditUnavailable?: boolean;
   /** Deprecated + duplicate-version findings, computed fresh with every scan — see src/core/hygiene/index.ts. Likely-unused findings are never included here; see 'cleanup-result' below. */
   hygieneFindings: DependencyFinding[];
+  /** package.json's own `version` for the running extension — shown in the footer so a dev can tell which build is loaded. */
+  extensionVersion: string;
+  /** ISO timestamp stamped at build time (esbuild.mjs's `define`), not at activation — changes only when the bundle is actually rebuilt. */
+  builtAt: string;
 }
 
 export type ScanProgressStage =
@@ -263,12 +304,21 @@ export type HostToWebviewMessage =
   | { status: 'upgrade-analyzing'; package: string; phase: 'compatibility' | 'smart-plan' }
   /** The host-owned Upgrade Analysis, ready for the modal to render. */
   | { status: 'upgrade-analysis'; analysis: UpgradeAnalysisPresentation }
+  /** A bulk-remove request's impact check has started — see bulk-remove below. */
+  | { status: 'remove-analyzing'; package: string }
+  /** The host-owned removal analysis, ready for the review/confirm modal to render. */
+  | { status: 'remove-analysis'; analysis: RemoveAnalysisPresentation }
+  /** A removal could not run — rejected by host-side validation, cancelled, or the task itself failed. */
+  | { status: 'remove-error'; package: string; error: ProtocolError }
   /** A transitive-vulnerability "Analyze remediation" request has started — see analyze-remediation below. */
   | { status: 'remediation-analyzing'; package: string }
   /** The host-owned remediation analysis result for `package`, ready for the Action cell to render. */
   | { status: 'remediation-result'; package: string; result: RemediationResult }
   /** `package` could not be analyzed — an ineligible/forged request, a stale project snapshot, or a resolver failure that still deserves a user-visible reason rather than silently falling back to "unknown". */
   | { status: 'remediation-error'; package: string; error: ProtocolError }
+  | { status: 'remediation-batch-progress'; completed: number; total: number; current: string | null }
+  | { status: 'remediation-batch-complete'; completed: number; total: number; cancelled: boolean }
+  | { status: 'remediation-batch-error'; error: ProtocolError }
   /** "Where is this used?" (or the per-package half of an "Analyze cleanup" run) has started for `package`. */
   | { status: 'usage-analyzing'; package: string }
   /** The host-owned usage-analysis result for `package`, ready to render as a reference list. */
@@ -321,6 +371,9 @@ export type WebviewToHostMessage =
   | { type: 'refresh' }
   | { type: 'change-project' }
   | { type: 'upgrade'; package: string; target: string }
+  | { type: 'bulk-upgrade'; changes: Array<{ package: string; target: string }> }
+  /** Coordinated removal of one or more declared direct dependencies — see src/core/upgrade/validate.ts's validateBulkRemoveRequest. */
+  | { type: 'bulk-remove'; changes: Array<{ package: string }> }
   | { type: 'open-advisory'; package: string; advisoryId: string | number; path: string[] }
   | { type: 'confirm-upgrade'; analysisId: string }
   /**
@@ -332,6 +385,9 @@ export type WebviewToHostMessage =
    */
   | { type: 'cancel-upgrade'; analysisId: string | null }
   | { type: 'use-smart-plan'; analysisId: string }
+  /** Same analysisId-lookup discipline as confirm-upgrade/cancel-upgrade, targeting a stored removal analysis instead. */
+  | { type: 'confirm-remove'; analysisId: string }
+  | { type: 'cancel-remove'; analysisId: string | null }
   | { type: 'configure-verification' }
   /**
    * Only ever a package name — see resolveRemediationRequest
@@ -342,6 +398,8 @@ export type WebviewToHostMessage =
    * actually shows.
    */
   | { type: 'analyze-remediation'; package: string }
+  | { type: 'analyze-remediations'; packages: string[] }
+  | { type: 'cancel-remediation-analysis' }
   /** On-demand, single-package usage scan — see src/core/usage/ and src/host/usage/usageAnalyzer.ts. Only ever a package name; the host re-derives everything else (which project, which files) from its own trusted state. */
   | { type: 'where-used'; package: string }
   /** Explicitly bypasses the session usage cache for one package. */
@@ -391,7 +449,9 @@ function isDashboardData(value: unknown): value is DashboardData {
     isAbsentOr(value['advisoriesError'], isProtocolError) &&
     isAbsentOr(value['auditUnavailable'], (v) => typeof v === 'boolean') &&
     Array.isArray(hygieneFindings) &&
-    hygieneFindings.every(isDependencyFinding)
+    hygieneFindings.every(isDependencyFinding) &&
+    typeof value['extensionVersion'] === 'string' &&
+    typeof value['builtAt'] === 'string'
   );
 }
 
@@ -424,6 +484,57 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
       isNonEmptyString(value['target'])
     );
   }
+  if (type === 'bulk-upgrade') {
+    const changes = value['changes'];
+    if (
+      !hasOnlyKeys(value, ['type', 'changes']) ||
+      !Array.isArray(changes) ||
+      changes.length === 0 ||
+      changes.length > MAX_BULK_UPGRADE_CHANGES
+    ) {
+      return false;
+    }
+    const names = new Set<string>();
+    for (const change of changes) {
+      if (
+        !isRecord(change) ||
+        !hasOnlyKeys(change, ['package', 'target']) ||
+        !isNonEmptyString(change['package']) ||
+        !isNonEmptyString(change['target']) ||
+        names.has(change['package'])
+      ) {
+        return false;
+      }
+      names.add(change['package']);
+    }
+    return true;
+  }
+  if (type === 'bulk-remove') {
+    const changes = value['changes'];
+    if (
+      !hasOnlyKeys(value, ['type', 'changes']) ||
+      !Array.isArray(changes) ||
+      changes.length === 0 ||
+      changes.length > MAX_BULK_REMOVE_CHANGES
+    ) {
+      return false;
+    }
+    const names = new Set<string>();
+    for (const change of changes) {
+      if (!isRecord(change) || !hasOnlyKeys(change, ['package']) || !isNonEmptyString(change['package']) || names.has(change['package'])) {
+        return false;
+      }
+      names.add(change['package']);
+    }
+    return true;
+  }
+  if (type === 'confirm-remove') {
+    return hasOnlyKeys(value, ['type', 'analysisId']) && isNonEmptyString(value['analysisId']);
+  }
+  if (type === 'cancel-remove') {
+    const analysisId = value['analysisId'];
+    return hasOnlyKeys(value, ['type', 'analysisId']) && (analysisId === null || isNonEmptyString(analysisId));
+  }
   if (type === 'open-advisory') {
     const advisoryId = value['advisoryId'];
     const path = value['path'];
@@ -446,6 +557,18 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (type === 'configure-verification') {
     return hasOnlyKeys(value, ['type']);
   }
+  if (type === 'analyze-remediations') {
+    const packages = value['packages'];
+    return (
+      hasOnlyKeys(value, ['type', 'packages']) &&
+      Array.isArray(packages) &&
+      packages.length > 0 &&
+      packages.length <= MAX_BULK_UPGRADE_CHANGES &&
+      packages.every(isNonEmptyString) &&
+      new Set(packages).size === packages.length
+    );
+  }
+  if (type === 'cancel-remediation-analysis') return hasOnlyKeys(value, ['type']);
   if (type === 'analyze-remediation' || type === 'where-used' || type === 'reanalyze-usage') {
     return hasOnlyKeys(value, ['type', 'package']) && isNonEmptyString(value['package']);
   }
@@ -623,6 +746,7 @@ function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysis
       'targetVersion',
       'classification',
       'majorUpdate',
+      'changes',
       'compatibility',
       'security',
       'smartPlan',
@@ -645,6 +769,26 @@ function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysis
     findings.every(isCompatibilityFinding) &&
     isAbsentOr(compatibility['resolverVerification'], isResolverVerification);
   if (!compatibilityOk) return false;
+
+  const changes = value['changes'];
+  if (!Array.isArray(changes) || changes.length === 0 || changes.length > MAX_BULK_UPGRADE_CHANGES) return false;
+  const changeNames = new Set<string>();
+  for (const change of changes) {
+    if (
+      !isRecord(change) ||
+      !hasOnlyKeys(change, ['packageName', 'currentVersion', 'targetVersion', 'classification', 'majorUpdate']) ||
+      !isNonEmptyString(change['packageName']) ||
+      !isNonEmptyString(change['currentVersion']) ||
+      !isNonEmptyString(change['targetVersion']) ||
+      typeof change['classification'] !== 'string' ||
+      !CLASSIFICATIONS.has(change['classification']) ||
+      typeof change['majorUpdate'] !== 'boolean' ||
+      changeNames.has(change['packageName'])
+    ) {
+      return false;
+    }
+    changeNames.add(change['packageName']);
+  }
 
   const security = value['security'];
   if (security !== null && !isSecurityOutcome(security)) return false;
@@ -669,16 +813,7 @@ function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysis
     if (!smartPlanOk) return false;
   }
 
-  const verification = value['verification'];
-  if (!isRecord(verification)) return false;
-  const verificationOk =
-    verification['configured'] === false
-      ? hasOnlyKeys(verification, ['configured'])
-      : verification['configured'] === true &&
-        hasOnlyKeys(verification, ['configured', 'scriptNames']) &&
-        Array.isArray(verification['scriptNames']) &&
-        verification['scriptNames'].every((name) => typeof name === 'string');
-  if (!verificationOk) return false;
+  if (!isVerification(value['verification'])) return false;
 
   const files = value['files'];
   if (
@@ -691,6 +826,7 @@ function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysis
     return false;
   }
 
+  const firstChange = changes[0];
   return (
     typeof value['analysisId'] === 'string' &&
     typeof value['package'] === 'string' &&
@@ -698,8 +834,63 @@ function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysis
     typeof value['targetVersion'] === 'string' &&
     typeof value['classification'] === 'string' &&
     CLASSIFICATIONS.has(value['classification']) &&
-    typeof value['majorUpdate'] === 'boolean'
+    typeof value['majorUpdate'] === 'boolean' &&
+    firstChange !== undefined &&
+    firstChange['packageName'] === value['package'] &&
+    firstChange['currentVersion'] === value['currentVersion'] &&
+    firstChange['targetVersion'] === value['targetVersion'] &&
+    firstChange['classification'] === value['classification'] &&
+    firstChange['majorUpdate'] === value['majorUpdate']
   );
+}
+
+function isVerification(value: unknown): value is UpgradeAnalysisVerification {
+  if (!isRecord(value)) return false;
+  if (value['configured'] === false) return hasOnlyKeys(value, ['configured']);
+  return (
+    value['configured'] === true &&
+    hasOnlyKeys(value, ['configured', 'scriptNames']) &&
+    Array.isArray(value['scriptNames']) &&
+    value['scriptNames'].every((name: unknown) => typeof name === 'string')
+  );
+}
+
+function isRemoveAnalysisPresentation(value: unknown): value is RemoveAnalysisPresentation {
+  if (!isRecord(value)) return false;
+  if (!hasOnlyKeys(value, ['analysisId', 'package', 'changes', 'verification', 'files'])) return false;
+  if (!isVerification(value['verification'])) return false;
+
+  const changes = value['changes'];
+  if (!Array.isArray(changes) || changes.length === 0 || changes.length > MAX_BULK_REMOVE_CHANGES) return false;
+  const changeNames = new Set<string>();
+  for (const change of changes) {
+    if (
+      !isRecord(change) ||
+      !hasOnlyKeys(change, ['packageName', 'classification', 'stillRequiredBy']) ||
+      !isNonEmptyString(change['packageName']) ||
+      typeof change['classification'] !== 'string' ||
+      !CLASSIFICATIONS.has(change['classification']) ||
+      !Array.isArray(change['stillRequiredBy']) ||
+      !change['stillRequiredBy'].every((name: unknown) => typeof name === 'string') ||
+      changeNames.has(change['packageName'])
+    ) {
+      return false;
+    }
+    changeNames.add(change['packageName']);
+  }
+
+  const files = value['files'];
+  if (
+    !isRecord(files) ||
+    !hasOnlyKeys(files, ['manifestPath', 'lockfilePath', 'rollbackAvailable']) ||
+    typeof files['manifestPath'] !== 'string' ||
+    typeof files['lockfilePath'] !== 'string' ||
+    typeof files['rollbackAvailable'] !== 'boolean'
+  ) {
+    return false;
+  }
+
+  return typeof value['analysisId'] === 'string' && typeof value['package'] === 'string';
 }
 
 const REMEDIATION_OUTCOME_STATUSES: ReadonlySet<string> = new Set<RemediationOutcomeStatus>([
@@ -793,6 +984,19 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   if (status === 'upgrade-analysis') {
     return hasOnlyKeys(value, ['status', 'analysis']) && isUpgradeAnalysisPresentation(value['analysis']);
   }
+  if (status === 'remove-analyzing') {
+    return hasOnlyKeys(value, ['status', 'package']) && isNonEmptyString(value['package']);
+  }
+  if (status === 'remove-analysis') {
+    return hasOnlyKeys(value, ['status', 'analysis']) && isRemoveAnalysisPresentation(value['analysis']);
+  }
+  if (status === 'remove-error') {
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'error']) &&
+      isNonEmptyString(value['package']) &&
+      isProtocolError(value['error'])
+    );
+  }
   if (status === 'remediation-analyzing') {
     return hasOnlyKeys(value, ['status', 'package']) && isNonEmptyString(value['package']);
   }
@@ -809,6 +1013,31 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
       isNonEmptyString(value['package']) &&
       isProtocolError(value['error'])
     );
+  }
+  if (status === 'remediation-batch-progress') {
+    const completed = value['completed'];
+    const total = value['total'];
+    const current = value['current'];
+    return (
+      hasOnlyKeys(value, ['status', 'completed', 'total', 'current']) &&
+      typeof completed === 'number' && Number.isInteger(completed) && completed >= 0 &&
+      typeof total === 'number' && Number.isInteger(total) && total > 0 &&
+      completed <= total &&
+      (current === null || isNonEmptyString(current))
+    );
+  }
+  if (status === 'remediation-batch-complete') {
+    const completed = value['completed'];
+    const total = value['total'];
+    return (
+      hasOnlyKeys(value, ['status', 'completed', 'total', 'cancelled']) &&
+      typeof completed === 'number' && Number.isInteger(completed) && completed >= 0 &&
+      typeof total === 'number' && Number.isInteger(total) && total > 0 && completed <= total &&
+      typeof value['cancelled'] === 'boolean'
+    );
+  }
+  if (status === 'remediation-batch-error') {
+    return hasOnlyKeys(value, ['status', 'error']) && isProtocolError(value['error']);
   }
   if (status === 'usage-analyzing') {
     return hasOnlyKeys(value, ['status', 'package']) && isNonEmptyString(value['package']);

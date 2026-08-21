@@ -5,6 +5,7 @@ import { sortAdvisoriesBySeverity } from '../../../src/host/severityDisplay.js';
 import { classifyRowUpdate } from '../../../src/host/updateClassification.js';
 import type { TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
 import { hasEligibleTransitiveFix, resolveActionState } from '../../../src/host/upgradeAction.js';
+import { CLASSIFICATION_LABEL, classificationOf } from '../dependencyClassification.js';
 import {
   IconAlertTriangle,
   IconCheck,
@@ -20,6 +21,7 @@ import { REMOVAL_IMPACT_LABEL } from '../removalImpactState.js';
 import type { RemovalImpactState } from '../removalImpactState.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { SeverityBadge } from './SeverityBadge.js';
+import { CurrentVersionCell } from './VersionCell.js';
 import { patchedVersionText } from './VulnerabilityCard.js';
 import type { UsageRequestState } from './UsageReferencesPanel.js';
 
@@ -29,13 +31,23 @@ const UPDATE_KIND_LABEL: Record<'major' | 'minor' | 'patch', string> = {
   patch: 'Patch',
 };
 
-/** A compact "label / value" row for the left-column At a Glance list. */
+/** A compact "label / value" row for the left-column At a glance / Package overview lists. */
 function GlanceRow({ label, children }: { label: string; children: ReactElement | string }): ReactElement {
   return (
     <div className="manage-glance__row">
       <dt>{label}</dt>
       <dd>{children}</dd>
     </div>
+  );
+}
+
+/** A quiet "checking usage…" status — the one glanceable spinner both At a glance and the Remove card's Usage analysis stat box render, never a bare "Not analyzed" while a background scan is already known to be running. */
+function UsageCheckingStatus(): ReactElement {
+  return (
+    <span className="manage-glance__status">
+      <IconRefresh className="manage-glance__status-icon manage-glance__status-icon--spin" />
+      Checking usage…
+    </span>
   );
 }
 
@@ -159,6 +171,27 @@ function UpgradeCard({
   );
 }
 
+/** One compact stat box in the Remove card's three-box status row — Usage analysis / Peer requirements / Removal risk, replacing a plain label/value list. */
+function RemovalStatBox({
+  label,
+  value,
+  spinning,
+}: {
+  label: string;
+  value: ReactElement | string;
+  spinning?: boolean;
+}): ReactElement {
+  return (
+    <div className="manage-removal-stat">
+      <dt className="manage-removal-stat__label">{label}</dt>
+      <dd className="manage-removal-stat__value">
+        {spinning === true ? <IconRefresh className="manage-removal-stat__spinner" /> : null}
+        {value}
+      </dd>
+    </div>
+  );
+}
+
 /**
  * The Remove action card — compact status only. Before analysis, a
  * structured "not analyzed" state and an "Analyze removal →" CTA that
@@ -171,44 +204,39 @@ function UpgradeCard({
 function RemoveCard({
   row,
   removalImpact,
+  usage,
   actionsDisabled,
   onStartRemovalReview,
   onChangeTab,
 }: {
   row: PackageRow;
   removalImpact: RemovalImpactState;
+  usage: UsageRequestState | undefined;
   actionsDisabled: boolean;
   onStartRemovalReview: () => void;
   onChangeTab: (tab: ManageTabId) => void;
 }): ReactElement {
   const entry = removalImpact.phase === 'done' ? removalImpact.assessments.get(row.name) : undefined;
   const analyzing = removalImpact.phase === 'analyzing';
+  const usageChecking = usage === undefined || usage.phase === 'analyzing';
 
-  if (entry !== undefined) {
-    const peerCount = entry.assessment.evidence.filter((e) => e.kind === 'peer-requirement').length;
-    return (
-      <ActionCard icon={<IconTrash />} tone="remove" title="Remove dependency" description={`Check whether ${row.name} can be removed from this project.`}>
-        <dl className="manage-glance manage-action-card__glance">
-          <GlanceRow label="Removal risk">
-            <span className={`status-badge status-badge--${entry.assessment.status === 'low-risk' ? 'neutral' : 'warning'}`}>
-              {REMOVAL_IMPACT_LABEL[entry.assessment.status]}
-            </span>
-          </GlanceRow>
-          <GlanceRow label="Required as peer">{peerCount > 0 ? `${peerCount}` : '0'}</GlanceRow>
-        </dl>
-        <button type="button" className="button manage-action-card__cta" onClick={() => onChangeTab('removal')}>
-          Review removal →
-        </button>
-      </ActionCard>
+  const peerValue: ReactElement | string =
+    entry !== undefined ? `${entry.assessment.evidence.filter((e) => e.kind === 'peer-requirement').length}` : 'Not analyzed';
+  const riskValue: ReactElement | string =
+    entry !== undefined ? (
+      <span className={`status-badge status-badge--${entry.assessment.status === 'low-risk' ? 'neutral' : 'warning'}`}>
+        {REMOVAL_IMPACT_LABEL[entry.assessment.status]}
+      </span>
+    ) : (
+      'Unknown'
     );
-  }
 
   return (
     <ActionCard icon={<IconTrash />} tone="remove" title="Remove dependency" description={`Check whether ${row.name} can be removed from this project.`}>
-      <dl className="manage-glance manage-action-card__glance">
-        <GlanceRow label="Usage references">Not analyzed</GlanceRow>
-        <GlanceRow label="Peer requirements">Not analyzed</GlanceRow>
-        <GlanceRow label="Removal risk">Unknown</GlanceRow>
+      <dl className="manage-removal-stats">
+        <RemovalStatBox label="Usage analysis" value={usageChecking ? 'Checking usage…' : usageAnalysisLabel(usage)} spinning={usageChecking} />
+        <RemovalStatBox label="Peer requirements" value={peerValue} />
+        <RemovalStatBox label="Removal risk" value={riskValue} />
       </dl>
       {analyzing ? (
         <div className="manage-action-card__progress" role="status" aria-live="polite">
@@ -219,8 +247,13 @@ function RemoveCard({
           </span>
         </div>
       ) : (
-        <button type="button" className="button manage-action-card__cta" disabled={actionsDisabled} onClick={onStartRemovalReview}>
-          Analyze removal →
+        <button
+          type="button"
+          className="button manage-action-card__cta"
+          disabled={actionsDisabled}
+          onClick={entry !== undefined ? () => onChangeTab('removal') : onStartRemovalReview}
+        >
+          {entry !== undefined ? 'Review removal →' : 'Analyze removal →'}
         </button>
       )}
       {removalImpact.phase === 'error' ? (
@@ -405,26 +438,47 @@ export function OverviewPanel({
 }): ReactElement {
   const updateKind = classifyRowUpdate(row);
   const showTransitiveCard = hasEligibleTransitiveFix(row);
+  const usageChecking = usage === undefined || usage.phase === 'analyzing';
 
   return (
     <div className="overview-panel">
       <div className="overview-panel__summary">
-        {row.description !== undefined ? <p className="manage-summary__description">{row.description}</p> : null}
+        <section className="manage-summary-block" aria-labelledby="manage-package-overview-heading">
+          <h3 className="manage-section-heading" id="manage-package-overview-heading">
+            Package overview
+          </h3>
+          <dl className="manage-glance">
+            <GlanceRow label="Name">{row.name}</GlanceRow>
+            <GlanceRow label="Version">
+              <CurrentVersionCell row={row} />
+            </GlanceRow>
+            <GlanceRow label="Type">{CLASSIFICATION_LABEL[classificationOf(row)]}</GlanceRow>
+            <GlanceRow label="Installed">{row.current !== null ? 'Yes' : 'No'}</GlanceRow>
+          </dl>
+        </section>
 
-        <dl className="manage-glance">
-          <GlanceRow label="Installed version">{row.current ?? row.range}</GlanceRow>
-          <GlanceRow label="Latest version">{row.latest ?? '—'}</GlanceRow>
-          <GlanceRow label="Update available">
-            {row.upgradeTo === null ? 'None' : updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Yes'}
-          </GlanceRow>
-          <GlanceRow label="Usage analysis">{usageAnalysisLabel(usage)}</GlanceRow>
-        </dl>
+        <section className="manage-summary-block" aria-labelledby="manage-at-a-glance-heading">
+          <h3 className="manage-section-heading" id="manage-at-a-glance-heading">
+            At a glance
+          </h3>
+          <dl className="manage-glance">
+            <GlanceRow label="Installed version">{row.current ?? row.range}</GlanceRow>
+            <GlanceRow label="Latest version">{row.latest ?? '—'}</GlanceRow>
+            <GlanceRow label="Update available">
+              {row.upgradeTo === null ? 'None' : updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Yes'}
+            </GlanceRow>
+            <GlanceRow label="Vulnerabilities">
+              {row.advisories.length === 0 ? 'None' : <SeverityBadge severity={row.worstSeverity} />}
+            </GlanceRow>
+            <GlanceRow label="Usage analysis">{usageChecking ? <UsageCheckingStatus /> : usageAnalysisLabel(usage)}</GlanceRow>
+          </dl>
+        </section>
 
         <VulnerabilitySummary row={row} onChangeTab={onChangeTab} />
       </div>
 
       <div className="overview-panel__actions">
-        <h3 className="manage-modal__actions-heading">Available actions</h3>
+        <h3 className="manage-section-heading">Available actions</h3>
         <div className="manage-action-cards">
           <UpgradeCard
             row={row}
@@ -435,6 +489,7 @@ export function OverviewPanel({
           <RemoveCard
             row={row}
             removalImpact={removalImpact}
+            usage={usage}
             actionsDisabled={actionsDisabled}
             onStartRemovalReview={() => onStartRemovalReview(row.name)}
             onChangeTab={onChangeTab}

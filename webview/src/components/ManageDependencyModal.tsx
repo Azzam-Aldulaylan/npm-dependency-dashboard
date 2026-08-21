@@ -5,27 +5,19 @@ import type { PackageRow, Severity } from '../../../src/core/types.js';
 import type { DependencyFinding } from '../../../src/core/hygiene/types.js';
 import type { TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
 import type { RemoveAnalysisPresentation, UpgradeAnalysisPresentation } from '../../../src/host/webviewProtocol.js';
-import { IconShield, IconSliders, IconX } from '../icons.js';
+import { CLASSIFICATION_LABEL, classificationOf } from '../dependencyClassification.js';
+import { IconFolder, IconInfo, IconShield, IconSliders, IconTrash, IconTrendUp, IconX } from '../icons.js';
 import type { RemovalImpactState } from '../removalImpactState.js';
 import { OverviewPanel } from './OverviewPanel.js';
 import { PackageIcon } from './PackageIcon.js';
 import { RemovalReviewPanel } from './RemovalReviewPanel.js';
+import { StatusBadge } from './StatusBadge.js';
 import { UpgradeReviewPanel } from './UpgradeReviewPanel.js';
 import { UsageReferencesPanel } from './UsageReferencesPanel.js';
 import type { UsageRequestState } from './UsageReferencesPanel.js';
 import { VulnerabilitiesPanel } from './VulnerabilitiesPanel.js';
 
 export type ManageTabId = 'overview' | 'vulnerabilities' | 'usage' | 'upgrade' | 'removal';
-
-const CLASSIFICATION_LABEL: Record<'prod' | 'dev' | 'optional', string> = {
-  prod: 'Production',
-  dev: 'Development',
-  optional: 'Optional',
-};
-
-function classificationOf(row: PackageRow): 'prod' | 'dev' | 'optional' {
-  return row.dev ? 'dev' : 'prod';
-}
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -58,12 +50,14 @@ interface RemovalReviewState {
 function TabButton({
   id,
   label,
+  icon,
   active,
   dotTone,
   onSelect,
 }: {
   id: ManageTabId;
   label: string;
+  icon: ReactElement;
   active: boolean;
   /** A quiet, glanceable status dot — never a second announcement of information the tab's own content already states in full. Absent when there's nothing worth flagging. */
   dotTone?: 'neutral' | 'active' | Severity | undefined;
@@ -77,6 +71,9 @@ function TabButton({
       aria-selected={active}
       onClick={() => onSelect(id)}
     >
+      <span className="manage-tabs__icon" aria-hidden="true">
+        {icon}
+      </span>
       {label}
       {dotTone !== undefined ? <span className={`manage-tabs__dot manage-tabs__dot--${dotTone}`} aria-hidden="true" /> : null}
     </button>
@@ -282,14 +279,20 @@ export function ManageDependencyModal({
             <span className="manage-modal__header-icon" aria-hidden="true">
               <IconSliders />
             </span>
-            <div>
+            <div className="manage-modal__header-copy">
               <h2 className="modal__title" id="manage-dependency-title">
                 Manage dependency
               </h2>
-              <p className="modal__subtitle manage-modal__breadcrumb">
+              <p className="modal__subtitle">Choose an action or review package details.</p>
+              <div className="manage-modal__identity">
                 <PackageIcon name={row.name} />
-                {row.name} · {row.current ?? row.range} · {CLASSIFICATION_LABEL[classificationOf(row)]}
-              </p>
+                <span className="manage-modal__identity-name">{row.name}</span>
+                <StatusBadge label={row.current ?? row.range} />
+                <StatusBadge label={CLASSIFICATION_LABEL[classificationOf(row)]} />
+              </div>
+              {row.description !== undefined ? (
+                <p className="manage-modal__identity-description">{row.description}</p>
+              ) : null}
             </div>
           </div>
           <button type="button" className="modal__close" onClick={onClose} ref={closeButtonRef} aria-label="Close" disabled={blockClose}>
@@ -298,10 +301,11 @@ export function ManageDependencyModal({
         </header>
 
         <nav className="manage-tabs" role="tablist" aria-label="Manage dependency sections">
-          <TabButton id="overview" label="Overview" active={activeTab === 'overview'} onSelect={onChangeTab} />
+          <TabButton id="overview" label="Overview" icon={<IconInfo />} active={activeTab === 'overview'} onSelect={onChangeTab} />
           <TabButton
             id="vulnerabilities"
             label="Vulnerabilities"
+            icon={<IconShield />}
             active={activeTab === 'vulnerabilities'}
             dotTone={worstSeverity ?? undefined}
             onSelect={onChangeTab}
@@ -309,6 +313,7 @@ export function ManageDependencyModal({
           <TabButton
             id="usage"
             label="Usage & references"
+            icon={<IconFolder />}
             active={activeTab === 'usage'}
             dotTone={usageChecking ? 'active' : undefined}
             onSelect={onChangeTab}
@@ -316,6 +321,7 @@ export function ManageDependencyModal({
           <TabButton
             id="upgrade"
             label="Upgrade review"
+            icon={<IconTrendUp />}
             active={activeTab === 'upgrade'}
             dotTone={upgrade.active ? 'active' : undefined}
             onSelect={onChangeTab}
@@ -323,6 +329,7 @@ export function ManageDependencyModal({
           <TabButton
             id="removal"
             label="Removal review"
+            icon={<IconTrash />}
             active={activeTab === 'removal'}
             dotTone={removal.active ? 'active' : undefined}
             onSelect={onChangeTab}

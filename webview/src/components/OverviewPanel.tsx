@@ -453,7 +453,7 @@ export function OverviewPanel({
               <CurrentVersionCell row={row} />
             </GlanceRow>
             <GlanceRow label="Type">{CLASSIFICATION_LABEL[classificationOf(row)]}</GlanceRow>
-            <GlanceRow label="Installed">{row.current !== null ? 'Yes' : 'No'}</GlanceRow>
+            <GlanceRow label="License">{row.license ?? '—'}</GlanceRow>
           </dl>
         </section>
 

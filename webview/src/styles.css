@@ -823,6 +823,14 @@ button {
   color: var(--vscode-editorWarning-foreground);
 }
 
+.status-badge--accent {
+  border-color: var(--accent-total);
+  color: var(--vscode-button-foreground, #ffffff);
+  background: var(--accent-total);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
 .version-cell {
   display: inline-flex;
   flex-direction: column;
@@ -2104,11 +2112,12 @@ button {
 }
 
 /*
- * Deliberately a neutral card surface — the same widget background every
- * other card in this workspace uses. Semantic color (upgrade/remove/
- * transitive) is carried entirely by the left border, the icon circle, and
- * any badge/CTA inside — never by tinting the whole card, so a Remove card
- * never reads as an alarming block of red.
+ * A raised widget surface — the same elevated background the removal-stat
+ * boxes below use — so each card reads as a distinct clickable panel against
+ * the modal's own (darker) background, not just an outline. Semantic color
+ * (upgrade/remove/transitive) still lives in the left border, the icon
+ * circle, and any badge/CTA inside — never by tinting toward the accent
+ * hue itself, so a Remove card never reads as an alarming block of red.
  */
 .manage-action-card {
   display: flex;
@@ -2118,11 +2127,11 @@ button {
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
   border-left: 3px solid var(--manage-card-accent, var(--vscode-panel-border));
   border-radius: 6px;
-  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.06));
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
 }
 
 .manage-action-card--upgrade {
-  --manage-card-accent: var(--accent-total);
+  --manage-card-accent: var(--accent-updates);
 }
 
 .manage-action-card--remove {
@@ -2208,6 +2217,13 @@ button {
   margin-left: 0;
 }
 
+/* The update-kind badge (Minor/Major/Patch) is filled in the card's own accent, same treatment as the CTA — "Security fix" keeps its own distinct warning tone below since it's a different fact. */
+.manage-action-card__badges .status-badge:not(.status-badge--warning) {
+  border-color: var(--manage-card-accent);
+  background: var(--manage-card-accent);
+  color: var(--vscode-button-foreground, #ffffff);
+}
+
 .manage-action-card__status {
   display: flex;
   align-items: flex-start;
@@ -2264,6 +2280,30 @@ button {
 
 .manage-action-card__cta {
   align-self: flex-end;
+}
+
+/* Upgrade — the one direct-commit CTA here, filled in the card's own accent rather than the generic button blue. */
+.manage-action-card--upgrade .manage-action-card__cta {
+  border-color: var(--manage-card-accent);
+  background: var(--manage-card-accent);
+  color: var(--vscode-button-foreground, #ffffff);
+}
+
+.manage-action-card--upgrade .manage-action-card__cta:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--manage-card-accent) 82%, black);
+}
+
+/* Remove / Check transitive fixes — both start an analysis, not a direct commit, so both stay outlined in the card's own accent instead of a filled block. */
+.manage-action-card--remove .manage-action-card__cta,
+.manage-action-card--transitive .manage-action-card__cta {
+  border-color: var(--manage-card-accent);
+  background: transparent;
+  color: var(--manage-card-accent);
+}
+
+.manage-action-card--remove .manage-action-card__cta:hover:not(:disabled),
+.manage-action-card--transitive .manage-action-card__cta:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--manage-card-accent) 14%, transparent);
 }
 
 /*

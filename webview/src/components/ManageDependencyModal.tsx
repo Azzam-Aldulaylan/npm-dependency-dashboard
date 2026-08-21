@@ -288,7 +288,7 @@ export function ManageDependencyModal({
                 <PackageIcon name={row.name} />
                 <span className="manage-modal__identity-name">{row.name}</span>
                 <StatusBadge label={row.current ?? row.range} />
-                <StatusBadge label={CLASSIFICATION_LABEL[classificationOf(row)]} />
+                <StatusBadge label={CLASSIFICATION_LABEL[classificationOf(row)]} tone="accent" />
               </div>
               {row.description !== undefined ? (
                 <p className="manage-modal__identity-description">{row.description}</p>

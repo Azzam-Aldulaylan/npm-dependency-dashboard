@@ -144,6 +144,8 @@ export interface PackageRow {
   name: string;
   /** Human-readable registry summary, when the package publishes one. */
   description?: string;
+  /** SPDX id from the registry's `/latest` doc, when the package publishes one. */
+  license?: string;
   /**
    * The real, lockfile-resolved installed version, or null when there is
    * none — never a range/spec string. Callers (upgrade eligibility in

@@ -157,6 +157,7 @@ test('a clean row and a vulnerable row are both fully populated', async () => {
 
   const clean = rowFor(result, 'clean-pkg');
   assert.equal(clean.description, 'A clean fixture package.');
+  assert.equal(clean.license, 'MIT');
   assert.equal(clean.current, '1.0.0');
   assert.equal(clean.wanted, '1.0.1');
   assert.equal(clean.latest, '1.0.1');
@@ -168,6 +169,7 @@ test('a clean row and a vulnerable row are both fully populated', async () => {
   assert.equal(clean.upgradeReason, 'update');
 
   const vulnerable = rowFor(result, 'minimatch');
+  assert.equal(vulnerable.license, 'ISC');
   assert.equal(vulnerable.current, '3.0.4');
   assert.equal(vulnerable.wanted, '3.1.5');
   assert.equal(vulnerable.worstSeverity, 'high');

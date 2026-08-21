@@ -126,6 +126,12 @@ export function App(): ReactElement {
   const [removeAnalysis, setRemoveAnalysis] = useState<RemoveAnalysisPresentation | null>(null);
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState<UpgradeErrorState | null>(null);
+  // Set only when this removal review was opened from the Manage dependency
+  // modal (requestRemoveFromManage) — lets the review show "← Back" instead
+  // of "Cancel" and return to Manage rather than the dashboard. Starting a
+  // removal from Manage never clears `manageRow`, so "closing" this review
+  // is enough to reveal Manage again with its state intact.
+  const [removeOrigin, setRemoveOrigin] = useState<'dashboard' | 'manage-dependency' | null>(null);
   const activeRemoveRef = useRef<string | null>(null);
   useEffect(() => {
     activeRemoveRef.current = activeRemove;
@@ -174,11 +180,17 @@ export function App(): ReactElement {
   // for, and its own on-demand usage-analysis state per package — see
   // DependencyDetailsModal.tsx. Never a fact from the host's own scan.
   const [detailsPackage, setDetailsPackage] = useState<string | null>(null);
+  // Where the currently-open Dependency details drawer was opened from —
+  // 'dashboard' (the row's own Details button) keeps today's plain Close
+  // behavior; 'manage-dependency' (Manage's "View references"/"View
+  // vulnerability details") shows "← Back" instead, since `manageRow` below
+  // is deliberately left set in that case rather than cleared.
+  const [detailsOrigin, setDetailsOrigin] = useState<'dashboard' | 'manage-dependency'>('dashboard');
   // The row this webview session currently has "Manage dependency" open
-  // for — see ManageDependencyModal.tsx. Mutually exclusive with
-  // detailsPackage/bulkActionsOpen in practice (only one modal opens at a
-  // time from the table), but nothing here enforces that beyond each open
-  // handler implicitly replacing whichever modal state it sets.
+  // for — see ManageDependencyModal.tsx. Opening Details or a removal review
+  // *from* Manage deliberately leaves this set (rather than clearing it) so
+  // that modal renders underneath and reappears once the nested one closes
+  // — see requestOpenDetailsFromManage/requestRemoveFromManage.
   const [manageRow, setManageRow] = useState<string | null>(null);
   const [usageByPackage, setUsageByPackage] = useState<ReadonlyMap<string, UsageRequestState>>(() => new Map());
   // Read inside the auto-scan effect below without making it a dependency —
@@ -450,6 +462,7 @@ export function App(): ReactElement {
       setRemoveAnalysis(null);
       setRemoveBusy(false);
       setRemoveError(null);
+      setRemoveOrigin(null);
       setRemediationByPackage(new Map());
       setRemediationError(null);
       setRemediationBatch({ phase: 'idle' });
@@ -581,7 +594,11 @@ export function App(): ReactElement {
   }, []);
 
   const requestBulkRemove = useCallback(
-    (packageNames: readonly string[], matchTags: ReadonlyMap<string, readonly string[]>) => {
+    (
+      packageNames: readonly string[],
+      matchTags: ReadonlyMap<string, readonly string[]>,
+      origin: 'dashboard' | 'manage-dependency' = 'dashboard'
+    ) => {
       const first = packageNames[0];
       if (first === undefined) return;
       activeRemoveRef.current = first;
@@ -590,6 +607,7 @@ export function App(): ReactElement {
       setRemoveMatchTags(matchTags);
       setRemoveAnalysis(null);
       setRemoveBusy(false);
+      setRemoveOrigin(origin);
       vscode.postMessage({ type: 'bulk-remove', changes: packageNames.map((name) => ({ package: name })) });
     },
     []
@@ -601,7 +619,12 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'confirm-remove', analysisId: removeAnalysis.analysisId });
   }, [removeAnalysis]);
 
-  // Same immediate-client-side-close discipline as requestCancelUpgrade.
+  // Same immediate-client-side-close discipline as requestCancelUpgrade. Only
+  // ever closes this review itself — when it was opened from Manage
+  // (removeOrigin === 'manage-dependency'), `manageRow` was never cleared,
+  // so Manage simply reappears with its state intact. See
+  // requestCancelRemoveAndCloseManage below for the X/Escape "close the
+  // entire flow" path.
   const requestCancelRemove = useCallback(() => {
     vscode.postMessage({ type: 'cancel-remove', analysisId: removeAnalysis?.analysisId ?? null });
     setActiveRemove(null);
@@ -610,6 +633,7 @@ export function App(): ReactElement {
     setRemoveMatchTags(new Map());
     setRemoveAnalysis(null);
     setRemoveBusy(false);
+    setRemoveOrigin(null);
   }, [removeAnalysis]);
 
   // Selecting a card re-asserts that card's own intelligent default sort
@@ -675,6 +699,7 @@ export function App(): ReactElement {
   }, []);
 
   const openDetails = useCallback((packageName: string) => {
+    setDetailsOrigin('dashboard');
     setDetailsPackage(packageName);
   }, []);
 
@@ -693,6 +718,7 @@ export function App(): ReactElement {
       vscode.postMessage({ type: 'cancel-usage-analysis' });
     }
     setDetailsPackage(null);
+    setDetailsOrigin('dashboard');
   }, [detailsPackage]);
 
   // Opening the details modal for a package scans its usage automatically —
@@ -764,9 +790,20 @@ export function App(): ReactElement {
     setManageRow(null);
   }, [removalImpact, requestCancelRemovalImpact]);
 
+  // The removal review's X/Escape "close the entire flow" path when it was
+  // opened from Manage — unlike requestCancelRemove (the review's own
+  // "← Back"), this also closes Manage itself rather than revealing it.
+  const requestCancelRemoveAndCloseManage = useCallback(() => {
+    requestCancelRemove();
+    closeManage();
+  }, [requestCancelRemove, closeManage]);
+
   // Closes the Manage modal and hands off to the existing, unchanged
   // upgrade flow — the identical `{ type: 'upgrade' }` message/preflight/
-  // confirm pipeline the row's own former button already used.
+  // confirm pipeline the row's own former button already used. Upgrade has
+  // no "back to Manage" affordance (unlike Remove/Details) because it opens
+  // its own multi-step analysis flow, not a simple review — out of scope
+  // for this redesign's back-navigation.
   const requestReviewUpgradeFromManage = useCallback(
     (packageName: string, target: string) => {
       setManageRow(null);
@@ -775,11 +812,14 @@ export function App(): ReactElement {
     [requestUpgrade]
   );
 
-  // Closes the Manage modal and opens the existing Dependency details
-  // drawer, whose own effect immediately triggers "Where is this used?" —
-  // reusing that full reference browser rather than building a second one.
-  const requestViewReferencesFromManage = useCallback((packageName: string) => {
-    setManageRow(null);
+  // Opens the existing Dependency details drawer without closing Manage —
+  // `manageRow` is left set so "← Back" (DependencyDetailsModal's footer,
+  // once `detailsOrigin` is 'manage-dependency') can simply close this
+  // drawer and reveal Manage again with its state untouched. Used by both
+  // the Remove card's "View references" and the Vulnerabilities summary's
+  // "View vulnerability details".
+  const requestOpenDetailsFromManage = useCallback((packageName: string) => {
+    setDetailsOrigin('manage-dependency');
     setDetailsPackage(packageName);
   }, []);
 
@@ -787,11 +827,11 @@ export function App(): ReactElement {
   // a one-element list — RemoveAnalysisModal already branches on
   // `packages.length > 1` for its own copy, and the host's
   // validateBulkRemoveRequest/executeStoredRemoval path is unchanged either
-  // way.
+  // way. `manageRow` is left set — see requestCancelRemove's own doc for how
+  // "← Back" reveals Manage again.
   const requestRemoveFromManage = useCallback(
     (packageName: string) => {
-      setManageRow(null);
-      requestBulkRemove([packageName], new Map());
+      requestBulkRemove([packageName], new Map(), 'manage-dependency');
     },
     [requestBulkRemove]
   );
@@ -983,8 +1023,7 @@ export function App(): ReactElement {
                 onReviewUpgrade={requestReviewUpgradeFromManage}
                 onAnalyzeRemediation={requestAnalyzeRemediation}
                 onRemove={requestRemoveFromManage}
-                onViewReferences={requestViewReferencesFromManage}
-                onOpenAdvisory={requestOpenAdvisory}
+                onViewReferences={requestOpenDetailsFromManage}
                 onClose={closeManage}
               />
             );
@@ -1034,8 +1073,9 @@ export function App(): ReactElement {
           matchTags={removeMatchTags}
           busy={removeBusy}
           onConfirm={requestConfirmRemove}
-          onCancel={requestCancelRemove}
+          onCancel={removeOrigin === 'manage-dependency' ? requestCancelRemoveAndCloseManage : requestCancelRemove}
           onConfigureVerification={requestConfigureVerification}
+          {...(removeOrigin === 'manage-dependency' ? { onBack: requestCancelRemove } : {})}
         />
       ) : null}
 
@@ -1051,6 +1091,8 @@ export function App(): ReactElement {
               onRequestUsage={requestWhereUsed}
               onReanalyzeUsage={requestReanalyzeUsage}
               onOpenUsageReference={requestOpenUsageReference}
+              onOpenAdvisory={requestOpenAdvisory}
+              origin={detailsOrigin}
               now={minuteClock}
               onClose={closeDetails}
             />

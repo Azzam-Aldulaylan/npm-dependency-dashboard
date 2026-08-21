@@ -1,13 +1,15 @@
 import { useEffect, useRef } from 'react';
 import type { MouseEvent as ReactMouseEvent, ReactElement } from 'react';
 
-import type { PackageRow } from '../../../src/core/types.js';
+import type { AttributedAdvisory, PackageRow, Severity } from '../../../src/core/types.js';
+import { sortAdvisoriesBySeverity } from '../../../src/host/severityDisplay.js';
 import { classifyRowUpdate } from '../../../src/host/updateClassification.js';
 import type { TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
 import { hasEligibleTransitiveFix, resolveActionState } from '../../../src/host/upgradeAction.js';
 import {
   IconAlertTriangle,
   IconCheck,
+  IconChevronRight,
   IconHelpCircle,
   IconRefresh,
   IconRoute,
@@ -21,7 +23,7 @@ import { REMOVAL_IMPACT_LABEL } from '../removalImpactState.js';
 import type { RemovalImpactState } from '../removalImpactState.js';
 import { PackageIcon } from './PackageIcon.js';
 import { SeverityBadge } from './SeverityBadge.js';
-import { VulnerabilityCard } from './VulnerabilityCard.js';
+import { patchedVersionText } from './VulnerabilityCard.js';
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -340,6 +342,80 @@ function TransitiveFixCard({
   );
 }
 
+const SEVERITY_ORDER: readonly Severity[] = ['critical', 'high', 'moderate', 'low', 'info'];
+
+/** Worst-first severity totals — e.g. `[['critical', 1], ['moderate', 1]]`. Never includes a zero count. */
+function severityCounts(advisories: readonly AttributedAdvisory[]): [Severity, number][] {
+  const counts = new Map<Severity, number>();
+  for (const entry of advisories) counts.set(entry.advisory.severity, (counts.get(entry.advisory.severity) ?? 0) + 1);
+  return SEVERITY_ORDER.filter((severity) => counts.has(severity)).map((severity) => [severity, counts.get(severity) as number]);
+}
+
+function fixLabel(patched: AttributedAdvisory['patchedVersion']): string {
+  if (patched.status === 'known') return `Fixed in ${patched.version}`;
+  if (patched.status === 'none') return 'No known fix';
+  return `Fix unknown (${patchedVersionText(patched)})`;
+}
+
+const MAX_COMPACT_VULNERABILITIES = 2;
+
+/**
+ * The compact "VULNERABILITIES" summary — severity totals plus the one or
+ * two most urgent advisories, worst-first (sortAdvisoriesBySeverity). Never
+ * the full VulnerabilityCard list Dependency Details renders: this modal
+ * answers "should I act on this", not "tell me everything" — see the
+ * Manage-vs-Details split in the redesign brief. "View vulnerability
+ * details" hands off to the existing Dependency Details modal, which owns
+ * the complete advisory list.
+ */
+function ManageVulnerabilitySummary({
+  row,
+  onOpenDetails,
+}: {
+  row: PackageRow;
+  onOpenDetails: () => void;
+}): ReactElement | null {
+  if (row.advisories.length === 0) return null;
+  const sorted = sortAdvisoriesBySeverity(row.advisories);
+  const shown = sorted.slice(0, MAX_COMPACT_VULNERABILITIES);
+  const remaining = sorted.length - shown.length;
+
+  return (
+    <section className="manage-vulnerabilities" aria-labelledby="manage-vulnerabilities-heading">
+      <h3 className="manage-vulnerabilities__heading" id="manage-vulnerabilities-heading">
+        <IconShield className="manage-vulnerabilities__heading-icon" />
+        Vulnerabilities
+      </h3>
+      <ul className="manage-vulnerabilities__counts">
+        {severityCounts(row.advisories).map(([severity, count]) => (
+          <li key={severity} className="manage-vulnerabilities__count">
+            <SeverityBadge severity={severity} />
+            <span>{count}</span>
+          </li>
+        ))}
+      </ul>
+      <ul className="manage-vulnerabilities__items">
+        {shown.map((entry, index) => (
+          <li key={`${String(entry.advisory.id)}:${entry.flaggedPackage}:${index}`} className="manage-vulnerabilities__item">
+            <code className="manage-vulnerabilities__item-package">{entry.flaggedPackage}</code>
+            <SeverityBadge severity={entry.advisory.severity} />
+            <span className="manage-vulnerabilities__item-fix">{fixLabel(entry.patchedVersion)}</span>
+          </li>
+        ))}
+      </ul>
+      {remaining > 0 ? (
+        <p className="manage-vulnerabilities__more">
+          +{remaining} more vulnerabilit{remaining === 1 ? 'y' : 'ies'}
+        </p>
+      ) : null}
+      <button type="button" className="manage-vulnerabilities__link" onClick={onOpenDetails}>
+        View vulnerability details
+        <IconChevronRight />
+      </button>
+    </section>
+  );
+}
+
 /**
  * The unified "Manage dependency" entry point — a single modal shell that
  * replaces the row's former upgrade-specific button with one consistent
@@ -369,7 +445,6 @@ export function ManageDependencyModal({
   onAnalyzeRemediation,
   onRemove,
   onViewReferences,
-  onOpenAdvisory,
   onClose,
 }: {
   row: PackageRow;
@@ -382,8 +457,8 @@ export function ManageDependencyModal({
   onReviewUpgrade: (packageName: string, target: string) => void;
   onAnalyzeRemediation: (packageName: string) => void;
   onRemove: (packageName: string) => void;
+  /** Opens Dependency Details for this package — reused by both the Remove card's "View references" and the Vulnerabilities summary's "View vulnerability details". */
   onViewReferences: (packageName: string) => void;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
   onClose: () => void;
 }): ReactElement {
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -488,15 +563,6 @@ export function ManageDependencyModal({
                 <GlanceRow label="Update available">
                   {row.upgradeTo === null ? 'None' : updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Yes'}
                 </GlanceRow>
-                <GlanceRow label="Vulnerabilities">
-                  {row.worstSeverity === null ? (
-                    'None'
-                  ) : (
-                    <span className="manage-glance__severity">
-                      {row.advisories.length} <SeverityBadge severity={row.worstSeverity} />
-                    </span>
-                  )}
-                </GlanceRow>
                 <GlanceRow label="Usage analysis">
                   {entry === undefined ? 'Not analyzed' : REMOVAL_IMPACT_LABEL[entry.assessment.status]}
                 </GlanceRow>
@@ -504,27 +570,7 @@ export function ManageDependencyModal({
               </dl>
             </div>
 
-            {row.advisories.length > 0 ? (
-              <section className="manage-vulnerabilities" aria-labelledby="manage-vulnerabilities-heading">
-                <h3 className="analysis-card__title" id="manage-vulnerabilities-heading">
-                  <IconShield className="analysis-card__title-icon" />
-                  Vulnerabilities ({row.advisories.length})
-                </h3>
-                <ul className="analysis-card__vulnerabilities">
-                  {row.advisories.map((advisory, index) => (
-                    <VulnerabilityCard
-                      key={`${String(advisory.advisory.id)}:${advisory.flaggedPackage}:${index}`}
-                      advisory={advisory.advisory}
-                      flaggedPackage={advisory.flaggedPackage}
-                      path={advisory.path}
-                      patchedVersion={advisory.patchedVersion}
-                      rootPackageName={row.name}
-                      onOpenAdvisory={onOpenAdvisory}
-                    />
-                  ))}
-                </ul>
-              </section>
-            ) : null}
+            <ManageVulnerabilitySummary row={row} onOpenDetails={() => onViewReferences(row.name)} />
           </div>
 
           <div className="manage-modal__actions">

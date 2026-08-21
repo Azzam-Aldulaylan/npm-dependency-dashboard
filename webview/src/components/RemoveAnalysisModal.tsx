@@ -34,6 +34,7 @@ export function RemoveAnalysisModal({
   busy,
   onConfirm,
   onCancel,
+  onBack,
   onConfigureVerification,
 }: {
   packages: readonly string[];
@@ -42,7 +43,17 @@ export function RemoveAnalysisModal({
   matchTags: ReadonlyMap<string, readonly string[]>;
   busy: boolean;
   onConfirm: () => void;
+  /** X and Escape always call this — closes the entire flow (releases the host's removal lock), regardless of `onBack`. */
   onCancel: () => void;
+  /**
+   * Present only when this review was opened from the Manage dependency
+   * modal (App.tsx's requestRemoveFromManage) — replaces the footer's
+   * "Cancel" with "← Back", returning to Manage instead of the dashboard.
+   * Manage's own state (removal-impact preview, the package being managed)
+   * is never cleared by starting this flow, so there is nothing extra to
+   * restore here; going back is simply closing this modal.
+   */
+  onBack?: () => void;
   onConfigureVerification: () => void;
 }): ReactElement {
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -179,8 +190,8 @@ export function RemoveAnalysisModal({
         )}
 
         <footer className="modal__footer">
-          <button type="button" className="button button--secondary" onClick={onCancel} disabled={busy}>
-            Cancel
+          <button type="button" className="button button--secondary" onClick={onBack ?? onCancel} disabled={busy}>
+            {onBack ? '← Back' : 'Cancel'}
           </button>
           <button
             type="button"

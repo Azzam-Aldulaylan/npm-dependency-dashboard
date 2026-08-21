@@ -10,7 +10,8 @@ import {
   introducedDuplicateFindings,
   ownDuplicateFinding,
 } from '../../../src/host/dependencyDetailsCopy.js';
-import { IconAlertTriangle, IconRefresh, IconTarget, IconX } from '../icons.js';
+import { IconAlertTriangle, IconRefresh, IconShield, IconTarget, IconX } from '../icons.js';
+import { AdvisoryDetails } from './AdvisoryDetails.js';
 
 export type UsageRequestState =
   | { phase: 'analyzing' }
@@ -131,11 +132,21 @@ const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
- * The row-level "Dependency details" drawer — deprecated status, duplicate-
- * version paths (this package's own, and any it introduces transitively),
- * its registry description, and on-demand "Where is this used?" — all reusing
- * data the scan already produced, plus one explicit on-demand usage scan.
- * Never a redesign of the main table; opened from the row's Details action.
+ * The row-level "Dependency details" drawer — full advisories, deprecated
+ * status, duplicate-version paths (this package's own, and any it introduces
+ * transitively), its registry description, and on-demand "Where is this
+ * used?" — all reusing data the scan already produced, plus one explicit
+ * on-demand usage scan. This is the "tell me everything" counterpart to the
+ * Manage dependency modal's "what can I do" — see ManageDependencyModal.tsx's
+ * own doc on the split; the two are never allowed to duplicate a full-detail
+ * experience.
+ *
+ * Opened either directly from the dashboard row's Details action (`origin:
+ * 'dashboard'`, today's plain Close behavior) or from within Manage
+ * dependency (`origin: 'manage-dependency'`, via "View references"/"View
+ * vulnerability details") — the footer shows "← Back" in the latter case
+ * since App.tsx deliberately never clears `manageRow` when opening this from
+ * Manage, so closing this drawer reveals Manage again with its state intact.
  */
 export function DependencyDetailsModal({
   row,
@@ -144,6 +155,8 @@ export function DependencyDetailsModal({
   onRequestUsage,
   onReanalyzeUsage,
   onOpenUsageReference,
+  onOpenAdvisory,
+  origin,
   now,
   onClose,
 }: {
@@ -153,6 +166,8 @@ export function DependencyDetailsModal({
   onRequestUsage: (packageName: string) => void;
   onReanalyzeUsage: (packageName: string) => void;
   onOpenUsageReference: (usageId: string, referenceIndex: number) => void;
+  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  origin: 'dashboard' | 'manage-dependency';
   now: number;
   onClose: () => void;
 }): ReactElement {
@@ -210,7 +225,13 @@ export function DependencyDetailsModal({
               {row.name}
             </h2>
           </div>
-          <button type="button" className="modal__close" onClick={onClose} ref={closeButtonRef} aria-label="Close dependency details">
+          <button
+            type="button"
+            className="modal__close"
+            onClick={onClose}
+            ref={closeButtonRef}
+            aria-label={origin === 'manage-dependency' ? 'Back to Manage dependency' : 'Close dependency details'}
+          >
             <IconX />
           </button>
         </header>
@@ -229,6 +250,16 @@ export function DependencyDetailsModal({
                 </p>
               ) : null}
               <p className="analysis-card__hint">Suggested action: review replacement / migration.</p>
+            </section>
+          ) : null}
+
+          {row.advisories.length > 0 ? (
+            <section className="analysis-card" aria-labelledby="dependency-details-vulnerabilities-heading">
+              <h3 className="analysis-card__title" id="dependency-details-vulnerabilities-heading">
+                <IconShield className="analysis-card__title-icon" />
+                Vulnerabilities ({row.advisories.length})
+              </h3>
+              <AdvisoryDetails packageName={row.name} advisories={row.advisories} onOpenAdvisory={onOpenAdvisory} />
             </section>
           ) : null}
 
@@ -317,7 +348,7 @@ export function DependencyDetailsModal({
 
         <footer className="modal__footer">
           <button type="button" className="button button--secondary" onClick={onClose}>
-            Close
+            {origin === 'manage-dependency' ? '← Back' : 'Close'}
           </button>
         </footer>
       </div>

@@ -49,21 +49,24 @@ function PackageTagsInfo(): ReactElement {
 }
 
 /**
- * What the two Action-column buttons do — every row uses the identical pair,
- * regardless of this row's own upgrade/vulnerability/removal state. Manage
- * opens a modal with the full picture (see ManageDependencyModal.tsx);
- * nothing about risk or eligibility is encoded in the button itself.
+ * What the Action column's one button does — every row uses the identical
+ * button, regardless of this row's own upgrade/vulnerability/removal state.
+ * Manage opens the full dependency workspace (see ManageDependencyModal.tsx)
+ * — Overview, Vulnerabilities, Usage & references, Upgrade review, and
+ * Removal review all live there now; nothing about risk or eligibility is
+ * encoded in the button itself.
  */
 function ActionColumnInfo(): ReactElement {
   return (
     <InfoTooltip
-      label="What the action buttons mean"
+      label="What the action button means"
       content={
         <dl>
           <dt>Manage</dt>
-          <dd>Opens Upgrade, Remove, and (when relevant) Check transitive fixes for this dependency — badges and versions elsewhere in the row already show what's worth a second look.</dd>
-          <dt>Details</dt>
-          <dd>Package description, duplicate-version paths, and on-demand usage analysis.</dd>
+          <dd>
+            Opens the dependency workspace — overview, full vulnerability details, usage &amp; references, and Upgrade
+            or Removal review, all in one place.
+          </dd>
         </dl>
       }
     />
@@ -160,7 +163,6 @@ export function PackageTable({
   onSort,
   onOpenAdvisory,
   hygieneFindings,
-  onOpenDetails,
   onOpenManage,
 }: {
   rows: readonly PackageRow[];
@@ -169,7 +171,6 @@ export function PackageTable({
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
   /** Deprecated + duplicate-version findings from the current scan, plus any likely-unused findings from a completed "Analyze cleanup" run — see App.tsx. */
   hygieneFindings: readonly DependencyFinding[];
-  onOpenDetails: (packageName: string) => void;
   onOpenManage: (packageName: string) => void;
 }): ReactElement {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
@@ -258,7 +259,7 @@ export function PackageTable({
                     type="button"
                     className="packages__name-primary packages__name-button"
                     onClick={() => {
-                      onOpenDetails(row.name);
+                      onOpenManage(row.name);
                     }}
                   >
                     <PackageIcon name={row.name} />
@@ -306,15 +307,6 @@ export function PackageTable({
                 <td className="packages__action-cell">
                   <div className="packages__actions">
                     <ManageButton row={row} onOpenManage={onOpenManage} />
-                    <button
-                      type="button"
-                      className="button button--secondary packages__details-button"
-                      onClick={() => {
-                        onOpenDetails(row.name);
-                      }}
-                    >
-                      Details
-                    </button>
                   </div>
                 </td>
               </tr>

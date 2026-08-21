@@ -192,8 +192,11 @@ export class DashboardPanel {
       ensureController: () => this.ensureController(),
       getSelectedProject: () => this.selectedProject,
       isDisposed: () => this.disposed,
-      reloadFinalState: () => this.reloadAndScan(),
+      reloadFinalState: () => this.reloadAndScan(undefined, { forceUsageRecheck: true }),
       flushDeferredChanges: () => this.fileChangeCoordinator.flushDeferred(),
+      onMutationLockReleased: () => {
+        void this.usageCoordinator.runPendingBackgroundRefresh();
+      },
       performanceEnabled: this.performanceEnabled,
     });
     this.usageCoordinator = new UsageAnalysisCoordinator({
@@ -201,8 +204,8 @@ export class DashboardPanel {
       ensureController: () => this.ensureController(),
       getSelectedProject: () => this.selectedProject,
       isDisposed: () => this.disposed,
-      performanceEnabled: this.performanceEnabled,
       isUpgradeBusy: () => this.upgradeCoordinator.isBusy(),
+      performanceEnabled: this.performanceEnabled,
     });
     this.backgroundTimer = new BackgroundRefreshTimer(realTimerScheduler, BACKGROUND_REFRESH_INTERVAL_MS, () => {
       this.onBackgroundTick();
@@ -270,12 +273,10 @@ export class DashboardPanel {
 
   private async handle(message: WebviewToHostMessage): Promise<void> {
     if (message.type === 'upgrade') {
-      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeUpgrade(message);
       return;
     }
     if (message.type === 'bulk-upgrade') {
-      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeBulkUpgrade(message);
       return;
     }
@@ -292,7 +293,6 @@ export class DashboardPanel {
       return;
     }
     if (message.type === 'bulk-remove') {
-      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeBulkRemove(message);
       return;
     }
@@ -320,7 +320,6 @@ export class DashboardPanel {
         });
         return;
       }
-      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeRemediation(message);
       return;
     }
@@ -332,7 +331,6 @@ export class DashboardPanel {
         });
         return;
       }
-      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.upgradeCoordinator.handleAnalyzeRemediations(message);
       return;
     }
@@ -351,7 +349,6 @@ export class DashboardPanel {
         });
         return;
       }
-      await this.usageCoordinator.joinBackgroundAnalysis();
       await this.usageCoordinator.handleWhereUsed(message);
       return;
     }
@@ -364,7 +361,6 @@ export class DashboardPanel {
         });
         return;
       }
-      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.usageCoordinator.handleWhereUsed(message, true);
       return;
     }
@@ -376,8 +372,7 @@ export class DashboardPanel {
         });
         return;
       }
-      const joinedFreshScan = await this.usageCoordinator.promoteAndJoinBackgroundAnalysis();
-      if (!joinedFreshScan) await this.usageCoordinator.handleAnalyzeCleanup();
+      await this.usageCoordinator.handleAnalyzeCleanup();
       return;
     }
     if (message.type === 'cancel-usage-analysis') {
@@ -394,7 +389,6 @@ export class DashboardPanel {
         });
         return;
       }
-      await this.usageCoordinator.cancelBackgroundAnalysis();
       await this.usageCoordinator.handleAnalyzeRemovalImpact(message);
       return;
     }
@@ -422,10 +416,11 @@ export class DashboardPanel {
       // package.json/lockfile from disk — see reloadAndScan — so externally
       // changed dependencies show up, without silently reverting to
       // whichever candidate discovery happened to find first.
-      // `forceUsageRecheck: true` — an explicit Refresh click re-verifies
-      // usage in the background the same way a first-ever open does,
-      // bypassing the fingerprint gate other reload paths respect. See
-      // autoAnalyzeCleanupIfStale's own doc for why forcing is safe here.
+      // `forceUsageRecheck: true` — an explicit Refresh click guarantees one
+      // fresh usage/cleanup background pass the same way a first-ever open
+      // does, bypassing the fingerprint gate other reload paths respect. See
+      // UsageAnalysisCoordinator.requestBackgroundUsageRefresh's own doc for
+      // why forcing is safe here.
       await this.reloadAndScan(this.selectedProject, { forceUsageRecheck: true });
       return;
     }
@@ -436,7 +431,7 @@ export class DashboardPanel {
     const controller = await this.ensureController();
     if (controller === undefined) return; // ensureController already posted the failure.
     await controller.handleReady(this.sink);
-    void this.usageCoordinator.autoAnalyzeCleanupIfStale(controller);
+    void this.usageCoordinator.requestBackgroundUsageRefresh();
   }
 
   /**
@@ -671,7 +666,14 @@ export class DashboardPanel {
     // belongs to whatever project is now actually selected, not the one this
     // call was for. Bail without flushing anything.
     if (this.disposed || generation !== this.reloadGeneration) return;
-    void this.usageCoordinator.autoAnalyzeCleanupIfStale(controller, { force: options.forceUsageRecheck === true });
+
+    // Queued, not awaited: dependency data is already published to the
+    // webview above, so usage/cleanup analysis must never block on it — it
+    // runs quietly in the background, or is deferred if something (another
+    // usage analysis, or the mutation lock this call may itself still be
+    // running under, e.g. an upgrade's `reloadFinalState`) is still busy.
+    // See UsageAnalysisCoordinator.requestBackgroundUsageRefresh's own doc.
+    void this.usageCoordinator.requestBackgroundUsageRefresh({ force: options.forceUsageRecheck === true });
 
     // Whatever is pending now is guaranteed to be from the *currently
     // active* watchers — any old-project leftover was already cleared above
@@ -819,7 +821,7 @@ export class DashboardPanel {
     const controller = this.controller;
     void controller.refreshInBackground(this.sink).then(() => {
       if (this.disposed || this.controller !== controller) return;
-      void this.usageCoordinator.autoAnalyzeCleanupIfStale(controller);
+      void this.usageCoordinator.requestBackgroundUsageRefresh();
     });
   }
 

@@ -6,7 +6,8 @@ import { IconShield } from '../icons.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
 import { VulnerabilityCard } from './VulnerabilityCard.js';
 
-function overallDetail(security: SecurityOutcome): string | undefined {
+/** Exported for the Upgrade review tab's compact Security outcome card, which reuses this exact wording rather than composing its own. */
+export function overallDetail(security: SecurityOutcome): string | undefined {
   const resolvedCount = security.resolvedAdvisories.length;
   const remainingCount = security.remaining.filter((r) => r.status === 'remains').length;
   const unknownCount = security.remaining.filter((r) => r.status === 'unknown').length;

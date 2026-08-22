@@ -3115,10 +3115,154 @@ button {
 
 .review-panel__footer {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
   gap: 0.6rem;
   padding-top: 0.9rem;
   border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+}
+
+/* Same two-column shell as .overview-panel / .vuln-tab / .usage-tab — one visual system across every tab. */
+.upgrade-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+@media (min-width: 46rem) {
+  .upgrade-tab {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .upgrade-tab__summary {
+    flex: 0 0 13.5rem;
+    min-width: 0;
+  }
+
+  .upgrade-tab__details {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+}
+
+.upgrade-tab__summary {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.upgrade-tab__details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.upgrade-summary__before-after {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.upgrade-recommended__cta {
+  background: var(--accent-total);
+  border-color: var(--accent-total);
+  color: var(--vscode-button-foreground, #ffffff);
+}
+
+.upgrade-recommended__cta:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-total) 85%, black);
+}
+
+.upgrade-preview__versions {
+  flex-wrap: wrap;
+}
+
+/* A third, neutral tone for a compatibility check with no real signal to report — never green (claims data it doesn't have) or orange (claims a problem that isn't known). */
+.hygiene-strip__item--unknown {
+  color: var(--vscode-descriptionForeground);
+}
+
+.security-outcome {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.security-outcome__box {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.security-outcome__label {
+  margin: 0 0 0.2rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.security-outcome__value {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.9em;
+}
+
+.security-outcome__value--bad {
+  color: var(--vscode-editorError-foreground);
+}
+
+.security-outcome__value--good {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.security-outcome__detail {
+  margin: 0.15rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+}
+
+.upgrade-files-list__item {
+  gap: 0.6rem;
+}
+
+.upgrade-files-list__item .status-badge {
+  margin-left: auto;
+}
+
+.verification-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verification-steps__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  font-size: 0.85em;
+}
+
+.verification-steps__item code {
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.15));
+  font-family: var(--vscode-editor-font-family, monospace);
 }
 
 /*

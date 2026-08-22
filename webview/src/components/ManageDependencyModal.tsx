@@ -251,12 +251,13 @@ export function ManageDependencyModal({
         analyzingPhase={upgrade.analyzingPhase}
         analysis={upgrade.analysis}
         busy={upgrade.busy}
+        usage={usage}
         onAnalyzeUpgrade={upgrade.onAnalyze}
         onConfirm={upgrade.onConfirm}
         onUseSmartPlan={upgrade.onUseSmartPlan}
         onCancel={cancelUpgradeReview}
         onConfigureVerification={upgrade.onConfigureVerification}
-        onOpenAdvisory={onOpenAdvisory}
+        onChangeTab={onChangeTab}
       />
     );
   } else {

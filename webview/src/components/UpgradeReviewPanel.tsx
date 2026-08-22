@@ -125,8 +125,6 @@ function AtAGlanceCard({
         At a glance
       </h3>
       <dl className="manage-glance">
-        <GlanceRow label="Installed version">{row.current ?? row.range}</GlanceRow>
-        <GlanceRow label="Latest version">{row.latest ?? '—'}</GlanceRow>
         <GlanceRow label="Update available">
           {row.upgradeTo === null ? 'None' : updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Yes'}
         </GlanceRow>
@@ -290,12 +288,15 @@ function CompatibilityCheckCard({
 }): ReactElement {
   const peerFindings = compatibility.findings.filter((finding) => PEER_FINDING_KINDS.has(finding.kind));
   const peerProblems = peerFindings.filter((finding) => finding.status !== 'compatible');
+  // An empty peer-findings list is never claimed as "no peer dependencies" —
+  // the underlying compatibility check (see CompatibilitySection.tsx's own
+  // fallback copy) can't distinguish "genuinely has none" from "nothing was
+  // available to check", so both collapse to the same honest "Not checked"
+  // this card already uses for the two checks with no detector at all.
   const peerTone: CompatCheckTone = peerFindings.length === 0 ? 'unknown' : peerProblems.length > 0 ? 'warn' : 'ok';
   const peerValue =
     peerFindings.length === 0
-      ? compatibility.completeness === 'partial'
-        ? 'Unknown'
-        : 'No peer dependencies'
+      ? 'Not checked'
       : peerProblems.length > 0
         ? `${peerProblems.length} conflict${peerProblems.length === 1 ? '' : 's'}`
         : 'No conflicts';

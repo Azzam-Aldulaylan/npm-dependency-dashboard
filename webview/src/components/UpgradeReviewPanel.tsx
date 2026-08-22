@@ -3,13 +3,12 @@ import type { ReactElement } from 'react';
 import type { PackageRow, Severity } from '../../../src/core/types.js';
 import type {
   CompatibilityFindingKind,
-  UpgradeAnalysisCompatibility,
   UpgradeAnalysisFiles,
   UpgradeAnalysisPresentation,
   UpgradeAnalysisVerification,
 } from '../../../src/host/webviewProtocol.js';
 import { compatibilityOutcomeDisplay, securityOutcomeDisplay, upgradeSafetyHeadline } from '../../../src/host/outcomeCopy.js';
-import { classifyRowUpdate, classifyUpdate } from '../../../src/host/updateClassification.js';
+import { classifyUpdate } from '../../../src/host/updateClassification.js';
 import { severityDisplay } from '../../../src/host/severityDisplay.js';
 import {
   IconAlertTriangle,
@@ -27,7 +26,7 @@ import type { ManageTabId } from './ManageDependencyModal.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
 import { SmartPlanSection } from './SmartPlanSection.js';
 import { UpgradeAnalysisLoading } from './UpgradeAnalysisLoading.js';
-import { primaryAction } from './UpgradeAnalysisModal.js';
+import { overallStatusDetail, primaryAction } from './UpgradeAnalysisModal.js';
 import type { UsageRequestState } from './UsageReferencesPanel.js';
 
 const UPDATE_KIND_LABEL: Record<'major' | 'minor' | 'patch', string> = {
@@ -116,7 +115,6 @@ function AtAGlanceCard({
   analysis: UpgradeAnalysisPresentation;
   usage: UsageRequestState | undefined;
 }): ReactElement {
-  const updateKind = classifyRowUpdate(row);
   const needsAttention = row.worstSeverity === 'critical' || row.worstSeverity === 'high';
 
   return (
@@ -125,9 +123,6 @@ function AtAGlanceCard({
         At a glance
       </h3>
       <dl className="manage-glance">
-        <GlanceRow label="Update available">
-          {row.upgradeTo === null ? 'None' : updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Yes'}
-        </GlanceRow>
         <GlanceRow label="Vulnerabilities">
           {row.advisories.length === 0 ? (
             'None'
@@ -279,13 +274,10 @@ const PEER_FINDING_KINDS: ReadonlySet<CompatibilityFindingKind> = new Set([
  * detection do not exist in the analysis pipeline at all, so both render
  * "Not checked" rather than a fabricated "Compatible"/"None detected".
  */
-function CompatibilityCheckCard({
-  compatibility,
-  majorUpdate,
-}: {
-  compatibility: UpgradeAnalysisCompatibility;
-  majorUpdate: boolean;
-}): ReactElement {
+function CompatibilityCheckCard({ analysis }: { analysis: UpgradeAnalysisPresentation }): ReactElement {
+  const { compatibility, majorUpdate } = analysis;
+  const summary = overallStatusDetail(analysis);
+  const summaryTone = compatibilityOutcomeDisplay(compatibility.status).className;
   const peerFindings = compatibility.findings.filter((finding) => PEER_FINDING_KINDS.has(finding.kind));
   const peerProblems = peerFindings.filter((finding) => finding.status !== 'compatible');
   // An empty peer-findings list is never claimed as "no peer dependencies" —
@@ -309,6 +301,18 @@ function CompatibilityCheckCard({
         <IconRoute className="analysis-card__title-icon" />
         Compatibility check
       </h3>
+      {summary !== undefined ? (
+        <p className={`usage-status${summaryTone === 'compatible' ? ' usage-status--ok' : summaryTone === 'conflict' ? ' usage-status--error' : ''}`}>
+          {summaryTone === 'compatible' ? (
+            <IconCheck className="usage-status__icon" />
+          ) : summaryTone === 'conflict' ? (
+            <IconAlertTriangle className="usage-status__icon" />
+          ) : (
+            <IconHelpCircle className="usage-status__icon" />
+          )}
+          {summary}
+        </p>
+      ) : null}
       <div className="hygiene-strip">
         <CompatCheckItem tone={peerTone} label="Peer dependencies" value={peerValue} />
         <CompatCheckItem tone="unknown" label="Engine requirements" value="Not checked" />
@@ -584,7 +588,7 @@ export function UpgradeReviewPanel({
         </div>
         <div className="upgrade-tab__details">
           <UpgradePreviewCard analysis={analysis} busy={busy} onReanalyze={() => onAnalyzeUpgrade(targetVersion)} />
-          <CompatibilityCheckCard compatibility={analysis.compatibility} majorUpdate={analysis.majorUpdate} />
+          <CompatibilityCheckCard analysis={analysis} />
           {analysis.smartPlan !== null ? <SmartPlanSection smartPlan={analysis.smartPlan} /> : <SimpleUpgradePlanCard row={row} analysis={analysis} />}
           <SecurityOutcomeCard row={row} security={analysis.security} onChangeTab={onChangeTab} />
           <FilesModifiedCard files={analysis.files} />

@@ -3178,6 +3178,21 @@ button {
 
 .upgrade-preview__versions {
   flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+
+/*
+ * These three reuse markup sized for a roomier context (OutcomeStatus's
+ * bulk-modal headline, SmartPlanSection's own banner) — scoped down here so
+ * this tab's cards read at the same compact scale as Overview/Vulnerabilities/
+ * Usage & references, instead of standing out larger than their neighbors.
+ */
+.upgrade-tab .outcome-status__label {
+  font-size: 0.92em;
+}
+
+.upgrade-tab .smart-plan__package {
+  font-size: 0.88em;
 }
 
 /* A third, neutral tone for a compatibility check with no real signal to report — never green (claims data it doesn't have) or orange (claims a problem that isn't known). */

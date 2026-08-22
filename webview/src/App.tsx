@@ -8,6 +8,7 @@ import { dependencyCountLabel } from '../../src/host/dependencySummary.js';
 import { filterEmptyStateTitle } from '../../src/host/emptyStateCopy.js';
 import type { HygieneFilterId } from '../../src/host/hygieneFilter.js';
 import { hygieneFilterCounts, hygieneFilterPredicate } from '../../src/host/hygieneFilter.js';
+import { manageRemovalReadyPackage } from '../../src/host/manageRemovalFlow.js';
 import type { PageSize } from '../../src/host/pagination.js';
 import { DEFAULT_PAGE_SIZE, paginate } from '../../src/host/pagination.js';
 import type { SummaryFilterId } from '../../src/host/summaryMetrics.js';
@@ -216,6 +217,10 @@ export function App(): ReactElement {
   // own doc for why the bulk Review step and the single-package "Analyze
   // removal" card share it rather than each keeping their own copy.
   const [removalImpact, setRemovalImpact] = useState<RemovalImpactState>({ phase: 'idle' });
+  // A Manage-tab removal first runs this read-only impact scan. Only its
+  // matching result starts the existing removal preflight; posting both at
+  // once would reserve the coordinator and make the host reject the scan.
+  const [pendingManageRemoval, setPendingManageRemoval] = useState<string | null>(null);
   const cleanupShouldSelectFilter = useRef(false);
   const [minuteClock, setMinuteClock] = useState(() => Date.now());
 
@@ -483,6 +488,7 @@ export function App(): ReactElement {
       setCleanupError(null);
       cleanupShouldSelectFilter.current = false;
       setRemovalImpact({ phase: 'idle' });
+      setPendingManageRemoval(null);
       setCleanupState((previous) => previous.phase === 'analyzing' ? previous : { phase: 'idle' });
       setScanProgress(undefined);
       if (
@@ -784,6 +790,7 @@ export function App(): ReactElement {
     if (removeOrigin === 'manage-dependency' && activeRemove !== null) requestCancelRemove();
     setManageRow(null);
     setManageTab('overview');
+    setPendingManageRemoval(null);
   }, [
     removalImpact,
     requestCancelRemovalImpact,
@@ -803,10 +810,18 @@ export function App(): ReactElement {
   // inline, so there is no separate drawer to reveal Manage again from.
   const requestRemoveFromManage = useCallback(
     (packageName: string) => {
-      requestBulkRemove([packageName], new Map(), 'manage-dependency');
+      setPendingManageRemoval(packageName);
+      requestAnalyzeRemovalImpact([packageName]);
     },
-    [requestBulkRemove]
+    [requestAnalyzeRemovalImpact]
   );
+
+  useEffect(() => {
+    const packageName = manageRemovalReadyPackage(pendingManageRemoval, removalImpact);
+    if (packageName === null) return;
+    setPendingManageRemoval(null);
+    requestBulkRemove([packageName], new Map(), 'manage-dependency');
+  }, [pendingManageRemoval, removalImpact, requestBulkRemove]);
 
   // No message yet is the same user-visible state as an explicit loading one.
   const loading = message === undefined || message.status === 'loading';
@@ -984,7 +999,8 @@ export function App(): ReactElement {
             const row = data.rows.find((candidate) => candidate.name === manageRow);
             if (row === undefined) return null;
             const upgradeActive = upgradeOrigin === 'manage-dependency' && activeUpgrade === row.name;
-            const removeActive = removeOrigin === 'manage-dependency' && activeRemove === row.name;
+            const removeActive =
+              (removeOrigin === 'manage-dependency' && activeRemove === row.name) || pendingManageRemoval === row.name;
             return (
               <ManageDependencyModal
                 row={row}

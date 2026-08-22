@@ -283,7 +283,7 @@ export function ManageDependencyModal({
   return (
     <div className="modal-overlay" onClick={onOverlayClick}>
       <div
-        className="modal manage-modal"
+        className={`modal manage-modal${activeTab === 'upgrade' || activeTab === 'removal' ? ' manage-modal--decision-review' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="manage-dependency-title"
@@ -355,16 +355,18 @@ export function ManageDependencyModal({
           {content}
         </div>
 
-        <footer className="modal__footer">
-          <p className="manage-modal__footer-note">
-            <IconShield className="manage-modal__footer-note-icon" aria-hidden="true" />
-            Analysis does not modify your project. Registry metadata and the local package manager may be used during
-            analysis.
-          </p>
-          <button type="button" className="button button--secondary" onClick={onClose} disabled={blockClose}>
-            Close
-          </button>
-        </footer>
+        {(activeTab === 'upgrade' && upgrade.analysis !== null) || (activeTab === 'removal' && removal.analysis !== null) ? null : (
+          <footer className="modal__footer">
+            <p className="manage-modal__footer-note">
+              <IconShield className="manage-modal__footer-note-icon" aria-hidden="true" />
+              Analysis does not modify your project. Registry metadata and the local package manager may be used during
+              analysis.
+            </p>
+            <button type="button" className="button button--secondary" onClick={onClose} disabled={blockClose}>
+              Close
+            </button>
+          </footer>
+        )}
       </div>
     </div>
   );

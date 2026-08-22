@@ -118,7 +118,7 @@ function AtAGlanceCard({
   const needsAttention = row.worstSeverity === 'critical' || row.worstSeverity === 'high';
 
   return (
-    <section className="manage-summary-block" aria-labelledby="upgrade-at-a-glance-heading">
+    <section className="analysis-card upgrade-at-a-glance" aria-labelledby="upgrade-at-a-glance-heading">
       <h3 className="manage-section-heading" id="upgrade-at-a-glance-heading">
         At a glance
       </h3>
@@ -591,8 +591,10 @@ export function UpgradeReviewPanel({
           <CompatibilityCheckCard analysis={analysis} />
           {analysis.smartPlan !== null ? <SmartPlanSection smartPlan={analysis.smartPlan} /> : <SimpleUpgradePlanCard row={row} analysis={analysis} />}
           <SecurityOutcomeCard row={row} security={analysis.security} onChangeTab={onChangeTab} />
-          <FilesModifiedCard files={analysis.files} />
-          <VerificationStepsCard verification={analysis.verification} onConfigureVerification={onConfigureVerification} />
+          <div className="upgrade-tab__bottom-grid">
+            <FilesModifiedCard files={analysis.files} />
+            <VerificationStepsCard verification={analysis.verification} onConfigureVerification={onConfigureVerification} />
+          </div>
         </div>
       </div>
 

@@ -1,6 +1,6 @@
 import type { ReactElement } from 'react';
 
-import type { PackageRow } from '../../../src/core/types.js';
+import type { PackageRow, Severity } from '../../../src/core/types.js';
 import type {
   CompatibilityFindingKind,
   UpgradeAnalysisCompatibility,
@@ -25,7 +25,6 @@ import {
 } from '../icons.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
-import { overallDetail as securityOverallDetail } from './SecuritySection.js';
 import { SmartPlanSection } from './SmartPlanSection.js';
 import { UpgradeAnalysisLoading } from './UpgradeAnalysisLoading.js';
 import { primaryAction } from './UpgradeAnalysisModal.js';
@@ -36,6 +35,16 @@ const UPDATE_KIND_LABEL: Record<'major' | 'minor' | 'patch', string> = {
   minor: 'Minor',
   patch: 'Patch',
 };
+
+const SEVERITY_ORDER: readonly Severity[] = ['critical', 'high', 'moderate', 'low', 'info'];
+
+/** Worst-first pick among a set of severities — same rank as severityDisplay.ts's own, kept local since the inputs here (a mix of resolved advisories and still-remaining ones) don't share one common type to sort with sortAdvisoriesBySeverity directly. */
+function worstOf(severities: readonly Severity[]): Severity | null {
+  for (const severity of SEVERITY_ORDER) {
+    if (severities.includes(severity)) return severity;
+  }
+  return null;
+}
 
 /** A compact "label / value" row — same shape used across every tab in this workspace. */
 function GlanceRow({ label, children }: { label: string; children: ReactElement | string }): ReactElement {
@@ -63,8 +72,15 @@ function usageAnalysisLabel(usage: UsageRequestState | undefined): string {
 function UpgradeSummaryCard({ analysis }: { analysis: UpgradeAnalysisPresentation }): ReactElement {
   const headline = upgradeSafetyHeadline(analysis.compatibility.status);
   const updateKind = classifyUpdate(analysis.currentVersion, analysis.targetVersion);
-  const before = analysis.security === null ? 0 : analysis.security.resolvedAdvisories.length + analysis.security.remaining.length;
-  const after = analysis.security === null ? 0 : analysis.security.remaining.filter((entry) => entry.status === 'remains').length;
+  const security = analysis.security;
+  const before = security === null ? 0 : security.resolvedAdvisories.length + security.remaining.length;
+  const remainingAfter = security === null ? [] : security.remaining.filter((entry) => entry.status === 'remains');
+  const after = remainingAfter.length;
+  const beforeWorst =
+    security === null
+      ? null
+      : worstOf([...security.resolvedAdvisories.map((entry) => entry.advisory.severity), ...security.remaining.map((entry) => entry.advisory.severity)]);
+  const afterWorst = worstOf(remainingAfter.map((entry) => entry.advisory.severity));
 
   return (
     <section className="analysis-card" aria-labelledby="upgrade-summary-heading">
@@ -81,7 +97,8 @@ function UpgradeSummaryCard({ analysis }: { analysis: UpgradeAnalysisPresentatio
         {analysis.security !== null ? (
           <GlanceRow label="Vulnerabilities">
             <span className="upgrade-summary__before-after">
-              {before} <span aria-hidden="true">→</span> {after}
+              {before} {beforeWorst !== null ? severityDisplay(beforeWorst).label : ''} <span aria-hidden="true">→</span> {after}
+              {afterWorst !== null ? ` ${severityDisplay(afterWorst).label}` : ''}
             </span>
           </GlanceRow>
         ) : null}
@@ -150,8 +167,11 @@ function RecommendedActionCard({
   onUseSmartPlan: () => void;
 }): ReactElement {
   const action = primaryAction(analysis);
-  const securityDetail = analysis.security !== null ? securityOverallDetail(analysis.security) : undefined;
   const compatDetail = compatibilityOutcomeDisplay(analysis.compatibility.status).label;
+  const security = analysis.security;
+  const resolvedCount = security?.resolvedAdvisories.length ?? 0;
+  const remainingCount = security?.remaining.filter((entry) => entry.status === 'remains').length ?? 0;
+  const resolvedWorst = security !== null ? worstOf(security.resolvedAdvisories.map((entry) => entry.advisory.severity)) : null;
 
   let message: string;
   if (analysis.compatibility.status === 'conflict') {
@@ -159,12 +179,21 @@ function RecommendedActionCard({
       analysis.smartPlan !== null
         ? `${compatDetail} — a coordinated upgrade resolves it.`
         : `${compatDetail}. No safe path is currently available.`;
-  } else if (analysis.security?.status === 'resolved') {
-    message = `This is a ${analysis.compatibility.status === 'compatible' ? 'safe' : 'compatible'} update. ${securityDetail ?? ''}`.trim();
-  } else if (securityDetail !== undefined) {
-    message = `${compatDetail}. ${securityDetail}`;
   } else {
-    message = `${compatDetail}.`;
+    const safe = analysis.compatibility.status === 'compatible' ? 'safe' : 'compatible';
+    if (security === null) {
+      message = `This is a ${safe} update.`;
+    } else if (security.status === 'resolved') {
+      const severityPrefix = resolvedWorst !== null ? `${severityDisplay(resolvedWorst).label.toLowerCase()} severity ` : '';
+      message = `This is a ${safe} update that fixes ${resolvedCount} ${severityPrefix}vulnerabilit${resolvedCount === 1 ? 'y' : 'ies'}.`;
+    } else if (security.status === 'remains') {
+      message =
+        resolvedCount > 0
+          ? `This update fixes ${resolvedCount} vulnerabilit${resolvedCount === 1 ? 'y' : 'ies'}, but ${remainingCount} remain${remainingCount === 1 ? 's' : ''}. Review Security outcome before proceeding.`
+          : `This update does not resolve the ${remainingCount} known vulnerabilit${remainingCount === 1 ? 'y' : 'ies'} — review Security outcome before proceeding.`;
+    } else {
+      message = `This is a ${safe} update. Some vulnerabilities could not be confirmed as fixed or remaining.`;
+    }
   }
 
   return (
@@ -335,9 +364,18 @@ function SecurityOutcomeCard({
 }): ReactElement | null {
   if (security === null || row.advisories.length === 0) return null;
   const before = severityDisplay(row.worstSeverity);
+  const resolvedCount = security.resolvedAdvisories.length;
   const remainingCount = security.remaining.filter((entry) => entry.status === 'remains').length;
   const unknownCount = security.remaining.filter((entry) => entry.status === 'unknown').length;
   const after = securityOutcomeDisplay(security.status);
+  const subtitle =
+    security.status === 'resolved'
+      ? 'This upgrade will improve your security posture.'
+      : security.status === 'remains'
+        ? resolvedCount > 0
+          ? "This upgrade improves your security posture, but doesn't resolve every known vulnerability."
+          : "This upgrade doesn't change your security posture."
+        : 'The security outcome of this upgrade could not be fully verified.';
 
   return (
     <section className="analysis-card" aria-labelledby="upgrade-security-heading">
@@ -350,7 +388,7 @@ function SecurityOutcomeCard({
           View vulnerabilities →
         </button>
       </div>
-      <p className="usage-card__subtitle">{securityOverallDetail(security) ?? ''}</p>
+      <p className="usage-card__subtitle">{subtitle}</p>
       <div className="security-outcome">
         <div className="security-outcome__box">
           <p className="security-outcome__label">Before upgrade</p>

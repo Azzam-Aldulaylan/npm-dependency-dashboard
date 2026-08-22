@@ -238,6 +238,7 @@ export function ManageDependencyModal({
         usage={usage}
         onReanalyzeUsage={onReanalyzeUsage}
         onOpenUsageReference={onOpenUsageReference}
+        onChangeTab={onChangeTab}
         now={now}
       />
     );

@@ -199,6 +199,10 @@ export function ManageDependencyModal({
     upgrade.onCancel();
     onChangeTab('overview');
   };
+  const startTransitiveCheckFromVulnerabilities = (): void => {
+    onAnalyzeRemediation(row.name);
+    onChangeTab('overview');
+  };
 
   let content: ReactNode;
   if (activeTab === 'overview') {
@@ -216,7 +220,16 @@ export function ManageDependencyModal({
       />
     );
   } else if (activeTab === 'vulnerabilities') {
-    content = <VulnerabilitiesPanel row={row} onOpenAdvisory={onOpenAdvisory} />;
+    content = (
+      <VulnerabilitiesPanel
+        row={row}
+        remediation={remediation}
+        actionsDisabled={actionsDisabled}
+        onOpenAdvisory={onOpenAdvisory}
+        onStartUpgradeReview={(target) => startUpgradeReview(row.name, target)}
+        onStartTransitiveCheck={startTransitiveCheckFromVulnerabilities}
+      />
+    );
   } else if (activeTab === 'usage') {
     content = (
       <UsageReferencesPanel

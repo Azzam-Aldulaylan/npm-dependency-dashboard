@@ -2391,33 +2391,347 @@ button {
 
 /* -------------------------------------------------- vulnerabilities panel */
 
-.vulnerabilities-panel {
+/*
+ * Same two-column shell as .overview-panel — a fixed-width left summary rail
+ * beside a flexible right column — so the two tabs read as one workspace,
+ * not two different layout systems.
+ */
+.vuln-tab {
   display: flex;
   flex-direction: column;
-  gap: 1.2rem;
+  gap: 1.1rem;
 }
 
-.vulnerabilities-panel__group-heading {
+@media (min-width: 46rem) {
+  .vuln-tab {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .vuln-tab__summary {
+    flex: 0 0 13.5rem;
+    min-width: 0;
+  }
+
+  .vuln-tab__details {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+}
+
+.vuln-tab__summary {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.vuln-tab__details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+/* Security summary — a solid (not tinted) icon circle in the worst-case red, since this card's whole job is to be the one urgent glance. */
+.vuln-summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 0.75rem 0.8rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.vuln-summary-card__total {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  margin: 0 0 0.6rem;
-  padding: 0.3rem 0.55rem;
-  border-radius: 4px;
-  font-size: 0.8rem;
+  gap: 0.65rem;
+}
+
+.vuln-summary-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 2.3rem;
+  height: 2.3rem;
+  border-radius: 50%;
+  color: var(--vscode-editor-background, #fff);
+  background: var(--vscode-editorError-foreground);
+}
+
+.vuln-summary-card__icon svg {
+  width: 1.2rem;
+  height: 1.2rem;
+}
+
+.vuln-summary-card__count {
+  display: block;
+  font-size: 1.5rem;
   font-weight: 700;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
+  line-height: 1.1;
 }
 
-.vulnerabilities-panel__group-icon {
-  width: 0.95em;
-  height: 0.95em;
+.vuln-summary-card__count-label {
+  display: block;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
 }
 
-.vulnerabilities-panel__group-count {
-  margin-left: auto;
+.vuln-summary-card__breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.85rem;
+  margin: 0;
+  padding: 0.65rem 0 0;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.18));
+  list-style: none;
+}
+
+.vuln-summary-card__stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82em;
+  font-weight: 600;
+}
+
+.vuln-summary-card__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.vuln-summary-card__stat--critical,
+.vuln-summary-card__stat--high {
+  color: var(--vscode-editorError-foreground);
+}
+
+.vuln-summary-card__stat--moderate {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.vuln-summary-card__stat--low {
+  color: var(--vscode-editorInfo-foreground);
+}
+
+.vuln-summary-card__stat--info {
+  color: var(--vscode-descriptionForeground);
+}
+
+.vuln-recommended {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem 0.8rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.vuln-recommended__message {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin: 0;
+  font-size: 0.85em;
+  line-height: 1.4;
+}
+
+.vuln-recommended__spin {
+  flex-shrink: 0;
+  margin-top: 0.15em;
+  animation: dashboard-spin 1.2s linear infinite;
+}
+
+.vuln-recommended__cta {
+  align-self: flex-start;
+  color: var(--accent-total);
+  border-color: var(--accent-total);
+}
+
+.vuln-recommended__cta:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-total) 14%, transparent);
+}
+
+.vuln-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.vuln-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.28rem 0.6rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  border-radius: 5px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font-size: 0.82em;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.vuln-filter:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.vuln-filter__count {
+  padding: 0 0.35rem;
+  border-radius: 3px;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.25));
+  color: var(--vscode-badge-foreground, inherit);
+  font-size: 0.9em;
   font-variant-numeric: tabular-nums;
+}
+
+.vuln-filter--active {
+  border-color: var(--vscode-focusBorder, var(--accent-total));
+  color: var(--accent-total);
+  background: color-mix(in srgb, var(--accent-total) 12%, transparent);
+}
+
+.vuln-filter--critical.vuln-filter--active,
+.vuln-filter--high.vuln-filter--active {
+  border-color: var(--vscode-editorError-foreground);
+  color: var(--vscode-editorError-foreground);
+  background: color-mix(in srgb, var(--vscode-editorError-foreground) 12%, transparent);
+}
+
+.vuln-filter--moderate.vuln-filter--active {
+  border-color: var(--vscode-editorWarning-foreground);
+  color: var(--vscode-editorWarning-foreground);
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 12%, transparent);
+}
+
+.vuln-filter--low.vuln-filter--active {
+  border-color: var(--vscode-editorInfo-foreground);
+  color: var(--vscode-editorInfo-foreground);
+  background: color-mix(in srgb, var(--vscode-editorInfo-foreground) 12%, transparent);
+}
+
+.vuln-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vuln-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.vuln-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.vuln-card__title {
+  flex: 1 1 auto;
+  min-width: 12rem;
+  font-weight: 600;
+  font-size: 0.92em;
+}
+
+.vuln-card__source {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--vscode-textLink-foreground);
+  font-size: 0.82em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.vuln-card__source:hover {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  text-decoration: underline;
+}
+
+.vuln-card__source:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.vuln-card__meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: 0.6rem 0.75rem;
+  margin: 0;
+}
+
+.vuln-card__meta-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.vuln-card__meta-col dt {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.vuln-card__meta-col dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.86em;
+}
+
+.vuln-card__meta-col code {
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.15));
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.95em;
+}
+
+.vuln-card__fixed {
+  color: var(--vscode-charts-green, #89d185);
+  font-weight: 600;
+}
+
+.vuln-card__path {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.vuln-card__path-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.vuln-card__path-arrow {
+  color: var(--vscode-descriptionForeground);
+}
+
+.vuln-tab__showing {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
 }
 
 /* -------------------------------------------------- usage & references panel */

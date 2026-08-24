@@ -6,7 +6,7 @@ import type {
   RemoveAnalysisPresentation,
   UpgradeAnalysisVerification,
 } from '../../../src/host/webviewProtocol.js';
-import { CLASSIFICATION_LABEL } from '../dependencyClassification.js';
+import { CLASSIFICATION_LABEL, classificationOf } from '../dependencyClassification.js';
 import {
   IconAlertTriangle,
   IconCheck,
@@ -155,7 +155,7 @@ function AtAGlanceCard({
         <GlanceRow label="Required by">{`${requiredBy} package${requiredBy === 1 ? '' : 's'}`}</GlanceRow>
         <GlanceRow label="Used in code">{usedInCode}</GlanceRow>
         <GlanceRow label="Vulnerabilities">{String(row.advisories.length)}</GlanceRow>
-        <GlanceRow label="Package type">{CLASSIFICATION_LABEL[change?.classification ?? (row.dev ? 'dev' : 'prod')]}</GlanceRow>
+        <GlanceRow label="Package type">{CLASSIFICATION_LABEL[change?.classification ?? classificationOf(row)]}</GlanceRow>
       </dl>
     </section>
   );
@@ -287,7 +287,7 @@ function WhatWillBeRemovedCard({ row, analysis }: { row: PackageRow; analysis: R
         <span className="removal-package__identity">
           <strong>{row.name}</strong>
           <span>{row.current ?? row.range}</span>
-          <span>{CLASSIFICATION_LABEL[change?.classification ?? (row.dev ? 'dev' : 'prod')]} direct dependency</span>
+          <span>{CLASSIFICATION_LABEL[change?.classification ?? classificationOf(row)]} direct dependency</span>
         </span>
       </div>
     </section>

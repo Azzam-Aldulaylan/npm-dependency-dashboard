@@ -348,6 +348,7 @@ export async function buildPackageRows(
   // --- rows ------------------------------------------------------------
   options.onProgress?.({ stage: 'rows' });
   const endRows = recorder.start('row composition');
+  const declaredByName = new Map(manifest.dependencies.map((dependency) => [dependency.name, dependency]));
   const rows: PackageRow[] = roots.map((node) => {
     const info = versionsByName.get(node.name);
     const advisories: AttributedAdvisory[] = attributed.get(node.name) ?? [];
@@ -373,6 +374,7 @@ export async function buildPackageRows(
       wanted: info?.wanted ?? null,
       latest: info?.latest ?? null,
       dev: node.dev,
+      optional: declaredByName.get(node.name)?.optional ?? false,
       range: node.range,
       advisories,
       worstSeverity: worstSeverity(advisories),

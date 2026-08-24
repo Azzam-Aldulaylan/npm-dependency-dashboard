@@ -8,5 +8,6 @@ export const CLASSIFICATION_LABEL: Record<'prod' | 'dev' | 'optional', string> =
 };
 
 export function classificationOf(row: PackageRow): 'prod' | 'dev' | 'optional' {
+  if (row.optional) return 'optional';
   return row.dev ? 'dev' : 'prod';
 }

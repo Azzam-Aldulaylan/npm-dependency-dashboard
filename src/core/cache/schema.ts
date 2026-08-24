@@ -38,8 +38,12 @@ import { isSourceFingerprint } from './sourceFingerprint.js';
  * keep displaying the description fallback until some unrelated source
  * change invalidated the cache. Rejecting the old project snapshot forces
  * one correct regeneration.
+ *
+ * 4: package rows gained their optional-dependency classification. Version 3
+ * rows cannot distinguish optional dependencies from production dependencies,
+ * so they must be regenerated before the Manage UI renders their type.
  */
-export const CACHE_SCHEMA_VERSION = 3;
+export const CACHE_SCHEMA_VERSION = 4;
 
 /**
  * The registry response cache did not change when project rows gained a

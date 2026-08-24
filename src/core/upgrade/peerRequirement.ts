@@ -30,16 +30,47 @@ export function peerRequirementsFor(
   packageName: string,
   alsoRemoving: ReadonlySet<string>
 ): PeerRequirementEvidence[] {
-  const result: PeerRequirementEvidence[] = [];
-  const seen = new Set<string>();
+  // A name alone is not enough to identify the package being removed: the
+  // graph can contain another copy at (for example)
+  // node_modules/plugin/node_modules/react. Peer edges already carry the
+  // package-manager-resolved node id, so only edges to the direct node are
+  // evidence that removing that direct dependency breaks the owner.
+  const directTargetNodeIds = new Set(
+    [...graph.nodes.entries()]
+      .filter(([, node]) => node.direct && node.name === packageName)
+      .map(([nodeId]) => nodeId)
+  );
+  if (directTargetNodeIds.size === 0) return [];
+
+  const byOwner = new Map<string, PeerRequirementEvidence>();
   for (const node of graph.nodes.values()) {
-    if (node.name === packageName || alsoRemoving.has(node.name) || seen.has(node.name)) continue;
+    // Removing a direct owner makes its own peer requirement irrelevant, but
+    // a transitive duplicate with the same name can remain installed and must
+    // still be considered.
+    if (node.name === packageName || (node.direct && alsoRemoving.has(node.name))) continue;
     for (const edge of node.edges) {
-      if (edge.kind !== 'peer' || edge.name !== packageName) continue;
-      seen.add(node.name);
-      result.push({ requiredBy: node.name, range: edge.requestedRange, optional: edge.optional });
-      break;
+      if (
+        edge.kind !== 'peer' ||
+        edge.name !== packageName ||
+        edge.targetNodeId === null ||
+        !directTargetNodeIds.has(edge.targetNodeId)
+      ) {
+        continue;
+      }
+
+      const candidate = { requiredBy: node.name, range: edge.requestedRange, optional: edge.optional };
+      const existing = byOwner.get(node.name);
+      // Duplicate installed copies of the same owner are presented once. A
+      // required edge is stronger evidence than an optional edge, regardless
+      // of which copy happens to appear first in the graph.
+      if (
+        existing === undefined ||
+        (existing.optional && !candidate.optional) ||
+        (existing.optional === candidate.optional && candidate.range.localeCompare(existing.range) < 0)
+      ) {
+        byOwner.set(node.name, candidate);
+      }
     }
   }
-  return result.sort((a, b) => a.requiredBy.localeCompare(b.requiredBy));
+  return [...byOwner.values()].sort((a, b) => a.requiredBy.localeCompare(b.requiredBy));
 }

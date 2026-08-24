@@ -118,6 +118,7 @@ export function isPackageRow(value: unknown): value is PackageRow {
     isStringOrNull(value['wanted']) &&
     isStringOrNull(value['latest']) &&
     typeof value['dev'] === 'boolean' &&
+    typeof value['optional'] === 'boolean' &&
     typeof value['range'] === 'string' &&
     isStringOrNull(upgradeTo) &&
     // `upgradeReason` is null exactly when `upgradeTo` is — see PackageRow's own doc.

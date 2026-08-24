@@ -462,6 +462,30 @@ test('with no lockfile every declared dependency still gets a tagged row, in ord
   assert.equal(client.posts.length, 0, 'an empty bulk body is not sent at all');
 });
 
+test('rows preserve production, development, and optional classification from the manifest', async () => {
+  const manifestText = JSON.stringify({
+    name: 'app',
+    dependencies: { express: '^5.0.0', duplicated: '^2.0.0' },
+    devDependencies: { typescript: '^5.0.0', express: '^4.0.0' },
+    optionalDependencies: { fsevents: '^2.0.0', duplicated: '^1.0.0' },
+  });
+  const client = fakeClient({}, json({}));
+
+  const result = await buildPackageRows(baseOptions(client, { manifestText, lockfileText: null }));
+
+  assert.deepEqual(
+    result.rows.map(({ name, dev, optional, range }) => ({ name, dev, optional, range })),
+    [
+      { name: 'typescript', dev: true, optional: false, range: '^5.0.0' },
+      // A production declaration wins over a duplicate dev declaration.
+      { name: 'express', dev: false, optional: false, range: '^5.0.0' },
+      { name: 'fsevents', dev: false, optional: true, range: '^2.0.0' },
+      // npm treats a name repeated in optionalDependencies as optional.
+      { name: 'duplicated', dev: false, optional: true, range: '^1.0.0' },
+    ]
+  );
+});
+
 test('a declared dependency missing from an otherwise-present lockfile is untagged in the graph but still shown with an "unresolved" tag, and its Wanted/Latest lookup is preserved', async () => {
   // Not the "no lockfile at all" case above, and not a workspace-link/file:/
   // git:/alias/tarball specifier either — a lockfile genuinely exists, this

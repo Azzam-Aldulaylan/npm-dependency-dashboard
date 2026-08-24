@@ -10,6 +10,7 @@ import type {
 import { compatibilityOutcomeDisplay, securityOutcomeDisplay, upgradeSafetyHeadline } from '../../../src/host/outcomeCopy.js';
 import { classifyUpdate } from '../../../src/host/updateClassification.js';
 import { severityDisplay } from '../../../src/host/severityDisplay.js';
+import { summarizeUpgradeSecurity } from '../../../src/host/upgradeSecuritySummary.js';
 import {
   IconAlertTriangle,
   IconCheck,
@@ -18,7 +19,6 @@ import {
   IconHelpCircle,
   IconHistory,
   IconListChecks,
-  IconRefresh,
   IconRoute,
   IconShield,
   IconTrendUp,
@@ -73,14 +73,15 @@ function UpgradeSummaryCard({ analysis }: { analysis: UpgradeAnalysisPresentatio
   const headline = upgradeSafetyHeadline(analysis.compatibility.status);
   const updateKind = classifyUpdate(analysis.currentVersion, analysis.targetVersion);
   const security = analysis.security;
-  const before = security === null ? 0 : security.resolvedAdvisories.length + security.remaining.length;
+  const securitySummary = security === null ? null : summarizeUpgradeSecurity(security);
   const remainingAfter = security === null ? [] : security.remaining.filter((entry) => entry.status === 'remains');
-  const after = remainingAfter.length;
   const beforeWorst =
     security === null
       ? null
       : worstOf([...security.resolvedAdvisories.map((entry) => entry.advisory.severity), ...security.remaining.map((entry) => entry.advisory.severity)]);
-  const afterWorst = worstOf(remainingAfter.map((entry) => entry.advisory.severity));
+  // Do not attach a severity from only the proven-remains subset when another
+  // unresolved advisory is undetermined (and might be more severe).
+  const afterWorst = securitySummary !== null && securitySummary.unknownCount === 0 ? worstOf(remainingAfter.map((entry) => entry.advisory.severity)) : null;
 
   return (
     <section className="analysis-card" aria-labelledby="upgrade-summary-heading">
@@ -94,10 +95,11 @@ function UpgradeSummaryCard({ analysis }: { analysis: UpgradeAnalysisPresentatio
         <GlanceRow label="Update type">
           <span className="status-badge status-badge--neutral">{updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Unknown'}</span>
         </GlanceRow>
-        {analysis.security !== null ? (
+        {securitySummary !== null ? (
           <GlanceRow label="Vulnerabilities">
             <span className="upgrade-summary__before-after">
-              {before} {beforeWorst !== null ? severityDisplay(beforeWorst).label : ''} <span aria-hidden="true">→</span> {after}
+              {securitySummary.beforeCount} {beforeWorst !== null ? severityDisplay(beforeWorst).label : ''} <span aria-hidden="true">→</span>{' '}
+              {securitySummary.afterLabel}
               {afterWorst !== null ? ` ${severityDisplay(afterWorst).label}` : ''}
             </span>
           </GlanceRow>
@@ -210,15 +212,7 @@ function RecommendedActionCard({
   );
 }
 
-function UpgradePreviewCard({
-  analysis,
-  busy,
-  onReanalyze,
-}: {
-  analysis: UpgradeAnalysisPresentation;
-  busy: boolean;
-  onReanalyze: () => void;
-}): ReactElement {
+function UpgradePreviewCard({ analysis }: { analysis: UpgradeAnalysisPresentation }): ReactElement {
   const updateKind = classifyUpdate(analysis.currentVersion, analysis.targetVersion);
 
   return (
@@ -227,10 +221,6 @@ function UpgradePreviewCard({
         <h3 className="analysis-card__title" id="upgrade-preview-heading">
           Upgrade preview
         </h3>
-        <button type="button" className="button button--secondary" disabled={busy} onClick={onReanalyze}>
-          <IconRefresh />
-          Re-run preflight
-        </button>
       </div>
       <div className="manage-action-card__versions upgrade-preview__versions">
         <span className="manage-action-card__version">{analysis.currentVersion}</span>
@@ -591,7 +581,7 @@ export function UpgradeReviewPanel({
           <RecommendedActionCard analysis={analysis} busy={busy} onConfirm={onConfirm} onUseSmartPlan={onUseSmartPlan} />
         </div>
         <div className="upgrade-tab__details">
-          <UpgradePreviewCard analysis={analysis} busy={busy} onReanalyze={() => onAnalyzeUpgrade(targetVersion)} />
+          <UpgradePreviewCard analysis={analysis} />
           <CompatibilityCheckCard analysis={analysis} />
           {analysis.smartPlan !== null ? <SmartPlanSection smartPlan={analysis.smartPlan} /> : <SimpleUpgradePlanCard row={row} analysis={analysis} />}
           <SecurityOutcomeCard row={row} security={analysis.security} onChangeTab={onChangeTab} />

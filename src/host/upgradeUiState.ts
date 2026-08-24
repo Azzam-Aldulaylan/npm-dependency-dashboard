@@ -7,6 +7,16 @@
  */
 
 /**
+ * An analysis request may only start while no upgrade flow is active. Once an
+ * analysis has been issued, the host owns a project-wide lock until that
+ * analysis is confirmed, cancelled, or expires. Replacing the webview's
+ * tracked analysis with a duplicate request would strand the original lock.
+ */
+export function upgradeAnalysisRequestIsAllowed(activePackage: string | null): boolean {
+  return activePackage === null;
+}
+
+/**
  * UPGRADE_IN_PROGRESS means a *different* request than the one this webview
  * is currently tracking was rejected — a race between a rapid duplicate
  * click and React's own re-render (the disabled attribute lands one tick

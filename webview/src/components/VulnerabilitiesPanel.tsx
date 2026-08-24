@@ -6,6 +6,7 @@ import { sortAdvisoriesBySeverity } from '../../../src/host/severityDisplay.js';
 import { classifyRowUpdate } from '../../../src/host/updateClassification.js';
 import type { ActionState, TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
 import { resolveActionState } from '../../../src/host/upgradeAction.js';
+import { directUpgradeRecommendation } from '../../../src/host/vulnerabilityRecommendation.js';
 import { IconCheck, IconExternalLink, IconRefresh, IconShield } from '../icons.js';
 import { SeverityBadge } from './SeverityBadge.js';
 import { patchedVersionText } from './VulnerabilityCard.js';
@@ -148,7 +149,7 @@ function RecommendedActionCard({
   let busy = false;
 
   if (state.kind === 'security-fix' || state.kind === 'update') {
-    message = `Address the ${totalCount} vulnerabilit${totalCount === 1 ? 'y' : 'ies'} by upgrading ${row.name} to ${state.target}.`;
+    message = directUpgradeRecommendation(state.kind, row.name, state.target, totalCount);
     cta = { label: 'Review upgrade', onClick: () => onStartUpgradeReview(state.target) };
   } else if (state.kind === 'transitive-remediation') {
     message = state.tooltip;

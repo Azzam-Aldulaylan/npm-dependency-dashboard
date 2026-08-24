@@ -17,7 +17,11 @@ import type { SortColumn, TableSortState } from '../../src/host/tableSort.js';
 import { nextColumnSortState, sortRows } from '../../src/host/tableSort.js';
 import type { TransitiveRemediationUiState } from '../../src/host/upgradeAction.js';
 import { resolveActionState } from '../../src/host/upgradeAction.js';
-import { upgradeErrorClearsActiveState, upgradeErrorIsUserVisible } from '../../src/host/upgradeUiState.js';
+import {
+  upgradeAnalysisRequestIsAllowed,
+  upgradeErrorClearsActiveState,
+  upgradeErrorIsUserVisible,
+} from '../../src/host/upgradeUiState.js';
 import type {
   DashboardData,
   HostToWebviewMessage,
@@ -550,6 +554,10 @@ export function App(): ReactElement {
   // below for that path). Reviewed inline in Manage rather than opening a
   // second dialog — see the ManageDependencyModal render block's own doc.
   const requestUpgrade = useCallback((packageName: string, target: string) => {
+    // The host keeps an accepted analysis locked until confirm/cancel. Never
+    // replace the analysis id this client is tracking with a duplicate request
+    // that the host will reject as UPGRADE_IN_PROGRESS.
+    if (!upgradeAnalysisRequestIsAllowed(activeUpgradeRef.current)) return;
     activeUpgradeRef.current = packageName;
     setActiveUpgrade(packageName);
     setActiveTarget(target);

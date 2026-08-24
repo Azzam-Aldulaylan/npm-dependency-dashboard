@@ -464,10 +464,13 @@ export function RemovalReviewPanel({
 }): ReactElement {
   if (!active) {
     return (
-      <div className="review-panel__empty">
+      <div className="review-panel__empty review-panel__empty--remove">
+        <span className="review-panel__empty-icon" aria-hidden="true">
+          <IconTrash />
+        </span>
         <h3 className="review-panel__empty-heading">Removal review</h3>
         <p className="review-panel__empty-status">Not analyzed yet</p>
-        <button type="button" className="button" onClick={onAnalyzeRemoval}>
+        <button type="button" className="button review-panel__empty-cta" onClick={onAnalyzeRemoval}>
           Analyze removal →
         </button>
       </div>

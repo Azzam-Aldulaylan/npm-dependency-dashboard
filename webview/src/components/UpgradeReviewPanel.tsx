@@ -21,6 +21,7 @@ import {
   IconRefresh,
   IconRoute,
   IconShield,
+  IconTrendUp,
 } from '../icons.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
@@ -553,7 +554,10 @@ export function UpgradeReviewPanel({
       );
     }
     return (
-      <div className="review-panel__empty">
+      <div className="review-panel__empty review-panel__empty--upgrade">
+        <span className="review-panel__empty-icon" aria-hidden="true">
+          <IconTrendUp />
+        </span>
         <h3 className="review-panel__empty-heading">Upgrade review</h3>
         <p className="review-panel__empty-versions">
           {row.current ?? row.range}
@@ -561,7 +565,7 @@ export function UpgradeReviewPanel({
           {targetVersion}
         </p>
         <p className="review-panel__empty-status">Not analyzed yet</p>
-        <button type="button" className="button" onClick={() => onAnalyzeUpgrade(targetVersion)}>
+        <button type="button" className="button review-panel__empty-cta" onClick={() => onAnalyzeUpgrade(targetVersion)}>
           Analyze upgrade →
         </button>
       </div>

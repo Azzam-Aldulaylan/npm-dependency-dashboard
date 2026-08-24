@@ -18,6 +18,7 @@ import { nextColumnSortState, sortRows } from '../../src/host/tableSort.js';
 import type { TransitiveRemediationUiState } from '../../src/host/upgradeAction.js';
 import { resolveActionState } from '../../src/host/upgradeAction.js';
 import {
+  manageRemovalReplacesUpgradeReview,
   upgradeAnalysisRequestIsAllowed,
   upgradeErrorClearsActiveState,
   upgradeErrorIsUserVisible,
@@ -818,10 +819,21 @@ export function App(): ReactElement {
   // inline, so there is no separate drawer to reveal Manage again from.
   const requestRemoveFromManage = useCallback(
     (packageName: string) => {
+      // A completed embedded upgrade preview deliberately retains the host's
+      // project lock until confirm/cancel. Replacing that decision with a
+      // removal must cancel it first; postMessage ordering makes the exact-id
+      // cancellation release the lock before removal-impact analysis starts.
+      if (manageRemovalReplacesUpgradeReview(packageName, activeUpgrade, upgradeOrigin)) {
+        // A still-running preflight has no exact analysis id to release yet.
+        // Keep its UI/state intact and wait for it to finish instead of
+        // immediately sending an impact request that the host must reject.
+        if (analysis === null) return;
+        requestCancelUpgrade();
+      }
       setPendingManageRemoval(packageName);
       requestAnalyzeRemovalImpact([packageName]);
     },
-    [requestAnalyzeRemovalImpact]
+    [activeUpgrade, analysis, requestAnalyzeRemovalImpact, requestCancelUpgrade, upgradeOrigin]
   );
 
   useEffect(() => {

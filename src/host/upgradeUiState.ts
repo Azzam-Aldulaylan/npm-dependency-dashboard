@@ -17,6 +17,21 @@ export function upgradeAnalysisRequestIsAllowed(activePackage: string | null): b
 }
 
 /**
+ * Whether a removal decision targets the same active upgrade review opened
+ * inside Manage. Once that review has produced an analysis id, the caller
+ * posts its exact-id cancel before removal-impact analysis so the host
+ * releases its retained preview lock first. Dashboard/bulk upgrades and
+ * reviews for another package are never cancelled implicitly.
+ */
+export function manageRemovalReplacesUpgradeReview(
+  packageName: string,
+  activeUpgrade: string | null,
+  upgradeOrigin: 'dashboard' | 'manage-dependency' | null
+): boolean {
+  return upgradeOrigin === 'manage-dependency' && activeUpgrade === packageName;
+}
+
+/**
  * UPGRADE_IN_PROGRESS means a *different* request than the one this webview
  * is currently tracking was rejected — a race between a rapid duplicate
  * click and React's own re-render (the disabled attribute lands one tick

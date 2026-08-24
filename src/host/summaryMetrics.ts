@@ -24,6 +24,7 @@ export interface SummaryMetrics {
   highVulnerabilities: number;
   moderateVulnerabilities: number;
   lowVulnerabilities: number;
+  infoVulnerabilities: number;
   needsAttention: number;
   deprecatedCount: number;
 }
@@ -111,6 +112,7 @@ export function summaryMetrics(rows: readonly PackageRow[]): SummaryMetrics {
     highVulnerabilities: countSeverity(rows, 'high'),
     moderateVulnerabilities: countSeverity(rows, 'moderate'),
     lowVulnerabilities: countSeverity(rows, 'low'),
+    infoVulnerabilities: countSeverity(rows, 'info'),
     needsAttention,
     deprecatedCount,
   };
@@ -130,14 +132,15 @@ export function updatesCardSubtitle(metrics: SummaryMetrics): string {
   return `${percent}% of dependencies`;
 }
 
-const SEVERITY_LABELS: Record<'critical' | 'high' | 'moderate' | 'low', string> = {
+const SEVERITY_LABELS: Record<Severity, string> = {
   critical: 'critical',
   high: 'high',
   moderate: 'moderate',
   low: 'low',
+  info: 'info',
 };
 
-/** Highest-severity-first, at most two categories — long enough to be useful, short enough to stay a subtitle. */
+/** Every nonzero severity category, highest first, so the breakdown accounts for the card's complete total. */
 export function vulnerabilitiesCardSubtitle(metrics: SummaryMetrics): string {
   if (metrics.vulnerable === 0) return 'No known vulnerabilities';
   const counts: [keyof typeof SEVERITY_LABELS, number][] = [
@@ -145,10 +148,10 @@ export function vulnerabilitiesCardSubtitle(metrics: SummaryMetrics): string {
     ['high', metrics.highVulnerabilities],
     ['moderate', metrics.moderateVulnerabilities],
     ['low', metrics.lowVulnerabilities],
+    ['info', metrics.infoVulnerabilities],
   ];
   return counts
     .filter(([, count]) => count > 0)
-    .slice(0, 2)
     .map(([severity, count]) => `${count} ${SEVERITY_LABELS[severity]}`)
     .join(' · ');
 }

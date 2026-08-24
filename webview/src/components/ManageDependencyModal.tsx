@@ -35,6 +35,7 @@ const CLASSIFICATION_LABEL: Record<'prod' | 'dev' | 'optional', string> = {
 };
 
 function classificationOf(row: PackageRow): 'prod' | 'dev' | 'optional' {
+  if (row.optional) return 'optional';
   return row.dev ? 'dev' : 'prod';
 }
 

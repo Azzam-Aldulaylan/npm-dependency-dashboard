@@ -154,6 +154,8 @@ export interface PackageRow {
   wanted: string | null;
   latest: string | null;
   dev: boolean;
+  /** True when this direct dependency is declared in optionalDependencies. */
+  optional: boolean;
   /** The declared package.json spec/range, e.g. "^18.2.0" or "file:../x". Display-only fallback for Current when `current` is null — never a substitute for a real installed version. */
   range: string;
   deprecated?: string;

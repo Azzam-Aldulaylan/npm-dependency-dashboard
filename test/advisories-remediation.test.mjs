@@ -22,6 +22,7 @@ function entry(overrides) {
     },
     flaggedPackage: 'form-data',
     path: ['axios', 'form-data'],
+    flaggedVersion: '3.0.0',
     patchedVersion: { status: 'unknown' },
     ...overrides,
   };
@@ -53,6 +54,13 @@ test('a flagged package missing from the packument map resolves to unknown, not 
   assert.deepEqual(result.get('axios')[0].patchedVersion, { status: 'unknown' });
 });
 
+test('a missing resolved flagged version resolves to unknown, never guessed from history alone', () => {
+  const map = new Map([['axios', [entry({ flaggedVersion: null })]]]);
+  const packuments = new Map([['form-data', ['3.0.0', '3.5.0', '4.0.0']]]);
+  const result = attachPatchedVersions(map, packuments);
+  assert.deepEqual(result.get('axios')[0].patchedVersion, { status: 'unknown' });
+});
+
 test('attachPatchedVersions preserves every other field on the entry unchanged', () => {
   const original = entry();
   const map = new Map([['axios', [original]]]);
@@ -61,6 +69,7 @@ test('attachPatchedVersions preserves every other field on the entry unchanged',
   assert.deepEqual(attached.advisory, original.advisory);
   assert.equal(attached.flaggedPackage, original.flaggedPackage);
   assert.deepEqual(attached.path, original.path);
+  assert.equal(attached.flaggedVersion, original.flaggedVersion);
 });
 
 test('multiple advisories on the same package each resolve independently by their own range', () => {

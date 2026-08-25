@@ -67,8 +67,17 @@ function attributeFromRoot(
       // `patchedVersion` starts as the safe placeholder here — attribution has
       // no registry access and can't compute it. `attachPatchedVersions` (see
       // advisories/remediation.ts) is the only place that fills it in, once
-      // per unique flagged package, after this map is built.
-      out.push({ advisory, flaggedPackage: node.name, path: [...chain], patchedVersion: { status: 'unknown' } });
+      // per unique flagged package, after this map is built. `flaggedVersion`
+      // is this node's own resolved version — the actual vulnerable version
+      // in the tree, never the root direct dependency's version for a
+      // transitive advisory — and is known here for free from the graph walk.
+      out.push({
+        advisory,
+        flaggedPackage: node.name,
+        path: [...chain],
+        flaggedVersion: node.version,
+        patchedVersion: { status: 'unknown' },
+      });
     }
 
     for (const depName of node.deps) {

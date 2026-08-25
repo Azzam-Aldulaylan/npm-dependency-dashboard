@@ -25,6 +25,7 @@ import {
   UPDATE_LABELS,
 } from '../../../src/host/dependencyCriteria.js';
 import {
+  IconAlertTriangle,
   IconBroom,
   IconFilter,
   IconPackage,
@@ -34,6 +35,8 @@ import {
   IconTrendUp,
   IconX,
 } from '../icons.js';
+import { REMOVAL_IMPACT_LABEL } from '../removalImpactState.js';
+import type { RemovalImpactState } from '../removalImpactState.js';
 
 export interface BulkUpgradeCandidate {
   packageName: string;
@@ -174,6 +177,9 @@ export function ManageDependenciesModal({
   onBulkUpgrade,
   onBulkRemove,
   onAnalyzeRemediations,
+  removalImpact,
+  onAnalyzeRemovalImpact,
+  onCancelRemovalImpact,
   onClose,
 }: {
   rows: readonly PackageRow[];
@@ -184,6 +190,10 @@ export function ManageDependenciesModal({
   onBulkUpgrade: (changes: readonly BulkUpgradeCandidate[]) => void;
   onBulkRemove: (packageNames: readonly string[], matchTags: ReadonlyMap<string, readonly string[]>) => void;
   onAnalyzeRemediations: (packages: readonly string[]) => void;
+  /** The shared removal-impact preview state — see removalImpactState.ts. */
+  removalImpact: RemovalImpactState;
+  onAnalyzeRemovalImpact: (packages: readonly string[]) => void;
+  onCancelRemovalImpact: () => void;
   onClose: () => void;
 }): ReactElement {
   const [step, setStep] = useState<Step>('select');
@@ -269,6 +279,54 @@ export function ManageDependenciesModal({
     [reviewRows, remediationEligibleNames]
   );
 
+  // Blocked/unknown packages must never silently enter a destructive bulk
+  // removal — auto-unselect them the moment a fresh impact result names
+  // them, exactly once per result (`lastAutoDeselectedFor` keys off the
+  // result's own `generatedAt`, never re-running on every render). The user
+  // may still re-check an `unknown` row explicitly; `blocked` rows have a
+  // disabled checkbox below and can never be re-checked this way.
+  const lastAutoDeselectedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (removalImpact.phase !== 'done') return;
+    if (lastAutoDeselectedFor.current === removalImpact.generatedAt) return;
+    lastAutoDeselectedFor.current = removalImpact.generatedAt;
+    const toAutoDeselect = matched
+      .filter((row) => {
+        const entry = removalImpact.assessments.get(row.name);
+        return entry !== undefined && (entry.assessment.status === 'blocked' || entry.assessment.status === 'unknown');
+      })
+      .map((row) => row.name);
+    if (toAutoDeselect.length === 0) return;
+    setDeselected((previous) => {
+      const next = new Set(previous);
+      for (const name of toAutoDeselect) next.add(name);
+      return next;
+    });
+  }, [removalImpact, matched]);
+
+  // True once every currently-checked row has a fresh impact assessment —
+  // the gate between "Analyze removal impact" and the real "Remove N"
+  // action. Toggling a checkbox after analysis never invalidates this: an
+  // already-analyzed row keeps its assessment regardless of check state.
+  const removalImpactCoversReview =
+    removalImpact.phase === 'done' && reviewRows.length > 0 && reviewRows.every((row) => removalImpact.assessments.has(row.name));
+  const removalImpactCounts = useMemo(() => {
+    if (removalImpact.phase !== 'done') return null;
+    let analyzed = 0;
+    let review = 0;
+    let blocked = 0;
+    let unknown = 0;
+    for (const row of matched) {
+      const entry = removalImpact.assessments.get(row.name);
+      if (entry === undefined) continue;
+      analyzed += 1;
+      if (entry.assessment.status === 'review') review += 1;
+      else if (entry.assessment.status === 'blocked') blocked += 1;
+      else if (entry.assessment.status === 'unknown') unknown += 1;
+    }
+    return { analyzed, review, blocked, unknown };
+  }, [removalImpact, matched]);
+
   const toggleHealth = (criterion: HealthCriterion): void =>
     setSelected((previous) => ({ ...previous, health: toggleIn(previous.health, criterion) }));
   const toggleType = (criterion: TypeCriterion): void =>
@@ -286,6 +344,10 @@ export function ManageDependenciesModal({
     onClose();
     onBulkUpgrade(upgradeCandidates.slice(0, MAX_BULK_UPGRADE_CHANGES));
   };
+  // Only reached once removalImpactCoversReview is true — see
+  // handleRemoveClick below. The user has already seen every currently-
+  // checked row's impact assessment and can still uncheck anything before
+  // this fires; only the final, editable selection is ever submitted.
   const submitRemove = (): void => {
     onClose();
     onBulkRemove(reviewRows.slice(0, MAX_BULK_REMOVE_CHANGES).map((row) => row.name), matchTags);
@@ -293,6 +355,19 @@ export function ManageDependenciesModal({
   const submitRemediation = (): void => {
     onClose();
     onAnalyzeRemediations(remediationNames.slice(0, MAX_BULK_UPGRADE_CHANGES));
+  };
+  // The bulk Remove button is two-phase: the first click (or a selection
+  // change since the last analysis) runs the read-only removal-impact
+  // preview and stays on this same, still-editable review screen; only a
+  // second click — once every checked row has a fresh assessment — actually
+  // proceeds to the final removal confirmation. Never skips straight to
+  // execution the way the old single-phase flow did.
+  const handleRemoveClick = (): void => {
+    if (removalImpactCoversReview) {
+      submitRemove();
+    } else {
+      onAnalyzeRemovalImpact(reviewRows.slice(0, MAX_BULK_REMOVE_CHANGES).map((row) => row.name));
+    }
   };
 
   // Backdrop dismissal only when the backdrop itself, not the dialog inside
@@ -445,10 +520,50 @@ export function ManageDependenciesModal({
               </p>
             </div>
 
+            {removalImpact.phase === 'analyzing' ? (
+              <div className="banner banner--info review-controls__impact-progress" role="status" aria-live="polite">
+                <IconRefresh className="banner__icon banner__icon--spin" />
+                <p className="banner__text">
+                  Analyzing removal impact
+                  {removalImpact.total > 0 ? ` — ${removalImpact.scanned} of ${removalImpact.total} files checked` : '…'}
+                </p>
+                <button type="button" className="button button--secondary" onClick={onCancelRemovalImpact}>
+                  Cancel
+                </button>
+              </div>
+            ) : null}
+
+            {removalImpact.phase === 'error' ? (
+              <div className="banner banner--error" role="alert">
+                <IconAlertTriangle className="banner__icon" />
+                <p className="banner__text">Couldn't analyze removal impact: {removalImpact.message}</p>
+              </div>
+            ) : null}
+
+            {removalImpactCounts !== null ? (
+              <p className="review-controls__impact-summary">
+                {removalImpactCounts.analyzed} analyzed
+                {removalImpactCounts.review > 0 ? ` · ${removalImpactCounts.review} require review` : ''}
+                {removalImpactCounts.blocked > 0 ? ` · ${removalImpactCounts.blocked} blocked` : ''}
+                {removalImpactCounts.unknown > 0 ? ` · ${removalImpactCounts.unknown} unknown` : ''}
+                <button
+                  type="button"
+                  className="button button--secondary button--small"
+                  onClick={() => onAnalyzeRemovalImpact(reviewRows.slice(0, MAX_BULK_REMOVE_CHANGES).map((row) => row.name))}
+                  disabled={reviewRows.length === 0}
+                >
+                  <IconRefresh />
+                  Re-analyze
+                </button>
+              </p>
+            ) : null}
+
             <ul className="review-list" aria-label="Matched dependencies">
               {matched.map((row) => {
                 const tags = matchTags.get(row.name) ?? [];
                 const checked = !deselected.has(row.name);
+                const impactEntry = removalImpact.phase === 'done' ? removalImpact.assessments.get(row.name) : undefined;
+                const isBlocked = impactEntry?.assessment.status === 'blocked';
                 return (
                   <li className="review-list__item" key={row.name}>
                     <label className="review-list__label">
@@ -456,11 +571,25 @@ export function ManageDependenciesModal({
                         type="checkbox"
                         className="review-list__checkbox"
                         checked={checked}
+                        disabled={isBlocked}
                         onChange={() => toggleRow(row.name)}
                       />
                       <span className="review-list__content">
                         <span className="review-list__name">{row.name}</span>
                         {tags.length > 0 ? <span className="review-list__tags">{tags.join(' · ')}</span> : null}
+                        {impactEntry !== undefined ? (
+                          <span
+                            className="review-list__impact"
+                            data-status={impactEntry.assessment.status}
+                          >
+                            <span className="review-list__impact-badge">{REMOVAL_IMPACT_LABEL[impactEntry.assessment.status]}</span>
+                            {impactEntry.assessment.evidence.length > 0 ? (
+                              <span className="review-list__impact-evidence">
+                                {impactEntry.assessment.evidence.map((entry) => entry.summary).join(' · ')}
+                              </span>
+                            ) : null}
+                          </span>
+                        ) : null}
                       </span>
                     </label>
                   </li>
@@ -493,10 +622,12 @@ export function ManageDependenciesModal({
                 <button
                   type="button"
                   className="button button--danger"
-                  onClick={submitRemove}
-                  disabled={reviewRows.length === 0}
+                  onClick={handleRemoveClick}
+                  disabled={reviewRows.length === 0 || removalImpact.phase === 'analyzing'}
                 >
-                  Remove {reviewRows.length > 0 ? reviewRows.length : ''}
+                  {removalImpactCoversReview
+                    ? `Remove ${reviewRows.length}`
+                    : `Analyze removal impact${reviewRows.length > 0 ? ` (${reviewRows.length})` : ''}`}
                 </button>
                 <button
                   type="button"

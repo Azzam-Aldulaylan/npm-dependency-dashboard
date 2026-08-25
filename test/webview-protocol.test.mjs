@@ -10,6 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { MAX_BULK_REMOVE_CHANGES } from '../out/core/upgrade/validate.js';
 import {
   isHostToWebviewMessage,
   isWebviewToHostMessage,
@@ -27,6 +28,7 @@ const ATTRIBUTED = {
   advisory: ADVISORY,
   flaggedPackage: 'minimatch',
   path: ['glob', 'minimatch'],
+  flaggedVersion: '3.1.3',
   patchedVersion: { status: 'unknown' },
 };
 
@@ -37,6 +39,7 @@ const CLEAN_ROW = {
   wanted: '1.0.1',
   latest: '1.0.1',
   dev: false,
+  optional: false,
   range: '^1.0.0',
   advisories: [],
   worstSeverity: null,
@@ -50,6 +53,7 @@ const VULNERABLE_ROW = {
   wanted: null,
   latest: null,
   dev: true,
+  optional: false,
   range: '^7.0.0',
   deprecated: 'no longer supported',
   unresolvable: 'no-lockfile',
@@ -604,6 +608,8 @@ test('one malformed row rejects the whole message', () => {
     { ...CLEAN_ROW, name: 42 },
     { ...CLEAN_ROW, current: undefined },
     { ...CLEAN_ROW, dev: 'false' },
+    { ...CLEAN_ROW, optional: undefined },
+    { ...CLEAN_ROW, optional: 'false' },
     { ...CLEAN_ROW, worstSeverity: 'severe' },
     { ...CLEAN_ROW, upgradeTo: 1 },
     { ...CLEAN_ROW, advisories: undefined },
@@ -625,6 +631,7 @@ test('a malformed advisory rejects the whole message', () => {
   const bad = [
     'GHSA-1234',
     { ...ATTRIBUTED, flaggedPackage: undefined },
+    { ...ATTRIBUTED, flaggedVersion: 42 },
     { ...ATTRIBUTED, path: 'glob → minimatch' },
     { ...ATTRIBUTED, path: ['glob', 7] },
     { ...ATTRIBUTED, advisory: { ...ADVISORY, id: null } },
@@ -1056,4 +1063,69 @@ test('remove-error mirrors upgrade-error\'s shape', () => {
     true
   );
   assert.equal(isHostToWebviewMessage({ status: 'remove-error', package: 'left-pad' }), false);
+});
+
+// ---------------------------------------------- webview -> host / host -> webview: removal-impact preview
+
+test('a well-formed analyze-removal-impact request is accepted', () => {
+  assert.equal(isWebviewToHostMessage({ type: 'analyze-removal-impact', packages: ['left-pad'] }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'analyze-removal-impact', packages: ['left-pad', 'axios'] }), true);
+});
+
+test('analyze-removal-impact rejects an empty, oversized, duplicate, or forged-shape package list', () => {
+  const bad = [
+    { type: 'analyze-removal-impact', packages: [] },
+    { type: 'analyze-removal-impact', packages: Array.from({ length: MAX_BULK_REMOVE_CHANGES + 1 }, (_, i) => `pkg-${i}`) },
+    { type: 'analyze-removal-impact', packages: ['left-pad', 'left-pad'] },
+    { type: 'analyze-removal-impact', packages: ['left-pad', ''] },
+    { type: 'analyze-removal-impact', packages: ['left-pad', 7] },
+    { type: 'analyze-removal-impact' },
+    { type: 'analyze-removal-impact', packages: ['left-pad'], extra: 1 },
+  ];
+  for (const value of bad) {
+    assert.equal(isWebviewToHostMessage(value), false, `${JSON.stringify(value)} accepted`);
+  }
+});
+
+const LOW_RISK_ASSESSMENT = { status: 'low-risk', evidence: [] };
+const REVIEW_ASSESSMENT = {
+  status: 'review',
+  evidence: [{ kind: 'source-reference', summary: 'Used in 3 files' }],
+};
+const BLOCKED_ASSESSMENT = {
+  status: 'blocked',
+  evidence: [{ kind: 'peer-requirement', summary: 'package-x requires this package as a peer dependency' }],
+};
+
+test('removal-impact-analyzing, removal-impact-result, and removal-impact-error are accepted', () => {
+  assert.equal(isHostToWebviewMessage({ status: 'removal-impact-analyzing', scanned: 4, total: 12 }), true);
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'removal-impact-result',
+      assessments: [
+        { packageName: 'left-pad', assessment: LOW_RISK_ASSESSMENT, usageId: 'abc' },
+        { packageName: 'axios', assessment: REVIEW_ASSESSMENT, usageId: 'def' },
+        { packageName: 'react', assessment: BLOCKED_ASSESSMENT, usageId: 'ghi' },
+      ],
+      generatedAt: '2026-08-01T00:00:00.000Z',
+    }),
+    true
+  );
+  assert.equal(isHostToWebviewMessage({ status: 'removal-impact-error', error: { code: 'X', message: 'Y' } }), true);
+});
+
+test('removal-impact-result rejects an unknown assessment status, a malformed evidence kind, or a missing usageId', () => {
+  const bad = [
+    { status: 'removal-impact-result', assessments: [{ packageName: 'x', assessment: { status: 'safe', evidence: [] }, usageId: 'a' }], generatedAt: 't' },
+    {
+      status: 'removal-impact-result',
+      assessments: [{ packageName: 'x', assessment: { status: 'review', evidence: [{ kind: 'shell-command', summary: 's' }] }, usageId: 'a' }],
+      generatedAt: 't',
+    },
+    { status: 'removal-impact-result', assessments: [{ packageName: 'x', assessment: LOW_RISK_ASSESSMENT }], generatedAt: 't' },
+    { status: 'removal-impact-result', assessments: [{ packageName: 'x', assessment: LOW_RISK_ASSESSMENT, usageId: '' }], generatedAt: 't' },
+  ];
+  for (const value of bad) {
+    assert.equal(isHostToWebviewMessage(value), false, `${JSON.stringify(value)} accepted`);
+  }
 });

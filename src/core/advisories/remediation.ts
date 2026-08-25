@@ -36,7 +36,7 @@ export function attachPatchedVersions(
         patchedVersion: resolveFirstPatchedVersion(
           packumentsByPackage.get(entry.flaggedPackage) ?? [],
           entry.advisory.vulnerableVersions,
-          null
+          entry.flaggedVersion
         ),
       }))
     );

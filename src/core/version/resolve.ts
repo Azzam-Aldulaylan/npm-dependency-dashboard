@@ -109,15 +109,27 @@ export function buildVersionInfo(
 
 /**
  * The provable "first patched version" for an advisory: the lowest published,
- * stable version that does NOT satisfy the advisory's own vulnerable range.
+ * stable version that is strictly ahead of the actual resolved vulnerable
+ * version and does NOT satisfy the advisory's own vulnerable range.
  *
  * Three distinct results, deliberately not collapsed into `string | null`:
- *  - `known`   — a real published version proves the fix.
- *  - `none`    — every published version was checked and every one still
- *                matches the vulnerable range. Proven, not a fallback.
- *  - `unknown` — the range couldn't be parsed, or no version list was
- *                available to check against. Never guessed as `none` or
- *                `known` from incomplete data.
+ *  - `known`   — a real published version, strictly ahead of `resolvedVersion`,
+ *                proves the fix.
+ *  - `none`    — every published version ahead of `resolvedVersion` was
+ *                checked and every one still matches the vulnerable range.
+ *                Proven, not a fallback.
+ *  - `unknown` — the range couldn't be parsed, no version list was available
+ *                to check against, or `resolvedVersion` itself is not known —
+ *                without it there is no floor to compare against, so an
+ *                "earliest historical version outside the range" answer would
+ *                risk naming a version *older* than what's actually
+ *                installed (the "Patched in 0.0.0" trap). Never guessed as
+ *                `none` or `known` from incomplete data.
+ *
+ * `resolvedVersion` must be the actual resolved version of the *flagged*
+ * package (`AttributedAdvisory.flaggedVersion`) — for a transitive advisory
+ * this is a deeper graph node's version, never the direct root dependency's
+ * own version.
  *
  * Deliberately does not stop at the declared package.json range or at
  * "highest safe version" (see `resolveUpgradeTarget` in
@@ -132,23 +144,25 @@ export type PatchedVersionResult =
 export function resolveFirstPatchedVersion(
   versions: readonly string[],
   vulnerableVersions: string,
-  installed: string | null
+  resolvedVersion: string | null
 ): PatchedVersionResult {
   if (semver.validRange(vulnerableVersions) === null) return { status: 'unknown' };
+  if (resolvedVersion === null || semver.valid(resolvedVersion) === null) return { status: 'unknown' };
 
   const valid = versions.filter((v) => semver.valid(v) !== null);
   if (valid.length === 0) return { status: 'unknown' };
 
-  const includePrerelease = installed !== null && isPrerelease(installed);
-  const unaffected = valid.filter((v) => {
+  const includePrerelease = isPrerelease(resolvedVersion);
+  const candidates = valid.filter((v) => {
+    if (!semver.gt(v, resolvedVersion)) return false;
     if (semver.satisfies(v, vulnerableVersions, { includePrerelease: true })) return false;
     if (!includePrerelease && isPrerelease(v)) return false;
     return true;
   });
 
-  if (unaffected.length === 0) return { status: 'none' };
+  if (candidates.length === 0) return { status: 'none' };
 
-  const sorted = [...unaffected].sort(semver.compare);
+  const sorted = [...candidates].sort(semver.compare);
   const first = sorted[0];
   return first === undefined ? { status: 'none' } : { status: 'known', version: first };
 }

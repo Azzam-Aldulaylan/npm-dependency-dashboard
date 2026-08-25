@@ -20,9 +20,16 @@
  * cache entry is bounded by the TTL, and a manifest/lockfile change
  * invalidates it immediately via the fingerprint mismatch.
  *
- * "Analyze cleanup" also runs once automatically per project fingerprint —
- * see autoAnalyzeCleanupIfStale/autoCleanupGate.ts. That auto-run is always
- * `background: true`: it skips the VS Code progress notification and the
+ * "Analyze cleanup" also runs automatically — quietly, in the background,
+ * never as part of the initial loading skeleton — after dependency data
+ * settles: first open, manual Refresh, and every successful Upgrade/Remove
+ * (single, bulk, or Smart). `requestBackgroundUsageRefresh` is the single
+ * entry point every one of those callers uses; see its own doc for how a
+ * request that can't run immediately (another usage analysis in flight, or
+ * the panel's upgrade/remove mutation lock still held) is retried once
+ * whatever was blocking it clears, instead of being silently dropped.
+ * `background: true` on `handleAnalyzeCleanup` (only ever set by that
+ * mechanism) skips the VS Code progress notification and the
  * `cleanup-analyzing` posts, and swallows failures instead of surfacing a
  * `cleanup-error` banner, so it never disables toolbar actions or announces
  * itself — badges simply appear once the result lands. An explicit user
@@ -31,20 +38,30 @@
 
 import * as vscode from 'vscode';
 
+import { buildDependencyGraph } from '../../core/lockfile/build.js';
+import { parseManifest } from '../../core/manifest/parse.js';
 import { computeSourceFingerprint, sourceFingerprintsMatch } from '../../core/cache/sourceFingerprint.js';
 import type { ProjectSourceFingerprint } from '../../core/cache/sourceFingerprint.js';
 import { buildUnusedFinding } from '../../core/usage/unused.js';
 import type { DependencyUsageResult } from '../../core/usage/types.js';
 import type { DependencyFinding } from '../../core/hygiene/types.js';
+import { peerRequirementsFor } from '../../core/upgrade/peerRequirement.js';
+import { stillRequiredBy } from '../../core/upgrade/removeImpact.js';
+import { assessRemoval } from '../../core/upgrade/removalAssessment.js';
 import { createPerformanceSession } from '../../core/performance/measurement.js';
 import type { DashboardController, MessageSink } from '../dashboardController.js';
 import type { DiscoveredProject } from '../projectResolution.js';
-import { shouldAutoAnalyzeCleanup } from './autoCleanupGate.js';
+import type { RemovalImpactAssessment } from '../webviewProtocol.js';
+import { shouldRunBackgroundUsageRefresh } from './backgroundUsageRefreshGate.js';
 import { analyzeDependencyUsage } from './usageAnalyzer.js';
 import { UsageReferenceStore } from './usageReferenceStore.js';
 
 export interface WhereUsedMessage {
   package: string;
+}
+
+export interface AnalyzeRemovalImpactMessage {
+  packages: string[];
 }
 
 export interface OpenUsageReferenceMessage {
@@ -58,7 +75,7 @@ export interface UsageCoordinatorOptions {
   getSelectedProject(): DiscoveredProject | undefined;
   isDisposed(): boolean;
   performanceEnabled?(): boolean;
-  /** Whether the panel-wide upgrade/remove lock is held — see autoAnalyzeCleanupIfStale. */
+  /** Whether the panel-wide upgrade/remove mutation lock is held — see requestBackgroundUsageRefresh. */
   isUpgradeBusy?(): boolean;
 }
 
@@ -79,25 +96,25 @@ export class UsageAnalysisCoordinator {
   private readonly referenceStore = new UsageReferenceStore();
   /** root -> packageName -> cached result. */
   private readonly cache = new Map<string, Map<string, CachedUsage>>();
-  /** root -> fingerprint last auto-analyzed by autoAnalyzeCleanupIfStale — see autoCleanupGate.ts. */
-  private readonly lastAutoCleanupFingerprint = new Map<string, ProjectSourceFingerprint>();
+  /** root -> fingerprint last auto-analyzed by requestBackgroundUsageRefresh. */
+  private readonly lastAutoFingerprint = new Map<string, ProjectSourceFingerprint>();
   private activeCts: vscode.CancellationTokenSource | undefined;
-  private backgroundRun: Promise<boolean> | undefined;
-  private backgroundCancellationRequested = false;
-  private backgroundPromoted = false;
+  /** At most one slot: multiple requests before it can run collapse into it — force always wins. See requestBackgroundUsageRefresh. */
+  private pendingBackgroundRequest: { force: boolean } | undefined;
+  /** Guards the async gap between deciding to run a pending request and handleAnalyzeCleanup actually claiming `activeCts`, so two callers racing to service the same pending slot can't both start a scan. */
+  private schedulingBackgroundRefresh = false;
 
   constructor(private readonly options: UsageCoordinatorOptions) {}
 
   isBusy(): boolean {
-    return this.activeCts !== undefined || this.backgroundRun !== undefined;
+    return this.activeCts !== undefined;
   }
 
   dispose(): void {
     this.activeCts?.cancel();
     this.activeCts?.dispose();
     this.activeCts = undefined;
-    this.backgroundCancellationRequested = true;
-    this.backgroundRun = undefined;
+    this.pendingBackgroundRequest = undefined;
     this.referenceStore.clear();
   }
 
@@ -217,6 +234,7 @@ export class UsageAnalysisCoordinator {
       if (this.activeCts === cts) {
         cts.dispose();
         this.activeCts = undefined;
+        this.triggerPendingBackgroundRefresh();
       }
       performance.finish({ cached: false });
     }
@@ -225,11 +243,13 @@ export class UsageAnalysisCoordinator {
   /**
    * "Analyze cleanup" — every direct dependency at once, one pass over the
    * workspace's source files (see usageAnalyzer.ts's own doc for why this
-   * costs the same I/O as a single package).
+   * costs the same I/O as a single package). Runs either from an explicit
+   * user request (the 'analyze-cleanup' message handler in
+   * dashboardPanel.ts) or automatically via requestBackgroundUsageRefresh.
    *
-   * `background: true` (only ever set by autoAnalyzeCleanupIfStale) skips
-   * the VS Code progress notification and every `cleanup-analyzing` post,
-   * and swallows a failure instead of posting `cleanup-error` — an
+   * `background: true` (only ever set by requestBackgroundUsageRefresh)
+   * skips the VS Code progress notification and every `cleanup-analyzing`
+   * post, and swallows a failure instead of posting `cleanup-error` — an
    * auto-triggered run must never disable toolbar actions or announce
    * itself; it either quietly succeeds (badges appear) or quietly does
    * nothing. An explicit click always runs with `background: false`
@@ -267,7 +287,6 @@ export class UsageAnalysisCoordinator {
 
     const cts = new vscode.CancellationTokenSource();
     this.activeCts = cts;
-    if (background && this.backgroundCancellationRequested) cts.cancel();
     const performance = createPerformanceSession(
       'Dependency Dashboard cleanup usage analysis',
       this.options.performanceEnabled?.() ?? false
@@ -293,11 +312,10 @@ export class UsageAnalysisCoordinator {
             token: cts.token,
             performance,
             onProgress: (scanned, total) => {
-              if (background && !this.backgroundPromoted) return;
               const increment = total > 0 ? ((scanned - lastScanned) / total) * 100 : 0;
               lastScanned = scanned;
               progress?.report({ message: `${scanned} of ${total} files checked`, increment });
-              this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned, total });
+              if (!background) this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned, total });
             },
           });
         } finally {
@@ -310,8 +328,6 @@ export class UsageAnalysisCoordinator {
             { location: vscode.ProgressLocation.Notification, title: 'Analyzing dependency usage', cancellable: true },
             (progress, token) => runScan(progress, token)
           );
-      // Cancellation means the user chose a foreground action. Never publish
-      // or cache a partial background scan as if it were complete.
       if (cts.token.isCancellationRequested || this.options.isDisposed() || this.activeCts !== cts) return false;
 
       const fingerprint = this.fingerprintFor(controller);
@@ -328,7 +344,7 @@ export class UsageAnalysisCoordinator {
       this.options.sink.postMessage({ status: 'cleanup-result', findings, analyzedAt, cacheExpiresAt });
       return true;
     } catch (cause) {
-      if ((!background || this.backgroundPromoted) && !this.options.isDisposed()) {
+      if (!background && !this.options.isDisposed()) {
         this.options.sink.postMessage({ status: 'cleanup-error', error: toProtocolError(cause) });
       }
       return false;
@@ -336,76 +352,198 @@ export class UsageAnalysisCoordinator {
       if (this.activeCts === cts) {
         cts.dispose();
         this.activeCts = undefined;
+        this.triggerPendingBackgroundRefresh();
       }
       performance.finish();
     }
   }
 
   /**
-   * Auto-runs "Analyze cleanup" once per project fingerprint — see
-   * autoCleanupGate.ts. Called after every scan reaches the webview
-   * (dashboardPanel.ts); a no-op the vast majority of the time since the
-   * fingerprint rarely changes between calls.
+   * Single entry point for "dependency data just settled, make sure a
+   * current background usage pass eventually runs" — every caller (first
+   * `ready`, manual Refresh, and the reload after a successful Upgrade/
+   * Remove) calls this instead of running its own ad-hoc trigger. Never
+   * spins or polls: if it can't run right now — another usage analysis
+   * (foreground or background) is in flight, or the panel's upgrade/remove
+   * mutation lock is still held — it records the request and returns;
+   * `triggerPendingBackgroundRefresh` (called from every place this
+   * coordinator's own `activeCts` is cleared) and DashboardPanel's
+   * post-mutation-lock-release hook both retry it the moment whatever was
+   * blocking it clears.
    *
-   * `force: true` (only ever set for an explicit manual Refresh — see
-   * dashboardPanel.ts's own doc on why) skips the fingerprint-match check
-   * entirely, so a refresh always re-verifies usage in the background even
-   * when nothing on disk changed — "do the full cycle again, like the first
-   * open" is the explicit UX this exists for. Still respects the
-   * busy/upgrade-lock gates either way; those are safety, not a performance
-   * cap this flag is meant to override.
+   * `force: true` (manual Refresh, and every successful mutation reload)
+   * always eventually runs a fresh pass even if the project's source
+   * fingerprint hasn't changed since the last auto-run; a plain request
+   * (first open, background revalidation) only actually scans once the
+   * fingerprint has changed. Multiple requests before either can run
+   * collapse into one pending slot — force always wins, so a forced request
+   * can never be dropped just because a plain one already claimed the slot.
    */
-  async autoAnalyzeCleanupIfStale(controller: DashboardController, options: { force?: boolean } = {}): Promise<void> {
-    const fingerprint = this.fingerprintFor(controller);
-    const last = this.lastAutoCleanupFingerprint.get(controller.root);
-    const shouldRun = shouldAutoAnalyzeCleanup(
-      last,
-      fingerprint,
-      this.isBusy(),
-      this.options.isUpgradeBusy?.() ?? false,
-      options.force === true
-    );
-    if (!shouldRun) return;
-    this.backgroundCancellationRequested = false;
-    this.backgroundPromoted = false;
-    const run = this.handleAnalyzeCleanup({ background: true });
-    this.backgroundRun = run;
+  async requestBackgroundUsageRefresh(options: { force?: boolean } = {}): Promise<void> {
+    const force = options.force === true;
+    this.pendingBackgroundRequest = { force: force || (this.pendingBackgroundRequest?.force ?? false) };
+    await this.runPendingBackgroundRefresh();
+  }
+
+  /**
+   * Idempotent — safe to call after anything that might have unblocked a
+   * pending request. A no-op if nothing is pending or something still
+   * blocks it (busy, mutation lock, or another caller already servicing the
+   * pending slot).
+   */
+  async runPendingBackgroundRefresh(): Promise<void> {
+    if (this.schedulingBackgroundRefresh) return;
+    if (this.pendingBackgroundRequest === undefined) return;
+    if (this.isBusy() || (this.options.isUpgradeBusy?.() ?? false)) return;
+
+    this.schedulingBackgroundRefresh = true;
     try {
-      const completed = await run;
-      if (completed) this.lastAutoCleanupFingerprint.set(controller.root, fingerprint);
+      // Claimed synchronously, before the first await below, so a second
+      // concurrent caller can't also decide to service the same request.
+      const pending = this.pendingBackgroundRequest;
+      this.pendingBackgroundRequest = undefined;
+
+      const controller = await this.options.ensureController();
+      if (
+        controller === undefined ||
+        this.options.isDisposed() ||
+        this.isBusy() ||
+        (this.options.isUpgradeBusy?.() ?? false)
+      ) {
+        // Couldn't run after all — put it back (unless something newer
+        // already replaced it) rather than dropping it silently.
+        if (this.pendingBackgroundRequest === undefined) this.pendingBackgroundRequest = pending;
+        return;
+      }
+
+      const fingerprint = this.fingerprintFor(controller);
+      const last = this.lastAutoFingerprint.get(controller.root);
+      if (!shouldRunBackgroundUsageRefresh(pending.force, last, fingerprint)) return;
+
+      const completed = await this.handleAnalyzeCleanup({ background: true });
+      if (completed) this.lastAutoFingerprint.set(controller.root, fingerprint);
     } finally {
-      if (this.backgroundRun === run) this.backgroundRun = undefined;
-      this.backgroundCancellationRequested = false;
-      this.backgroundPromoted = false;
+      this.schedulingBackgroundRefresh = false;
     }
+    // A request that arrived while the above was scheduling/running gets
+    // its turn now, without the caller having to poll for it.
+    await this.runPendingBackgroundRefresh();
   }
 
-  /** Explicit actions outrank the invisible auto-cleanup pass. Waits only for
-   * the currently active bounded read batch to observe cancellation. */
-  async cancelBackgroundAnalysis(): Promise<void> {
-    const run = this.backgroundRun;
-    if (run === undefined) return;
-    this.backgroundCancellationRequested = true;
-    this.activeCts?.cancel();
-    await run;
+  private triggerPendingBackgroundRefresh(): void {
+    void this.runPendingBackgroundRefresh();
   }
 
-  /** A foreground usage request can consume the identical full-project scan
-   * already in flight instead of cancelling it and rereading every file. */
-  async joinBackgroundAnalysis(): Promise<boolean> {
-    const run = this.backgroundRun;
-    if (run === undefined) return false;
-    return await run;
-  }
+  /**
+   * A read-only removal-impact preview for one or more packages — the single
+   * "Analyze removal" card in the Manage dependency modal, and the bulk
+   * Review step's inline impact check (see Part 5 of the redesign brief),
+   * both funnel through here. Shares this coordinator's own single-flight
+   * `activeCts` guard, the identical one-pass `analyzeDependencyUsage` batch
+   * scan `handleAnalyzeCleanup` already uses (one workspace read regardless
+   * of how many packages are requested), and the same `UsageReferenceStore`
+   * — "View references" on a source-reference evidence entry opens through
+   * the existing `open-usage-reference` trust boundary, never a new one.
+   *
+   * Deliberately lighter-weight than the upgrade/removal execution path:
+   * this never mutates anything and never gates the actual removal
+   * transaction, so — like `handleWhereUsed`/`handleAnalyzeCleanup` — it
+   * trusts `controller.upgradeSource` (the source that produced the current
+   * scan) directly rather than re-reading disk. The real security boundary
+   * for execution is unchanged: `bulk-remove` -> `confirm-remove` always
+   * re-reads disk and re-validates eligibility fresh, regardless of what
+   * this preview showed.
+   *
+   * Package names that aren't a real direct dependency of the current scan
+   * are silently dropped, never trusted as-is — the same discipline
+   * `handleWhereUsed` applies to a single package name.
+   */
+  async handleAnalyzeRemovalImpact(message: AnalyzeRemovalImpactMessage): Promise<void> {
+    if (this.isBusy()) {
+      this.options.sink.postMessage({
+        status: 'removal-impact-error',
+        error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Another usage analysis is already in progress for this project.' },
+      });
+      return;
+    }
 
-  /** Turns the invisible auto pass into the user's visible cleanup request,
-   * retaining its completed work while enabling real progress messages. */
-  async promoteAndJoinBackgroundAnalysis(): Promise<boolean> {
-    const run = this.backgroundRun;
-    if (run === undefined) return false;
-    this.backgroundPromoted = true;
-    this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned: 0, total: 0 });
-    return await run;
+    const controller = await this.options.ensureController();
+    if (controller === undefined) return;
+    const rowNames = new Set(controller.lastResultRows().map((row) => row.name));
+    const packageNames = [...new Set(message.packages)].filter((name) => rowNames.has(name));
+    const selected = this.options.getSelectedProject();
+    if (selected === undefined) return;
+
+    if (packageNames.length === 0) {
+      this.options.sink.postMessage({ status: 'removal-impact-result', assessments: [], generatedAt: new Date().toISOString() });
+      return;
+    }
+
+    const cts = new vscode.CancellationTokenSource();
+    this.activeCts = cts;
+    const performance = createPerformanceSession(
+      'Dependency Dashboard removal impact analysis',
+      this.options.performanceEnabled?.() ?? false
+    );
+    performance.setMetadata('candidates', packageNames.length);
+    this.options.sink.postMessage({ status: 'removal-impact-analyzing', scanned: 0, total: 0 });
+
+    try {
+      const source = controller.upgradeSource;
+      const manifest = parseManifest(source.manifestText);
+      const graph = buildDependencyGraph({
+        root: controller.root,
+        manifest,
+        lockfileText: source.lockfileText,
+        packageManager: source.packageManager,
+        importerId: source.importerId,
+      });
+      const removing = new Set(packageNames);
+
+      const resultsByPackage = await analyzeDependencyUsage({
+        folder: selected.folder,
+        dir: selected.dir,
+        manifestText: source.manifestText,
+        packageNames,
+        token: cts.token,
+        performance,
+        onProgress: (scanned, total) => {
+          this.options.sink.postMessage({ status: 'removal-impact-analyzing', scanned, total });
+        },
+      });
+      // Cancellation means the user closed the review before results were
+      // ready — same discipline as a cancelled background cleanup scan:
+      // never publish a partial result as if it were complete.
+      if (this.options.isDisposed() || this.activeCts !== cts || cts.token.isCancellationRequested) return;
+
+      // analyzeDependencyUsage always returns an entry for every name it was
+      // given (see its own implementation), so `usageResult` is only ever
+      // undefined here as a defensive fallback, never in practice.
+      const assessments: RemovalImpactAssessment[] = packageNames.flatMap((name) => {
+        const usageResult = resultsByPackage.get(name);
+        if (usageResult === undefined) return [];
+        const usageId = this.referenceStore.store(name, usageResult, selected.folder);
+        const assessment = assessRemoval({
+          usage: { references: usageResult.references, truncated: usageResult.truncated },
+          peerRequirements: peerRequirementsFor(graph, name, removing),
+          stillRequiredBy: stillRequiredBy(graph, manifest.dependencies, name, removing),
+        });
+        return [{ packageName: name, assessment, usageId }];
+      });
+
+      this.options.sink.postMessage({ status: 'removal-impact-result', assessments, generatedAt: new Date().toISOString() });
+    } catch (cause) {
+      if (!this.options.isDisposed()) {
+        this.options.sink.postMessage({ status: 'removal-impact-error', error: toProtocolError(cause) });
+      }
+    } finally {
+      if (this.activeCts === cts) {
+        cts.dispose();
+        this.activeCts = undefined;
+        this.triggerPendingBackgroundRefresh();
+      }
+      performance.finish({ packages: packageNames.length });
+    }
   }
 
   handleCancel(): void {

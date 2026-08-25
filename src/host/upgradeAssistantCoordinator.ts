@@ -124,6 +124,15 @@ export interface UpgradeAssistantCoordinatorOptions {
   isDisposed(): boolean;
   reloadFinalState(): Promise<void>;
   flushDeferredChanges(): Promise<void>;
+  /**
+   * Fires once the mutation lock is actually released after a transaction
+   * that called `reloadFinalState()` — the moment a background usage
+   * refresh queued during that reload (see UsageAnalysisCoordinator's
+   * `requestBackgroundUsageRefresh`) is allowed to actually start. Called
+   * before `flushDeferredChanges()` awaits, so the background scan starts
+   * without waiting on deferred watcher-event handling.
+   */
+  onMutationLockReleased?(): void;
   performanceEnabled?(): boolean;
   /** Test seam; production always uses the host-owned project loader. */
   loadProject?: (candidate: DiscoveredProject) => Promise<ResolvedProject>;
@@ -1287,6 +1296,7 @@ export class UpgradeAssistantCoordinator {
       }
     } finally {
       this.session.release(stored.eligibility.packageName);
+      this.options.onMutationLockReleased?.();
       // Watcher events received during the lock are deferred, never dropped.
       await this.options.flushDeferredChanges();
       if (this.options.isDisposed()) this.session.dispose();
@@ -1458,6 +1468,7 @@ export class UpgradeAssistantCoordinator {
       }
     } finally {
       this.session.release(stored.eligibility.packageName);
+      this.options.onMutationLockReleased?.();
       await this.options.flushDeferredChanges();
       if (this.options.isDisposed()) this.session.dispose();
     }

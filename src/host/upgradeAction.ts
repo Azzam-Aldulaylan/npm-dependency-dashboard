@@ -112,6 +112,24 @@ function remediationUnknownTooltip(): string {
 }
 
 /**
+ * Whether "Check transitive fixes" is ever relevant for this row — the
+ * exact same gate `resolveActionState` reaches its own
+ * `'transitive-remediation'`/`'remediation-*'` branches through, extracted
+ * so ManageDependencyModal.tsx can decide whether to render that card at
+ * all without re-deriving (and risking drifting from) resolveActionState's
+ * own branch order. A row with no resolved installed version, no known
+ * vulnerability, a direct upgrade already on offer, or only direct (never
+ * transitive) advisories all answer `false` here — see resolveActionState's
+ * own comments for why each of those disqualifies it.
+ */
+export function hasEligibleTransitiveFix(row: PackageRow): boolean {
+  if (row.upgradeTo !== null) return false;
+  if (row.current === null) return false;
+  if (row.worstSeverity === null) return false;
+  return row.advisories.some((entry) => entry.path.length > 1);
+}
+
+/**
  * The single decision the Action cell renders from. `upgradeTo`/
  * `upgradeReason` already carry a real, host-validated target whenever one
  * exists (see PackageRow's own doc) — everything below is purely about

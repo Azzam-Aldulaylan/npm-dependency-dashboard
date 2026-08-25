@@ -93,11 +93,13 @@ export function isPatchedVersionResult(value: unknown): value is PatchedVersionR
 export function isAttributedAdvisory(value: unknown): value is AttributedAdvisory {
   if (!isRecord(value)) return false;
   const path = value['path'];
+  const flaggedVersion = value['flaggedVersion'];
   return (
     isAdvisory(value['advisory']) &&
     typeof value['flaggedPackage'] === 'string' &&
     Array.isArray(path) &&
     path.every((segment) => typeof segment === 'string') &&
+    (flaggedVersion === null || typeof flaggedVersion === 'string') &&
     isPatchedVersionResult(value['patchedVersion'])
   );
 }
@@ -116,6 +118,7 @@ export function isPackageRow(value: unknown): value is PackageRow {
     isStringOrNull(value['wanted']) &&
     isStringOrNull(value['latest']) &&
     typeof value['dev'] === 'boolean' &&
+    typeof value['optional'] === 'boolean' &&
     typeof value['range'] === 'string' &&
     isStringOrNull(upgradeTo) &&
     // `upgradeReason` is null exactly when `upgradeTo` is — see PackageRow's own doc.

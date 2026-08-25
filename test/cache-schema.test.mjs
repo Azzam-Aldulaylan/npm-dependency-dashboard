@@ -22,6 +22,7 @@ const ROW = {
   wanted: '1.0.1',
   latest: '1.0.1',
   dev: false,
+  optional: false,
   range: '^1.0.0',
   advisories: [],
   worstSeverity: null,

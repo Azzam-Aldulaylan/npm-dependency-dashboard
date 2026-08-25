@@ -19,7 +19,15 @@
  * not necessarily one we sent.
  */
 
-import type { Advisory, AttributedAdvisory, PackageRow, PatchedVersionResult } from '../core/types.js';
+import type {
+  Advisory,
+  AttributedAdvisory,
+  PackageRow,
+  PatchedVersionResult,
+  RemovalAssessment,
+  RemovalEvidence,
+  RemovalEvidenceKind,
+} from '../core/types.js';
 import type { DependencyFinding } from '../core/hygiene/types.js';
 import type { DependencyReference, DependencyUsageResult } from '../core/usage/types.js';
 import {
@@ -224,6 +232,26 @@ export interface RemoveAnalysisFiles {
   rollbackAvailable: boolean;
 }
 
+/**
+ * One package's removal-impact preview, from the batched `analyze-removal-impact`
+ * flow — see src/host/usage/usageCoordinator.ts's handleAnalyzeRemovalImpact.
+ * `usageId` is the same opaque, host-issued id `usage-result` already uses
+ * (src/host/usage/usageReferenceStore.ts) — "View references" on a
+ * source-reference evidence entry opens through the existing
+ * `open-usage-reference` trust boundary, never a new one.
+ *
+ * Deliberately read-only and non-authoritative: it never gates the actual
+ * removal transaction (`bulk-remove` -> `confirm-remove` is unchanged and
+ * re-validates everything fresh from disk regardless of what this preview
+ * showed) — see removeAnalysisPresentation.ts and
+ * UpgradeAssistantCoordinator.executeStoredRemoval.
+ */
+export interface RemovalImpactAssessment {
+  packageName: string;
+  assessment: RemovalAssessment;
+  usageId: string;
+}
+
 export interface RemoveAnalysisPresentation {
   analysisId: string;
   package: string;
@@ -328,6 +356,17 @@ export type HostToWebviewMessage =
   /** A full "Analyze cleanup" run (every direct dependency) is in progress — the only genuinely-observable progress signal this produces is files scanned so far. */
   | { status: 'cleanup-analyzing'; scanned: number; total: number }
   /**
+   * A batched removal-impact preview (single package, from the Manage
+   * dependency modal, or the whole bulk-remove review-step selection) is in
+   * progress — same real file-scanned-so-far progress signal as
+   * `cleanup-analyzing`, since it shares the identical one-pass usage
+   * analyzer. See src/host/usage/usageCoordinator.ts.
+   */
+  | { status: 'removal-impact-analyzing'; scanned: number; total: number }
+  /** The host-owned, read-only removal-impact preview for every requested package that is still a real direct dependency of the current scan — see RemovalImpactAssessment's own doc. */
+  | { status: 'removal-impact-result'; assessments: RemovalImpactAssessment[]; generatedAt: string }
+  | { status: 'removal-impact-error'; error: ProtocolError }
+  /**
    * Likely-unused findings from a completed "Analyze cleanup" run — the
    * webview merges these with the deprecated/duplicate-version findings it
    * already has (`DashboardData.hygieneFindings`) and re-derives the
@@ -406,6 +445,18 @@ export type WebviewToHostMessage =
   | { type: 'reanalyze-usage'; package: string }
   /** On-demand usage scan across every direct dependency at once — see usageCoordinator.ts's handleAnalyzeCleanup. No payload: there is nothing for the webview to choose here either. */
   | { type: 'analyze-cleanup' }
+  /**
+   * A read-only removal-impact preview for one or more packages — the single
+   * "Analyze removal" card in the Manage dependency modal, and the bulk
+   * Review step's inline impact check, both funnel through this one message.
+   * Only ever package names; the host re-derives the graph, usage evidence,
+   * and peer requirements itself from its own trusted state — see
+   * handleAnalyzeRemovalImpact. Names that aren't a real direct dependency of
+   * the current scan are silently dropped, never trusted as-is. Shares
+   * `cancel-usage-analysis`'s single-flight cancellation rather than
+   * inventing a second one.
+   */
+  | { type: 'analyze-removal-impact'; packages: string[] }
   /** Cancels whichever usage analysis (a `where-used` or an `analyze-cleanup` run) is currently in progress for this panel. */
   | { type: 'cancel-usage-analysis' }
   /**
@@ -574,6 +625,17 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   }
   if (type === 'analyze-cleanup' || type === 'cancel-usage-analysis') {
     return hasOnlyKeys(value, ['type']);
+  }
+  if (type === 'analyze-removal-impact') {
+    const packages = value['packages'];
+    return (
+      hasOnlyKeys(value, ['type', 'packages']) &&
+      Array.isArray(packages) &&
+      packages.length > 0 &&
+      packages.length <= MAX_BULK_REMOVE_CHANGES &&
+      packages.every(isNonEmptyString) &&
+      new Set(packages).size === packages.length
+    );
   }
   if (type === 'open-usage-reference') {
     const referenceIndex = value['referenceIndex'];
@@ -933,6 +995,48 @@ function isDependencyUsageResult(value: unknown): value is DependencyUsageResult
   );
 }
 
+const REMOVAL_EVIDENCE_KINDS: ReadonlySet<string> = new Set<RemovalEvidenceKind>([
+  'source-reference',
+  'script-reference',
+  'config-reference',
+  'peer-requirement',
+  'transitive-dependency',
+]);
+
+const REMOVAL_ASSESSMENT_STATUSES: ReadonlySet<string> = new Set(['low-risk', 'review', 'blocked', 'unknown']);
+
+function isRemovalEvidence(value: unknown): value is RemovalEvidence {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['kind', 'summary']) &&
+    typeof value['kind'] === 'string' &&
+    REMOVAL_EVIDENCE_KINDS.has(value['kind']) &&
+    typeof value['summary'] === 'string'
+  );
+}
+
+function isRemovalAssessment(value: unknown): value is RemovalAssessment {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['status', 'evidence'])) return false;
+  const status = value['status'];
+  const evidence = value['evidence'];
+  return (
+    typeof status === 'string' &&
+    REMOVAL_ASSESSMENT_STATUSES.has(status) &&
+    Array.isArray(evidence) &&
+    evidence.every(isRemovalEvidence)
+  );
+}
+
+function isRemovalImpactAssessment(value: unknown): value is RemovalImpactAssessment {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['packageName', 'assessment', 'usageId']) &&
+    isNonEmptyString(value['packageName']) &&
+    isRemovalAssessment(value['assessment']) &&
+    isNonEmptyString(value['usageId'])
+  );
+}
+
 function isUsageAnalysisResult(value: unknown): value is UsageAnalysisResult {
   return (
     isRecord(value) &&
@@ -1074,6 +1178,25 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
     );
   }
   if (status === 'cleanup-error') {
+    return hasOnlyKeys(value, ['status', 'error']) && isProtocolError(value['error']);
+  }
+  if (status === 'removal-impact-analyzing') {
+    return (
+      hasOnlyKeys(value, ['status', 'scanned', 'total']) &&
+      typeof value['scanned'] === 'number' &&
+      typeof value['total'] === 'number'
+    );
+  }
+  if (status === 'removal-impact-result') {
+    const assessments = value['assessments'];
+    return (
+      hasOnlyKeys(value, ['status', 'assessments', 'generatedAt']) &&
+      Array.isArray(assessments) &&
+      assessments.every(isRemovalImpactAssessment) &&
+      typeof value['generatedAt'] === 'string'
+    );
+  }
+  if (status === 'removal-impact-error') {
     return hasOnlyKeys(value, ['status', 'error']) && isProtocolError(value['error']);
   }
   if (DATA_STATUSES.has(status)) {

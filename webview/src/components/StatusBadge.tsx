@@ -13,7 +13,8 @@ export function StatusBadge({
   title,
 }: {
   label: string;
-  tone?: 'neutral' | 'warning';
+  /** `accent` is a filled, sentence-case pill — reserved for the Manage modal's own classification badge (Production/Development/Optional), the one identity fact worth a stronger visual weight than the flat neutral/warning tags. */
+  tone?: 'neutral' | 'warning' | 'accent';
   title?: string;
 }): ReactElement {
   return (

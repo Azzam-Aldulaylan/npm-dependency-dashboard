@@ -120,6 +120,7 @@ test('an empty row set is all zeros', () => {
     highVulnerabilities: 0,
     moderateVulnerabilities: 0,
     lowVulnerabilities: 0,
+    infoVulnerabilities: 0,
     needsAttention: 0,
     deprecatedCount: 0,
   });
@@ -146,6 +147,7 @@ test('counts are tallied across a mixed row set', () => {
     highVulnerabilities: 1,
     moderateVulnerabilities: 1,
     lowVulnerabilities: 1,
+    infoVulnerabilities: 0,
     needsAttention: 3, // critical, high, deprecated
     deprecatedCount: 1,
   });
@@ -176,14 +178,27 @@ test('vulnerabilities subtitle: clean set says so', () => {
   assert.equal(vulnerabilitiesCardSubtitle(summaryMetrics([])), 'No known vulnerabilities');
 });
 
-test('vulnerabilities subtitle: highest severities first, capped at two', () => {
+test('vulnerabilities subtitle: includes every nonzero severity, highest first', () => {
   const rows = [
     row({ name: 'a', worstSeverity: 'critical' }),
     row({ name: 'b', worstSeverity: 'high' }),
     row({ name: 'c', worstSeverity: 'high' }),
     row({ name: 'd', worstSeverity: 'moderate' }),
+    row({ name: 'e', worstSeverity: 'low' }),
+    row({ name: 'f', worstSeverity: 'info' }),
   ];
-  assert.equal(vulnerabilitiesCardSubtitle(summaryMetrics(rows)), '1 critical · 2 high');
+  assert.equal(
+    vulnerabilitiesCardSubtitle(summaryMetrics(rows)),
+    '1 critical · 2 high · 1 moderate · 1 low · 1 info'
+  );
+});
+
+test('vulnerabilities subtitle: omits zero tiers without hiding moderate or low', () => {
+  const rows = [
+    row({ name: 'a', worstSeverity: 'moderate' }),
+    row({ name: 'b', worstSeverity: 'low' }),
+  ];
+  assert.equal(vulnerabilitiesCardSubtitle(summaryMetrics(rows)), '1 moderate · 1 low');
 });
 
 test('attention subtitle: nothing to report on a clean set', () => {

@@ -63,7 +63,18 @@ const BACKGROUND_REFRESH_INTERVAL_MS = 30 * 60_000;
 /** Coalesces a burst of filesystem events (e.g. an editor's atomic save, which can fire delete+create in quick succession) into a single invalidation + rescan. */
 const FILE_EVENT_DEBOUNCE_MS = 300;
 
-function buildHtml(webview: vscode.Webview, extensionUri: vscode.Uri, performanceEnabled: boolean): string {
+/**
+ * `cacheBust` is appended as a query string on both asset URLs so that
+ * re-assigning `panel.webview.html` (the dev-mode auto-reload watcher below)
+ * is guaranteed to fetch the just-rebuilt `webview.js`/`webview.css` bytes
+ * rather than whatever Chromium's resource cache already has for that exact
+ * URL — the nonce changes the inline `<script>` tag itself, but does nothing
+ * about the cached response behind an unchanged `src`. Callers pass
+ * `Date.now()`; this is purely a cache key; the real timestamp shown in the
+ * UI is `buildInfo.builtAt` (`__BUILD_TIME__`, fixed for this extension host
+ * process's whole lifetime — see that field's own doc).
+ */
+function buildHtml(webview: vscode.Webview, extensionUri: vscode.Uri, performanceEnabled: boolean, cacheBust: number): string {
   const nonce = randomBytes(16).toString('base64');
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'));
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview.css'));
@@ -82,12 +93,12 @@ function buildHtml(webview: vscode.Webview, extensionUri: vscode.Uri, performanc
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="Content-Security-Policy" content="${csp}" />
-    <link rel="stylesheet" href="${styleUri.toString()}" />
+    <link rel="stylesheet" href="${styleUri.toString()}?v=${cacheBust}" />
     <title>${TITLE}</title>
   </head>
   <body data-performance-debug="${performanceEnabled ? 'true' : 'false'}">
     <div id="root"></div>
-    <script nonce="${nonce}" src="${scriptUri.toString()}"></script>
+    <script nonce="${nonce}" src="${scriptUri.toString()}?v=${cacheBust}"></script>
   </body>
 </html>`;
 }
@@ -152,6 +163,18 @@ export class DashboardPanel {
   /** The absolute lockfile path the current persisted entry was built against — needed to purge every npm-workspace sibling sharing it once a reload has just replaced it. Null means the selected project has no lockfile. */
   private selectedLockfilePath: string | null = null;
   private invalidationTimer: NodeJS.Timeout | undefined;
+  /**
+   * Dev-mode-only ("F5" Extension Development Host) auto-reload: watches this
+   * extension's own `dist/webview.{js,css}` and re-assigns `panel.webview.html`
+   * shortly after `npm run watch` finishes a rebuild, so the panel picks up
+   * UI changes without a manual "close tab and reopen" or a full window
+   * reload. Never created for a real installed extension — `extensionMode`
+   * is `Development` only under `--extensionDevelopmentPath`. This is a full
+   * webview reload, not state-preserving React Fast Refresh: the in-progress
+   * scan/manage-modal state resets, same as any other panel re-creation.
+   */
+  private readonly devWebviewWatcher: vscode.FileSystemWatcher | undefined;
+  private devReloadTimer: NodeJS.Timeout | undefined;
   /** Owns coalescing, upgrade-busy deferral, and serialized generation-checked reloads for watcher events — see fileChangeCoordinator.ts. This panel only owns the actual watcher subscriptions and debounce timing. */
   private readonly fileChangeCoordinator = new FileChangeCoordinator({
     isBusy: () => this.upgradeCoordinator.isBusy(),
@@ -211,7 +234,26 @@ export class DashboardPanel {
       this.onBackgroundTick();
     });
 
-    this.panel.webview.html = buildHtml(this.panel.webview, context.extensionUri, this.performanceEnabled());
+    this.panel.webview.html = buildHtml(this.panel.webview, context.extensionUri, this.performanceEnabled(), Date.now());
+
+    this.devWebviewWatcher =
+      context.extensionMode === vscode.ExtensionMode.Development
+        ? vscode.workspace.createFileSystemWatcher(
+            new vscode.RelativePattern(vscode.Uri.joinPath(context.extensionUri, 'dist'), 'webview.{js,css}')
+          )
+        : undefined;
+    if (this.devWebviewWatcher !== undefined) {
+      const scheduleReload = (): void => {
+        if (this.devReloadTimer !== undefined) clearTimeout(this.devReloadTimer);
+        this.devReloadTimer = setTimeout(() => {
+          this.devReloadTimer = undefined;
+          if (this.disposed) return;
+          this.panel.webview.html = buildHtml(this.panel.webview, context.extensionUri, this.performanceEnabled(), Date.now());
+        }, FILE_EVENT_DEBOUNCE_MS);
+      };
+      this.devWebviewWatcher.onDidChange(scheduleReload);
+      this.devWebviewWatcher.onDidCreate(scheduleReload);
+    }
 
     this.panel.webview.onDidReceiveMessage(
       (raw: unknown) => {
@@ -240,6 +282,8 @@ export class DashboardPanel {
         this.backgroundTimer.dispose();
         this.etagStore.dispose();
         this.projectCacheStore.dispose();
+        this.devWebviewWatcher?.dispose();
+        if (this.devReloadTimer !== undefined) clearTimeout(this.devReloadTimer);
         DashboardPanel.current = undefined;
       },
       null,

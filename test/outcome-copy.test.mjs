@@ -11,6 +11,7 @@ import {
   compatibilityOutcomeDisplay,
   resolverOutcomeDisplay,
   securityOutcomeDisplay,
+  upgradeSafetyHeadline,
 } from '../out/host/outcomeCopy.js';
 
 test('every compatibility status has a distinct, non-empty label and a className matching the status', () => {
@@ -50,4 +51,24 @@ test('a failed resolver reports resolution failure, not a generic conflict label
 
 test('an unavailable resolver reports that verification could not be confirmed', () => {
   assert.match(resolverOutcomeDisplay('unknown').label, /could not be verified/i);
+});
+
+test('every upgrade-safety headline has a distinct, non-empty label and a className matching the status', () => {
+  const statuses = ['compatible', 'warning', 'conflict', 'unknown'];
+  const labels = new Set();
+  for (const status of statuses) {
+    const { label, className } = upgradeSafetyHeadline(status);
+    assert.ok(label.length > 0);
+    assert.equal(className, status);
+    labels.add(label);
+  }
+  assert.equal(labels.size, statuses.length, 'labels must be distinct');
+});
+
+test('a blocked upgrade is phrased as blocked, not a generic conflict label', () => {
+  assert.match(upgradeSafetyHeadline('conflict').label, /block/i);
+});
+
+test('a compatible upgrade is phrased as safe', () => {
+  assert.match(upgradeSafetyHeadline('compatible').label, /safe/i);
 });

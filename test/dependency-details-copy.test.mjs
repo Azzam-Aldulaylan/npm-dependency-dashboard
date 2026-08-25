@@ -6,6 +6,8 @@ import {
   deprecatedFindingFor,
   introducedDuplicateFindings,
   ownDuplicateFinding,
+  usageSignificanceCopy,
+  usageSummaryCounts,
 } from '../out/host/dependencyDetailsCopy.js';
 
 function row(overrides) {
@@ -79,4 +81,62 @@ test('introducedDuplicateFindings excludes a package\'s own duplicate finding', 
 
 test('introducedDuplicateFindings finds nothing for an unrelated package', () => {
   assert.deepEqual(introducedDuplicateFindings([INTRODUCED_DUPLICATE_FINDING], 'left-pad'), []);
+});
+
+const REFERENCES = [
+  { filePath: 'src/api/client.ts', line: 1, column: 1, snippet: "import axios from 'axios'", kind: 'import' },
+  { filePath: 'src/services/auth.service.ts', line: 3, column: 1, snippet: "import axios from 'axios'", kind: 'import' },
+  { filePath: 'src/hooks/useUser.ts', line: 27, column: 12, snippet: "await axios.get('/me')", kind: 'require' },
+  { filePath: 'package.json', line: 0, column: 0, snippet: 'build', kind: 'script', context: 'build' },
+  { filePath: 'webpack.config.js', line: 4, column: 1, snippet: 'externals: ["axios"]', kind: 'config', context: 'webpack' },
+];
+
+test('usageSummaryCounts tallies each reference kind independently, never inventing an unrepresented category', () => {
+  assert.deepEqual(usageSummaryCounts(REFERENCES), {
+    referencedInFiles: 5,
+    importStatements: 3,
+    dynamicImports: 0,
+    scripts: 1,
+    configReferences: 1,
+  });
+});
+
+test('usageSummaryCounts counts a file only once no matter how many references it has', () => {
+  const counts = usageSummaryCounts([REFERENCES[0], { ...REFERENCES[0], line: 2 }]);
+  assert.equal(counts.referencedInFiles, 1);
+  assert.equal(counts.importStatements, 2);
+});
+
+test('usageSummaryCounts on no references is all zero', () => {
+  assert.deepEqual(usageSummaryCounts([]), {
+    referencedInFiles: 0,
+    importStatements: 0,
+    dynamicImports: 0,
+    scripts: 0,
+    configReferences: 0,
+  });
+});
+
+test('usageSignificanceCopy: analysis not finished yet', () => {
+  assert.equal(usageSignificanceCopy(row({}), null), "Usage analysis for react hasn't finished yet.");
+});
+
+test('usageSignificanceCopy: real source usage', () => {
+  const counts = usageSummaryCounts(REFERENCES);
+  assert.equal(usageSignificanceCopy(row({}), counts), 'react is referenced directly by application code and is actively used by this project.');
+});
+
+test('usageSignificanceCopy: script/config only, no source import', () => {
+  const counts = usageSummaryCounts([REFERENCES[3], REFERENCES[4]]);
+  assert.equal(
+    usageSignificanceCopy(row({}), counts),
+    "react isn't imported by application code, but is referenced from package.json scripts or configuration."
+  );
+});
+
+test('usageSignificanceCopy: nothing found at all', () => {
+  assert.equal(
+    usageSignificanceCopy(row({}), usageSummaryCounts([])),
+    'No direct source references to react were found. Review its scripts, configuration, and dependency paths before removing it.'
+  );
 });

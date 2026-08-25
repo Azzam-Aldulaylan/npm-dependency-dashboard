@@ -15,7 +15,7 @@ import { VerificationSection } from './VerificationSection.js';
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-function primaryAction(
+export function primaryAction(
   analysis: UpgradeAnalysisPresentation
 ): { label: string; onClick: 'confirm' | 'use-smart-plan' } | null {
   if (analysis.compatibility.status === 'conflict') {
@@ -43,7 +43,7 @@ function primaryAction(
  * directly under the header, as the one place a 2-second read answers
  * "is this upgrade OK".
  */
-function overallStatusDetail(analysis: UpgradeAnalysisPresentation): string | undefined {
+export function overallStatusDetail(analysis: UpgradeAnalysisPresentation): string | undefined {
   const { compatibility } = analysis;
   if (compatibility.completeness === 'partial') return 'Some compatibility checks could not be completed.';
   const nonCompatible = compatibility.findings.filter((finding) => finding.status !== 'compatible').length;
@@ -56,12 +56,101 @@ function overallStatusDetail(analysis: UpgradeAnalysisPresentation): string | un
 }
 
 /**
+ * The loading-or-result body content shared by the standalone
+ * UpgradeAnalysisModal (bulk upgrades, opened from the "Manage
+ * dependencies" bulk flow) and the embedded Upgrade review tab inside
+ * ManageDependencyModal (single-package upgrades, reviewed in place —
+ * never a second, separate dialog). No modal chrome of its own: the caller
+ * owns the dialog/tab wrapper, header, and footer actions.
+ */
+export function UpgradeAnalysisBody({
+  packageName,
+  targetVersion,
+  analyzingPhase,
+  analysis,
+  onOpenAdvisory,
+  onConfigureVerification,
+  pendingChanges,
+}: {
+  packageName: string;
+  targetVersion: string;
+  analyzingPhase: 'compatibility' | 'smart-plan' | null;
+  analysis: UpgradeAnalysisPresentation | null;
+  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onConfigureVerification: () => void;
+  pendingChanges?: readonly { packageName: string; targetVersion: string }[] | undefined;
+}): ReactElement {
+  const overall = analysis !== null ? compatibilityOutcomeDisplay(analysis.compatibility.status) : null;
+  const securityNeedsAttention = analysis?.security?.status === 'remains';
+  const displayedChanges = analysis?.changes ?? pendingChanges ?? [{ packageName, targetVersion }];
+
+  if (analysis === null) {
+    return (
+      <UpgradeAnalysisLoading
+        packageName={packageName}
+        targetVersion={targetVersion}
+        changeCount={displayedChanges.length}
+        phase={analyzingPhase}
+      />
+    );
+  }
+
+  return (
+    <>
+      {overall !== null ? (
+        <OutcomeStatus
+          label={overall.label}
+          className={overall.className}
+          detail={overallStatusDetail(analysis)}
+          size="large"
+        />
+      ) : null}
+
+      {analysis.smartPlan !== null ? <SmartPlanSection smartPlan={analysis.smartPlan} /> : null}
+
+      {analysis.changes.length > 1 ? (
+        <section className="analysis-card analysis-card--full" aria-labelledby="analysis-selected-upgrades-heading">
+          <h3 className="analysis-card__title" id="analysis-selected-upgrades-heading">Selected upgrades</h3>
+          <ol className="smart-plan__changes">
+            {analysis.changes.map((change) => (
+              <li className="smart-plan__change" key={change.packageName}>
+                <span className="smart-plan__package">{change.packageName}</span>
+                <span className="smart-plan__versions">{change.currentVersion} → {change.targetVersion}</span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
+
+      <div className="modal__grid">
+        <CompatibilitySection
+          compatibility={analysis.compatibility}
+          context={{ package: analysis.package, currentVersion: analysis.currentVersion }}
+        />
+        <SecuritySection
+          security={analysis.security}
+          rootPackageName={analysis.package}
+          onOpenAdvisory={onOpenAdvisory}
+          emphasize={securityNeedsAttention}
+        />
+        <FilesSection files={analysis.files} />
+        <VerificationSection verification={analysis.verification} onConfigureVerification={onConfigureVerification} />
+      </div>
+    </>
+  );
+}
+
+/**
  * The Upgrade Analysis / confirmation experience — a centered dialog inside
  * the dashboard webview, replacing the native `showWarningMessage` modal.
  * `analysis === null` renders the loading phase; once it arrives, the modal
  * never mutates its own contents — it only ever echoes `analysis.analysisId`
  * back in confirm/cancel/use-smart-plan (see webviewProtocol.ts's own doc on
- * why the webview never constructs execution authority).
+ * why the webview never constructs execution authority). Used only for the
+ * bulk-upgrade flow (opened from the "Manage dependencies" bulk actions
+ * modal) — a single-package upgrade reviewed from Manage dependency renders
+ * this same content inline via UpgradeAnalysisBody instead, see
+ * UpgradeReviewPanel.tsx.
  */
 export function UpgradeAnalysisModal({
   packageName,
@@ -136,8 +225,6 @@ export function UpgradeAnalysisModal({
   }, [busy, onCancel]);
 
   const action = analysis !== null ? primaryAction(analysis) : null;
-  const overall = analysis !== null ? compatibilityOutcomeDisplay(analysis.compatibility.status) : null;
-  const securityNeedsAttention = analysis?.security?.status === 'remains';
   const displayedChanges = analysis?.changes ?? pendingChanges ?? [{ packageName, targetVersion }];
   const bulk = displayedChanges.length > 1;
   const majorCount = analysis?.changes.filter((change) => change.majorUpdate).length ?? 0;
@@ -184,58 +271,17 @@ export function UpgradeAnalysisModal({
           </button>
         </header>
 
-        {analysis === null ? (
-          <div className="modal__body">
-            <UpgradeAnalysisLoading
-              packageName={packageName}
-              targetVersion={targetVersion}
-              changeCount={displayedChanges.length}
-              phase={analyzingPhase}
-            />
-          </div>
-        ) : (
-          <div className="modal__body">
-            {overall !== null ? (
-              <OutcomeStatus
-                label={overall.label}
-                className={overall.className}
-                detail={overallStatusDetail(analysis)}
-                size="large"
-              />
-            ) : null}
-
-            {analysis.smartPlan !== null ? <SmartPlanSection smartPlan={analysis.smartPlan} /> : null}
-
-            {analysis.changes.length > 1 ? (
-              <section className="analysis-card analysis-card--full" aria-labelledby="analysis-selected-upgrades-heading">
-                <h3 className="analysis-card__title" id="analysis-selected-upgrades-heading">Selected upgrades</h3>
-                <ol className="smart-plan__changes">
-                  {analysis.changes.map((change) => (
-                    <li className="smart-plan__change" key={change.packageName}>
-                      <span className="smart-plan__package">{change.packageName}</span>
-                      <span className="smart-plan__versions">{change.currentVersion} → {change.targetVersion}</span>
-                    </li>
-                  ))}
-                </ol>
-              </section>
-            ) : null}
-
-            <div className="modal__grid">
-              <CompatibilitySection
-                compatibility={analysis.compatibility}
-                context={{ package: analysis.package, currentVersion: analysis.currentVersion }}
-              />
-              <SecuritySection
-                security={analysis.security}
-                rootPackageName={analysis.package}
-                onOpenAdvisory={onOpenAdvisory}
-                emphasize={securityNeedsAttention}
-              />
-              <FilesSection files={analysis.files} />
-              <VerificationSection verification={analysis.verification} onConfigureVerification={onConfigureVerification} />
-            </div>
-          </div>
-        )}
+        <div className="modal__body">
+          <UpgradeAnalysisBody
+            packageName={packageName}
+            targetVersion={targetVersion}
+            analyzingPhase={analyzingPhase}
+            analysis={analysis}
+            onOpenAdvisory={onOpenAdvisory}
+            onConfigureVerification={onConfigureVerification}
+            pendingChanges={pendingChanges}
+          />
+        </div>
 
         <footer className="modal__footer">
           <button type="button" className="button button--secondary" onClick={onCancel} disabled={busy}>

@@ -382,6 +382,7 @@ export async function buildPackageRows(
       upgradeReason: candidate?.reason ?? null,
     };
     if (info?.description !== undefined) row.description = info.description;
+    if (info?.license !== undefined) row.license = info.license;
     if (info?.deprecated !== undefined) row.deprecated = info.deprecated;
     if (node.unresolvable !== undefined) row.unresolvable = node.unresolvable;
     return row;

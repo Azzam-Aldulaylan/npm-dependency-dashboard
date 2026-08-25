@@ -8,6 +8,7 @@ import { dependencyCountLabel } from '../../src/host/dependencySummary.js';
 import { filterEmptyStateTitle } from '../../src/host/emptyStateCopy.js';
 import type { HygieneFilterId } from '../../src/host/hygieneFilter.js';
 import { hygieneFilterCounts, hygieneFilterPredicate } from '../../src/host/hygieneFilter.js';
+import { manageRemovalReadyPackage } from '../../src/host/manageRemovalFlow.js';
 import type { PageSize } from '../../src/host/pagination.js';
 import { DEFAULT_PAGE_SIZE, paginate } from '../../src/host/pagination.js';
 import type { SummaryFilterId } from '../../src/host/summaryMetrics.js';
@@ -16,7 +17,12 @@ import type { SortColumn, TableSortState } from '../../src/host/tableSort.js';
 import { nextColumnSortState, sortRows } from '../../src/host/tableSort.js';
 import type { TransitiveRemediationUiState } from '../../src/host/upgradeAction.js';
 import { resolveActionState } from '../../src/host/upgradeAction.js';
-import { upgradeErrorClearsActiveState, upgradeErrorIsUserVisible } from '../../src/host/upgradeUiState.js';
+import {
+  manageRemovalReplacesUpgradeReview,
+  upgradeAnalysisRequestIsAllowed,
+  upgradeErrorClearsActiveState,
+  upgradeErrorIsUserVisible,
+} from '../../src/host/upgradeUiState.js';
 import type {
   DashboardData,
   HostToWebviewMessage,
@@ -26,8 +32,6 @@ import type {
 } from '../../src/host/webviewProtocol.js';
 import { isHostToWebviewMessage } from '../../src/host/webviewProtocol.js';
 import { DashboardToolbar } from './components/DashboardToolbar.js';
-import { DependencyDetailsModal } from './components/DependencyDetailsModal.js';
-import type { UsageRequestState } from './components/DependencyDetailsModal.js';
 import { DependencyEmptyState } from './components/DependencyEmptyState.js';
 import { DependencyLoadingState } from './components/DependencyLoadingState.js';
 import { DependencySearch } from './components/DependencySearch.js';
@@ -36,11 +40,13 @@ import { HygieneFilter } from './components/HygieneFilter.js';
 import { ManageDependenciesModal } from './components/ManageDependenciesModal.js';
 import type { BulkUpgradeCandidate } from './components/ManageDependenciesModal.js';
 import { ManageDependencyModal } from './components/ManageDependencyModal.js';
+import type { ManageTabId } from './components/ManageDependencyModal.js';
 import { Pagination } from './components/Pagination.js';
 import { PackageTable } from './components/PackageTable.js';
 import { RemoveAnalysisModal } from './components/RemoveAnalysisModal.js';
 import { SummaryCards } from './components/SummaryCards.js';
 import { UpgradeAnalysisModal } from './components/UpgradeAnalysisModal.js';
+import type { UsageRequestState } from './components/UsageReferencesPanel.js';
 import { IconAlertTriangle, IconListChecks, IconRefresh } from './icons.js';
 import type { RemovalImpactState } from './removalImpactState.js';
 import { vscode } from './vscodeApi.js';
@@ -176,27 +182,30 @@ export function App(): ReactElement {
   >({ phase: 'idle' });
   const [bulkActionsOpen, setBulkActionsOpen] = useState(false);
 
-  // The row this webview session currently has "Dependency details" open
-  // for, and its own on-demand usage-analysis state per package — see
-  // DependencyDetailsModal.tsx. Never a fact from the host's own scan.
-  const [detailsPackage, setDetailsPackage] = useState<string | null>(null);
-  // Where the currently-open Dependency details drawer was opened from —
-  // 'dashboard' (the row's own Details button) keeps today's plain Close
-  // behavior; 'manage-dependency' (Manage's "View references"/"View
-  // vulnerability details") shows "← Back" instead, since `manageRow` below
-  // is deliberately left set in that case rather than cleared.
-  const [detailsOrigin, setDetailsOrigin] = useState<'dashboard' | 'manage-dependency'>('dashboard');
   // The row this webview session currently has "Manage dependency" open
-  // for — see ManageDependencyModal.tsx. Opening Details or a removal review
+  // for, and its own on-demand usage-analysis state per package — never a
+  // fact from the host's own scan. Starting a removal or upgrade review
   // *from* Manage deliberately leaves this set (rather than clearing it) so
-  // that modal renders underneath and reappears once the nested one closes
-  // — see requestOpenDetailsFromManage/requestRemoveFromManage.
+  // the workspace stays open the whole time — see requestRemoveFromManage
+  // and the Manage dependency render block below.
   const [manageRow, setManageRow] = useState<string | null>(null);
+  // Which of Manage's five sections is showing — reset to 'overview'
+  // whenever a fresh Manage session opens (openManage) or the underlying
+  // scan is superseded. Lifted up here (rather than local to
+  // ManageDependencyModal) because Overview's own action cards need to
+  // switch it from outside the tab they're rendered in.
+  const [manageTab, setManageTab] = useState<ManageTabId>('overview');
+  // Which surface started the currently-active upgrade — 'manage-dependency'
+  // (Manage's Upgrade review tab, reviewed inline, never a second dialog) or
+  // 'dashboard' (the bulk "Manage dependencies" flow, which still opens the
+  // standalone UpgradeAnalysisModal). Same split removeOrigin already uses
+  // for removal below.
+  const [upgradeOrigin, setUpgradeOrigin] = useState<'dashboard' | 'manage-dependency' | null>(null);
   const [usageByPackage, setUsageByPackage] = useState<ReadonlyMap<string, UsageRequestState>>(() => new Map());
   // Read inside the auto-scan effect below without making it a dependency —
-  // the effect must only re-run when `detailsPackage` itself changes (a new
-  // modal open), never merely because some package's usage state updated,
-  // or it would re-request on every progress tick / error for whichever
+  // the effect must only re-run when `manageRow` itself changes (a new
+  // Manage session open), never merely because some package's usage state
+  // updated, or it would re-request on every progress tick / error for whichever
   // package's modal happens to still be open.
   const usageByPackageRef = useRef<ReadonlyMap<string, UsageRequestState>>(new Map());
   useEffect(() => {
@@ -213,6 +222,10 @@ export function App(): ReactElement {
   // own doc for why the bulk Review step and the single-package "Analyze
   // removal" card share it rather than each keeping their own copy.
   const [removalImpact, setRemovalImpact] = useState<RemovalImpactState>({ phase: 'idle' });
+  // A Manage-tab removal first runs this read-only impact scan. Only its
+  // matching result starts the existing removal preflight; posting both at
+  // once would reserve the coordinator and make the host reject the scan.
+  const [pendingManageRemoval, setPendingManageRemoval] = useState<string | null>(null);
   const cleanupShouldSelectFilter = useRef(false);
   const [minuteClock, setMinuteClock] = useState(() => Date.now());
 
@@ -455,6 +468,7 @@ export function App(): ReactElement {
       setAnalyzingPhase(null);
       setConfirmBusy(false);
       setUpgradeError(null);
+      setUpgradeOrigin(null);
       activeRemoveRef.current = null;
       setActiveRemove(null);
       setActiveRemoveChanges([]);
@@ -467,7 +481,15 @@ export function App(): ReactElement {
       setRemediationError(null);
       setRemediationBatch({ phase: 'idle' });
       setBulkActionsOpen(false);
-      setManageRow(null);
+      // `manageRow`/`manageTab` deliberately survive this reset: this branch
+      // also fires for `status: 'stale'`, which announces every
+      // revalidation attempt (manual Refresh, a file-change-triggered
+      // reload, and background-timer ticks alike — see Dashboard's own
+      // `upgradesDisabled` doc). Closing the Manage dependency modal or
+      // snapping it back to Overview on every one of those would fight the
+      // user out of a tab they're actively reading. The modal already
+      // self-heals if its row genuinely disappears from the new data — see
+      // the `row === undefined` check around ManageDependencyModal below.
       // Usage-analysis results and unused findings are relative to the rows
       // a scan just replaced — never carried forward as if they still
       // describe the current dependency set. `cleanupState` itself is left
@@ -478,6 +500,7 @@ export function App(): ReactElement {
       setCleanupError(null);
       cleanupShouldSelectFilter.current = false;
       setRemovalImpact({ phase: 'idle' });
+      setPendingManageRemoval(null);
       setCleanupState((previous) => previous.phase === 'analyzing' ? previous : { phase: 'idle' });
       setScanProgress(undefined);
       if (
@@ -533,7 +556,16 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'change-project' });
   }, []);
 
+  // Always the Manage dependency workspace's Upgrade review tab now — the
+  // row's own former per-row Upgrade button is gone (see PackageTable.tsx),
+  // and this never runs as part of a bulk request (see requestBulkUpgrade
+  // below for that path). Reviewed inline in Manage rather than opening a
+  // second dialog — see the ManageDependencyModal render block's own doc.
   const requestUpgrade = useCallback((packageName: string, target: string) => {
+    // The host keeps an accepted analysis locked until confirm/cancel. Never
+    // replace the analysis id this client is tracking with a duplicate request
+    // that the host will reject as UPGRADE_IN_PROGRESS.
+    if (!upgradeAnalysisRequestIsAllowed(activeUpgradeRef.current)) return;
     activeUpgradeRef.current = packageName;
     setActiveUpgrade(packageName);
     setActiveTarget(target);
@@ -541,6 +573,7 @@ export function App(): ReactElement {
     setAnalysis(null);
     setAnalyzingPhase(null);
     setConfirmBusy(false);
+    setUpgradeOrigin('manage-dependency');
     vscode.postMessage({ type: 'upgrade', package: packageName, target });
   }, []);
 
@@ -554,6 +587,7 @@ export function App(): ReactElement {
     setAnalysis(null);
     setAnalyzingPhase(null);
     setConfirmBusy(false);
+    setUpgradeOrigin('dashboard');
     vscode.postMessage({
       type: 'bulk-upgrade',
       changes: changes.map((change) => ({ package: change.packageName, target: change.targetVersion })),
@@ -587,6 +621,7 @@ export function App(): ReactElement {
     setAnalysis(null);
     setAnalyzingPhase(null);
     setConfirmBusy(false);
+    setUpgradeOrigin(null);
   }, [analysis]);
 
   const requestConfigureVerification = useCallback(() => {
@@ -619,12 +654,12 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'confirm-remove', analysisId: removeAnalysis.analysisId });
   }, [removeAnalysis]);
 
-  // Same immediate-client-side-close discipline as requestCancelUpgrade. Only
-  // ever closes this review itself — when it was opened from Manage
-  // (removeOrigin === 'manage-dependency'), `manageRow` was never cleared,
-  // so Manage simply reappears with its state intact. See
-  // requestCancelRemoveAndCloseManage below for the X/Escape "close the
-  // entire flow" path.
+  // Same immediate-client-side-close discipline as requestCancelUpgrade.
+  // When this review was opened from Manage (removeOrigin ===
+  // 'manage-dependency'), `manageRow` was never cleared, so this only ever
+  // abandons the embedded review itself — closeManage (below) is the one
+  // place that also releases `manageRow`, for the X/Escape/Close "close the
+  // entire workspace" path.
   const requestCancelRemove = useCallback(() => {
     vscode.postMessage({ type: 'cancel-remove', analysisId: removeAnalysis?.analysisId ?? null });
     setActiveRemove(null);
@@ -698,54 +733,25 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'cancel-remediation-analysis' });
   }, []);
 
-  const openDetails = useCallback((packageName: string) => {
-    setDetailsOrigin('dashboard');
-    setDetailsPackage(packageName);
-  }, []);
-
   const openManage = useCallback((packageName: string) => {
     setManageRow(packageName);
+    setManageTab('overview');
   }, []);
 
-  // Cancels an in-flight scan only when this modal's own request is what's
-  // actually running — never a scan something else started (the background
-  // auto-cleanup pass, say), since the host's usage coordinator allows only
-  // one scan at a time and `phase === 'analyzing'` here is set only by a
-  // `usage-analyzing` reply this webview itself is tracking for this exact
-  // package.
-  const closeDetails = useCallback(() => {
-    if (detailsPackage !== null && usageByPackageRef.current.get(detailsPackage)?.phase === 'analyzing') {
-      vscode.postMessage({ type: 'cancel-usage-analysis' });
-    }
-    setDetailsPackage(null);
-    setDetailsOrigin('dashboard');
-  }, [detailsPackage]);
-
-  // Opening the details modal for a package scans its usage automatically —
-  // no button press needed. Only fires when `detailsPackage` itself changes
-  // (a new modal open), and skips it entirely when a result is already
-  // cached for this package this session; the host's own fingerprint/TTL
-  // cache (usageCoordinator.ts) is the backstop either way, so a redundant
-  // request here would still resolve instantly rather than rescanning.
+  // Opening Manage dependency for a package kicks off its usage analysis
+  // quietly in the background — no button press needed, and never part of
+  // the main loading skeleton (see UsageReferencesPanel.tsx and Overview's
+  // own "Checking usage…" glance row). Only fires when `manageRow` itself
+  // changes (a new Manage session open), and skips it entirely when a
+  // result is already cached for this package this session; the host's own
+  // fingerprint/TTL cache (usageCoordinator.ts) is the backstop either way,
+  // so a redundant request here would still resolve instantly rather than
+  // rescanning.
   useEffect(() => {
-    if (detailsPackage === null) return;
-    if (usageByPackageRef.current.get(detailsPackage)?.phase === 'done') return;
-    vscode.postMessage({ type: 'where-used', package: detailsPackage });
-  }, [detailsPackage]);
-
-  // The details modal's "Scan workspace" fallback / "Re-analyze" action
-  // sends only the package name (see webviewProtocol.ts's own doc on
-  // 'where-used'). Never re-requested once a result already exists for this
-  // package this session — the effect above is what normally triggers the
-  // first scan; this stays as the explicit manual retry/override path.
-  const requestWhereUsed = useCallback(
-    (packageName: string) => {
-      setDetailsPackage(packageName);
-      if (usageByPackage.get(packageName)?.phase === 'done') return;
-      vscode.postMessage({ type: 'where-used', package: packageName });
-    },
-    [usageByPackage]
-  );
+    if (manageRow === null) return;
+    if (usageByPackageRef.current.get(manageRow)?.phase === 'done') return;
+    vscode.postMessage({ type: 'where-used', package: manageRow });
+  }, [manageRow]);
 
   const requestReanalyzeUsage = useCallback((packageName: string) => {
     setUsageByPackage((previous) => {
@@ -785,56 +791,64 @@ export function App(): ReactElement {
     setRemovalImpact({ phase: 'idle' });
   }, []);
 
+  // Closes the whole Manage workspace — the one place that ever abandons an
+  // in-flight embedded review. Internal tab navigation never calls this and
+  // never cancels anything (see ManageDependencyModal.tsx's own doc):
+  // switching to Overview and back preserves whatever the Upgrade/Removal
+  // review tab already has. Only X/Escape/Close route here, and only a
+  // merely-reviewing (not yet confirming) embedded flow is cancelled —
+  // `blockClose` in the render block below refuses the close entirely while
+  // a real file-mutating install/removal or the removal-impact scan is
+  // actually running.
   const closeManage = useCallback(() => {
     if (removalImpact.phase === 'analyzing') requestCancelRemovalImpact();
+    if (upgradeOrigin === 'manage-dependency' && activeUpgrade !== null) requestCancelUpgrade();
+    if (removeOrigin === 'manage-dependency' && activeRemove !== null) requestCancelRemove();
     setManageRow(null);
-  }, [removalImpact, requestCancelRemovalImpact]);
-
-  // The removal review's X/Escape "close the entire flow" path when it was
-  // opened from Manage — unlike requestCancelRemove (the review's own
-  // "← Back"), this also closes Manage itself rather than revealing it.
-  const requestCancelRemoveAndCloseManage = useCallback(() => {
-    requestCancelRemove();
-    closeManage();
-  }, [requestCancelRemove, closeManage]);
-
-  // Closes the Manage modal and hands off to the existing, unchanged
-  // upgrade flow — the identical `{ type: 'upgrade' }` message/preflight/
-  // confirm pipeline the row's own former button already used. Upgrade has
-  // no "back to Manage" affordance (unlike Remove/Details) because it opens
-  // its own multi-step analysis flow, not a simple review — out of scope
-  // for this redesign's back-navigation.
-  const requestReviewUpgradeFromManage = useCallback(
-    (packageName: string, target: string) => {
-      setManageRow(null);
-      requestUpgrade(packageName, target);
-    },
-    [requestUpgrade]
-  );
-
-  // Opens the existing Dependency details drawer without closing Manage —
-  // `manageRow` is left set so "← Back" (DependencyDetailsModal's footer,
-  // once `detailsOrigin` is 'manage-dependency') can simply close this
-  // drawer and reveal Manage again with its state untouched. Used by both
-  // the Remove card's "View references" and the Vulnerabilities summary's
-  // "View vulnerability details".
-  const requestOpenDetailsFromManage = useCallback((packageName: string) => {
-    setDetailsOrigin('manage-dependency');
-    setDetailsPackage(packageName);
-  }, []);
+    setManageTab('overview');
+    setPendingManageRemoval(null);
+  }, [
+    removalImpact,
+    requestCancelRemovalImpact,
+    upgradeOrigin,
+    activeUpgrade,
+    requestCancelUpgrade,
+    removeOrigin,
+    activeRemove,
+    requestCancelRemove,
+  ]);
 
   // Single-package removal reuses the identical bulk-remove machinery with
-  // a one-element list — RemoveAnalysisModal already branches on
+  // a one-element list — RemoveAnalysisBody already branches on
   // `packages.length > 1` for its own copy, and the host's
   // validateBulkRemoveRequest/executeStoredRemoval path is unchanged either
-  // way. `manageRow` is left set — see requestCancelRemove's own doc for how
-  // "← Back" reveals Manage again.
+  // way. `manageRow` is left set — the Removal review tab renders this
+  // inline, so there is no separate drawer to reveal Manage again from.
   const requestRemoveFromManage = useCallback(
     (packageName: string) => {
-      requestBulkRemove([packageName], new Map(), 'manage-dependency');
+      // A completed embedded upgrade preview deliberately retains the host's
+      // project lock until confirm/cancel. Replacing that decision with a
+      // removal must cancel it first; postMessage ordering makes the exact-id
+      // cancellation release the lock before removal-impact analysis starts.
+      if (manageRemovalReplacesUpgradeReview(packageName, activeUpgrade, upgradeOrigin)) {
+        // A still-running preflight has no exact analysis id to release yet.
+        // Keep its UI/state intact and wait for it to finish instead of
+        // immediately sending an impact request that the host must reject.
+        if (analysis === null) return;
+        requestCancelUpgrade();
+      }
+      setPendingManageRemoval(packageName);
+      requestAnalyzeRemovalImpact([packageName]);
     },
-    [requestBulkRemove]
+    [activeUpgrade, analysis, requestAnalyzeRemovalImpact, requestCancelUpgrade, upgradeOrigin]
   );
+
+  useEffect(() => {
+    const packageName = manageRemovalReadyPackage(pendingManageRemoval, removalImpact);
+    if (packageName === null) return;
+    setPendingManageRemoval(null);
+    requestBulkRemove([packageName], new Map(), 'manage-dependency');
+  }, [pendingManageRemoval, removalImpact, requestBulkRemove]);
 
   // No message yet is the same user-visible state as an explicit loading one.
   const loading = message === undefined || message.status === 'loading';
@@ -1003,7 +1017,6 @@ export function App(): ReactElement {
           cleanupAnalysis={cleanupState.phase === 'done' ? cleanupState : null}
           now={minuteClock}
           onOpenBulkActions={() => setBulkActionsOpen(true)}
-          onOpenDetails={openDetails}
           onOpenManage={openManage}
         />
       ) : null}
@@ -1012,18 +1025,45 @@ export function App(): ReactElement {
         ? (() => {
             const row = data.rows.find((candidate) => candidate.name === manageRow);
             if (row === undefined) return null;
+            const upgradeActive = upgradeOrigin === 'manage-dependency' && activeUpgrade === row.name;
+            const removeActive =
+              (removeOrigin === 'manage-dependency' && activeRemove === row.name) || pendingManageRemoval === row.name;
             return (
               <ManageDependencyModal
                 row={row}
                 remediation={remediationByPackage.get(row.name)}
                 removalImpact={removalImpact}
+                usage={usageByPackage.get(row.name)}
+                hygieneFindings={allHygieneFindings}
+                activeTab={manageTab}
+                onChangeTab={setManageTab}
                 actionsDisabled={actionsDisabled}
-                onAnalyzeRemovalImpact={requestAnalyzeRemovalImpact}
-                onCancelRemovalImpact={requestCancelRemovalImpact}
-                onReviewUpgrade={requestReviewUpgradeFromManage}
+                blockClose={removalImpact.phase === 'analyzing' || confirmBusy || removeBusy}
+                upgrade={{
+                  targetVersion: row.upgradeTo,
+                  active: upgradeActive,
+                  analyzingPhase: upgradeActive ? analyzingPhase : null,
+                  analysis: upgradeActive ? analysis : null,
+                  busy: confirmBusy,
+                  onAnalyze: (target) => requestUpgrade(row.name, target),
+                  onConfirm: requestConfirmUpgrade,
+                  onUseSmartPlan: requestUseSmartPlan,
+                  onCancel: requestCancelUpgrade,
+                  onConfigureVerification: requestConfigureVerification,
+                }}
+                removal={{
+                  active: removeActive,
+                  analysis: removeActive ? removeAnalysis : null,
+                  busy: removeBusy,
+                  onAnalyze: () => requestRemoveFromManage(row.name),
+                  onConfirm: requestConfirmRemove,
+                  onConfigureVerification: requestConfigureVerification,
+                }}
                 onAnalyzeRemediation={requestAnalyzeRemediation}
-                onRemove={requestRemoveFromManage}
-                onViewReferences={requestOpenDetailsFromManage}
+                onOpenAdvisory={requestOpenAdvisory}
+                onReanalyzeUsage={requestReanalyzeUsage}
+                onOpenUsageReference={requestOpenUsageReference}
+                now={minuteClock}
                 onClose={closeManage}
               />
             );
@@ -1050,7 +1090,7 @@ export function App(): ReactElement {
         />
       ) : null}
 
-      {activeUpgrade !== null && activeTarget !== null ? (
+      {activeUpgrade !== null && activeTarget !== null && upgradeOrigin !== 'manage-dependency' ? (
         <UpgradeAnalysisModal
           packageName={activeUpgrade}
           targetVersion={activeTarget}
@@ -1066,38 +1106,16 @@ export function App(): ReactElement {
         />
       ) : null}
 
-      {activeRemove !== null ? (
+      {activeRemove !== null && removeOrigin !== 'manage-dependency' ? (
         <RemoveAnalysisModal
           packages={activeRemoveChanges}
           analysis={removeAnalysis}
           matchTags={removeMatchTags}
           busy={removeBusy}
           onConfirm={requestConfirmRemove}
-          onCancel={removeOrigin === 'manage-dependency' ? requestCancelRemoveAndCloseManage : requestCancelRemove}
+          onCancel={requestCancelRemove}
           onConfigureVerification={requestConfigureVerification}
-          {...(removeOrigin === 'manage-dependency' ? { onBack: requestCancelRemove } : {})}
         />
-      ) : null}
-
-      {detailsPackage !== null && data !== undefined ? (
-        (() => {
-          const row = data.rows.find((candidate) => candidate.name === detailsPackage);
-          if (row === undefined) return null;
-          return (
-            <DependencyDetailsModal
-              row={row}
-              hygieneFindings={[...data.hygieneFindings, ...cleanupFindings]}
-              usage={usageByPackage.get(detailsPackage)}
-              onRequestUsage={requestWhereUsed}
-              onReanalyzeUsage={requestReanalyzeUsage}
-              onOpenUsageReference={requestOpenUsageReference}
-              onOpenAdvisory={requestOpenAdvisory}
-              origin={detailsOrigin}
-              now={minuteClock}
-              onClose={closeDetails}
-            />
-          );
-        })()
       ) : null}
     </main>
   );
@@ -1130,7 +1148,6 @@ function Dashboard({
   cleanupAnalysis,
   now,
   onOpenBulkActions,
-  onOpenDetails,
   onOpenManage,
 }: {
   status: 'empty' | 'ready' | 'stale' | 'partial-error';
@@ -1161,7 +1178,6 @@ function Dashboard({
   cleanupAnalysis: { analyzedAt: string; cacheExpiresAt: string } | null;
   now: number;
   onOpenBulkActions: () => void;
-  onOpenDetails: (packageName: string) => void;
   onOpenManage: (packageName: string) => void;
 }): ReactElement {
   const degraded = status === 'partial-error' ? partialErrorText(data) : null;
@@ -1254,6 +1270,7 @@ function Dashboard({
             onChangeProject={onChangeProject}
             onRefresh={onRefresh}
             disabled={actionsDisabled}
+            refreshing={status === 'stale'}
             trailingActions={
               <div className="toolbar__analysis-actions">
                 {cleanupAnalysis !== null ? (
@@ -1313,7 +1330,6 @@ function Dashboard({
                 sortState={sortState}
                 onSort={onSort}
                 hygieneFindings={hygieneFindings}
-                onOpenDetails={onOpenDetails}
                 onOpenManage={onOpenManage}
               />
               <Pagination

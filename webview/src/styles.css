@@ -328,6 +328,15 @@ button {
   white-space: nowrap;
 }
 
+/* The vulnerability card accounts for every nonzero severity tier; let that
+ * complete breakdown wrap instead of truncating the lower severities. */
+.summary-card[data-card='vulnerabilities'] .summary-card__subtitle {
+  overflow: visible;
+  line-height: 1.3;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 /* ------------------------------------------------------------------ toolbar */
 
 .toolbar {
@@ -821,6 +830,14 @@ button {
 .status-badge--warning {
   border-color: var(--vscode-editorWarning-foreground);
   color: var(--vscode-editorWarning-foreground);
+}
+
+.status-badge--accent {
+  border-color: var(--accent-total);
+  color: var(--vscode-button-foreground, #ffffff);
+  background: var(--accent-total);
+  text-transform: none;
+  letter-spacing: normal;
 }
 
 .version-cell {
@@ -1728,13 +1745,57 @@ button {
  * still reads as native VS Code chrome, not a bespoke overlay.
  */
 .manage-modal {
-  max-width: 34rem;
+  max-width: 92rem;
+  height: min(68rem, calc(100vh - 3rem));
+  max-height: calc(100vh - 3rem);
+  font-size: 0.94em;
 }
 
-@media (min-width: 52rem) {
-  .manage-modal {
-    max-width: 58rem;
-  }
+.manage-modal .modal__header {
+  padding: 0.75rem 1rem 0.7rem;
+}
+
+.manage-modal .modal__title {
+  font-size: 1rem;
+}
+
+.manage-modal .modal__subtitle {
+  display: none;
+}
+
+.manage-modal .manage-modal__identity-description {
+  font-size: 0.78em;
+}
+
+.manage-modal .manage-modal__header-icon {
+  width: 1.9rem;
+  height: 1.9rem;
+  margin-right: 0.6rem;
+  font-size: 1rem;
+}
+
+.manage-modal .manage-modal__identity {
+  margin-top: 0.35rem;
+}
+
+.manage-modal .manage-tabs {
+  padding-inline: 1rem;
+}
+
+.manage-modal .manage-tabs__tab {
+  min-height: 2.25rem;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.78em;
+}
+
+.manage-modal .manage-modal__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0.75rem 1rem 0.8rem;
+}
+
+.manage-modal > .modal__footer {
+  padding: 0.6rem 1rem;
 }
 
 .manage-modal__header-icon {
@@ -1756,78 +1817,189 @@ button {
   align-items: flex-start;
 }
 
-.manage-modal__body {
+.manage-modal__header-copy {
   display: flex;
   flex-direction: column;
-  gap: 1.1rem;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+/*
+ * The identity row — package icon, name, version, and prod/dev badge — set
+ * apart from the generic "Manage dependency" title/subtitle above it so the
+ * one fact that changes per-package reads distinctly from the shell copy
+ * that doesn't.
+ */
+.manage-modal__identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+.manage-modal__identity-name {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.manage-modal__identity .status-badge {
+  margin-left: 0;
+}
+
+.manage-modal__identity-description {
+  margin: 0.3rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.82em;
+  line-height: 1.4;
+}
+
+/*
+ * The tab strip — VS Code's own editor-tab vocabulary (flat, bottom-border
+ * active indicator, no pill/card chrome) so switching sections reads as
+ * native navigation, not a bespoke widget. `manage-tabs__dot` is the one
+ * signature touch: a quiet, glanceable flag — worst severity present,
+ * or "something is actively running/already started" — so a user can tell
+ * which sections deserve a look without opening each one. Never a second
+ * announcement of a fact the tab's own content already states in full.
+ */
+.manage-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.1rem;
+  padding: 0 1.1rem;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  overflow-x: auto;
+}
+
+.manage-tabs__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.6rem 0.7rem;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--vscode-descriptionForeground);
+  font-family: inherit;
+  font-size: 0.82em;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.manage-tabs__icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  font-size: 0.95em;
+}
+
+.manage-tabs__icon svg {
+  width: 1em;
+  height: 1em;
+}
+
+.manage-tabs__tab:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.manage-tabs__tab:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.manage-tabs__tab--active {
+  border-bottom-color: var(--accent-total);
+  color: var(--vscode-foreground);
+  font-weight: 600;
+}
+
+.manage-tabs__dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: currentColor;
+  color: var(--vscode-descriptionForeground);
+}
+
+.manage-tabs__dot--active {
+  color: var(--accent-total);
+}
+
+.manage-tabs__dot--neutral {
+  color: var(--vscode-descriptionForeground);
+}
+
+.manage-tabs__dot--critical,
+.manage-tabs__dot--high {
+  color: var(--vscode-editorError-foreground);
+}
+
+.manage-tabs__dot--moderate {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.manage-tabs__dot--low,
+.manage-tabs__dot--info {
+  color: var(--vscode-editorInfo-foreground);
+}
+
+.manage-modal__body {
   padding: 0.95rem 1.1rem 1.05rem;
   overflow-y: auto;
 }
 
-@media (min-width: 52rem) {
-  .manage-modal__body {
-    flex-direction: row;
-    align-items: flex-start;
-  }
-
-  .manage-modal__summary {
-    flex: 0 0 15.5rem;
-    min-width: 0;
-  }
-
-  .manage-modal__actions {
-    flex: 1 1 0;
-    min-width: 0;
-  }
-}
-
-.manage-modal__summary {
+/*
+ * Overview's own two-column layout — a narrow, fixed-width identity/glance
+ * rail on the left so it never competes for attention with the right-hand
+ * actions — the actual decision surface — which fills whatever room
+ * remains. Every Manage tab uses this same 18rem rail and breakpoint; below
+ * it, each tab stacks into one column.
+ */
+.overview-panel {
   display: flex;
   flex-direction: column;
   gap: 0.85rem;
 }
 
-.manage-summary {
+@media (min-width: 64rem) {
+  .overview-panel {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .overview-panel__summary {
+    flex: 0 0 18rem;
+    min-width: 0;
+  }
+
+  .overview-panel__actions {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+}
+
+.overview-panel__summary {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
-  padding: 0.7rem 0.75rem;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
-  border-radius: 6px;
+  gap: 0.75rem;
 }
 
-.manage-summary__identity {
+.manage-summary-block {
   display: flex;
-  align-items: center;
-  gap: 0.55rem;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
-.manage-summary__name {
+.manage-section-heading {
   margin: 0;
-  overflow-wrap: anywhere;
-  font-size: 0.95rem;
-  font-weight: 600;
-  line-height: 1.25;
-}
-
-.manage-summary__description {
-  margin: 0.1rem 0 0;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
   color: var(--vscode-descriptionForeground);
-  font-size: 0.8em;
-  line-height: 1.35;
-}
-
-.manage-summary__version {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin: 0;
-  font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
-  font-size: 0.9rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .manage-glance {
@@ -1835,8 +2007,6 @@ button {
   flex-direction: column;
   gap: 0.4rem;
   margin: 0;
-  padding-top: 0.55rem;
-  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
 }
 
 .manage-glance__row {
@@ -1856,6 +2026,20 @@ button {
   margin: 0;
   overflow-wrap: anywhere;
   text-align: right;
+}
+
+.manage-glance__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.manage-glance__status-icon {
+  flex-shrink: 0;
+}
+
+.manage-glance__status-icon--spin {
+  animation: dashboard-spin 1.2s linear infinite;
 }
 
 /*
@@ -1970,13 +2154,8 @@ button {
   height: 0.85em;
 }
 
-.manage-modal__actions-heading {
+.overview-panel__actions .manage-section-heading {
   margin: 0 0 0.6rem;
-  color: var(--vscode-descriptionForeground);
-  font-size: 0.72rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
 }
 
 .manage-action-cards {
@@ -1985,6 +2164,14 @@ button {
   gap: 0.7rem;
 }
 
+/*
+ * A raised widget surface — the same elevated background the removal-stat
+ * boxes below use — so each card reads as a distinct clickable panel against
+ * the modal's own (darker) background, not just an outline. Semantic color
+ * (upgrade/remove/transitive) still lives in the left border, the icon
+ * circle, and any badge/CTA inside — never by tinting toward the accent
+ * hue itself, so a Remove card never reads as an alarming block of red.
+ */
 .manage-action-card {
   display: flex;
   flex-direction: column;
@@ -1993,11 +2180,11 @@ button {
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
   border-left: 3px solid var(--manage-card-accent, var(--vscode-panel-border));
   border-radius: 6px;
-  background: color-mix(in srgb, var(--manage-card-accent, transparent) 4%, transparent);
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
 }
 
 .manage-action-card--upgrade {
-  --manage-card-accent: var(--accent-total);
+  --manage-card-accent: var(--accent-updates);
 }
 
 .manage-action-card--remove {
@@ -2083,6 +2270,13 @@ button {
   margin-left: 0;
 }
 
+/* The update-kind badge (Minor/Major/Patch) is filled in the card's own accent, same treatment as the CTA — "Security fix" keeps its own distinct warning tone below since it's a different fact. */
+.manage-action-card__badges .status-badge:not(.status-badge--warning) {
+  border-color: var(--manage-card-accent);
+  background: var(--manage-card-accent);
+  color: var(--vscode-button-foreground, #ffffff);
+}
+
 .manage-action-card__status {
   display: flex;
   align-items: flex-start;
@@ -2138,14 +2332,1434 @@ button {
 }
 
 .manage-action-card__cta {
-  align-self: flex-start;
+  align-self: flex-end;
+}
+
+/* Upgrade — the one direct-commit CTA here, filled in the card's own accent rather than the generic button blue. */
+.manage-action-card--upgrade .manage-action-card__cta {
+  border-color: var(--manage-card-accent);
+  background: var(--manage-card-accent);
+  color: var(--vscode-button-foreground, #ffffff);
+}
+
+.manage-action-card--upgrade .manage-action-card__cta:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--manage-card-accent) 82%, black);
+}
+
+/* Remove / Check transitive fixes — both start an analysis, not a direct commit, so both stay outlined in the card's own accent instead of a filled block. */
+.manage-action-card--remove .manage-action-card__cta,
+.manage-action-card--transitive .manage-action-card__cta {
+  border-color: var(--manage-card-accent);
+  background: transparent;
+  color: var(--manage-card-accent);
+}
+
+.manage-action-card--remove .manage-action-card__cta:hover:not(:disabled),
+.manage-action-card--transitive .manage-action-card__cta:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--manage-card-accent) 14%, transparent);
+}
+
+/*
+ * The Remove card's three compact status boxes — Usage analysis / Peer
+ * requirements / Removal risk — replacing a plain label/value list so the
+ * removal decision reads as three scannable facts, not a form.
+ */
+.manage-removal-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.manage-removal-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.5rem 0.55rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.manage-removal-stat__label {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.manage-removal-stat__value {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+.manage-removal-stat__spinner {
+  flex-shrink: 0;
+  color: var(--vscode-descriptionForeground);
+  animation: dashboard-spin 1.2s linear infinite;
 }
 
 .manage-modal__footer-note {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
   flex: 1;
   margin: 0;
   color: var(--vscode-descriptionForeground);
   font-size: 0.78em;
+}
+
+.manage-modal__footer-note-icon {
+  flex-shrink: 0;
+  width: 0.95em;
+  height: 0.95em;
+}
+
+/* A tab's own "nothing here" state — Vulnerabilities when clean, Upgrade review when no target is offered. Quiet, not an error. */
+.manage-panel-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 2.2rem 1rem;
+  color: var(--vscode-descriptionForeground);
+  text-align: center;
+  font-size: 0.88em;
+}
+
+.manage-panel-empty__icon {
+  width: 1.6rem;
+  height: 1.6rem;
+}
+
+.manage-panel-empty__icon--ok {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+/* -------------------------------------------------- vulnerabilities panel */
+
+/*
+ * Same two-column shell as .overview-panel — a fixed-width left summary rail
+ * beside a flexible right column — so the two tabs read as one workspace,
+ * not two different layout systems.
+ */
+.vuln-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+@media (min-width: 64rem) {
+  .vuln-tab {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .vuln-tab__summary {
+    flex: 0 0 18rem;
+    min-width: 0;
+  }
+
+  .vuln-tab__details {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+}
+
+.vuln-tab__summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.vuln-tab__details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+/* Security summary — a solid (not tinted) icon circle in the worst-case red, since this card's whole job is to be the one urgent glance. */
+.vuln-summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 0.75rem 0.8rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.vuln-summary-card__total {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.vuln-summary-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 2.3rem;
+  height: 2.3rem;
+  border-radius: 50%;
+  color: var(--vscode-editor-background, #fff);
+  background: var(--vscode-editorError-foreground);
+}
+
+.vuln-summary-card__icon svg {
+  width: 1.2rem;
+  height: 1.2rem;
+}
+
+.vuln-summary-card__count {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.vuln-summary-card__count-label {
+  display: block;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+}
+
+.vuln-summary-card__breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.85rem;
+  margin: 0;
+  padding: 0.65rem 0 0;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.18));
+  list-style: none;
+}
+
+.vuln-summary-card__stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82em;
+  font-weight: 600;
+}
+
+.vuln-summary-card__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.vuln-summary-card__stat--critical,
+.vuln-summary-card__stat--high {
+  color: var(--vscode-editorError-foreground);
+}
+
+.vuln-summary-card__stat--moderate {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.vuln-summary-card__stat--low {
+  color: var(--vscode-editorInfo-foreground);
+}
+
+.vuln-summary-card__stat--info {
+  color: var(--vscode-descriptionForeground);
+}
+
+.vuln-recommended {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem 0.8rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.vuln-recommended__message {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin: 0;
+  font-size: 0.85em;
+  line-height: 1.4;
+}
+
+.vuln-recommended__spin {
+  flex-shrink: 0;
+  margin-top: 0.15em;
+  animation: dashboard-spin 1.2s linear infinite;
+}
+
+.vuln-recommended__cta {
+  align-self: flex-start;
+  color: var(--accent-total);
+  border-color: var(--accent-total);
+}
+
+.vuln-recommended__cta:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-total) 14%, transparent);
+}
+
+.vuln-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.vuln-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.28rem 0.6rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  border-radius: 5px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font-size: 0.82em;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.vuln-filter:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.vuln-filter__count {
+  padding: 0 0.35rem;
+  border-radius: 3px;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.25));
+  color: var(--vscode-badge-foreground, inherit);
+  font-size: 0.9em;
+  font-variant-numeric: tabular-nums;
+}
+
+.vuln-filter--active {
+  border-color: var(--vscode-focusBorder, var(--accent-total));
+  color: var(--accent-total);
+  background: color-mix(in srgb, var(--accent-total) 12%, transparent);
+}
+
+.vuln-filter--critical.vuln-filter--active,
+.vuln-filter--high.vuln-filter--active {
+  border-color: var(--vscode-editorError-foreground);
+  color: var(--vscode-editorError-foreground);
+  background: color-mix(in srgb, var(--vscode-editorError-foreground) 12%, transparent);
+}
+
+.vuln-filter--moderate.vuln-filter--active {
+  border-color: var(--vscode-editorWarning-foreground);
+  color: var(--vscode-editorWarning-foreground);
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 12%, transparent);
+}
+
+.vuln-filter--low.vuln-filter--active {
+  border-color: var(--vscode-editorInfo-foreground);
+  color: var(--vscode-editorInfo-foreground);
+  background: color-mix(in srgb, var(--vscode-editorInfo-foreground) 12%, transparent);
+}
+
+.vuln-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vuln-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.vuln-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.vuln-card__title {
+  flex: 1 1 auto;
+  min-width: 12rem;
+  font-weight: 600;
+  font-size: 0.92em;
+}
+
+.vuln-card__source {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--vscode-textLink-foreground);
+  font-size: 0.82em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.vuln-card__source:hover {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  text-decoration: underline;
+}
+
+.vuln-card__source:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.vuln-card__meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: 0.6rem 0.75rem;
+  margin: 0;
+}
+
+.vuln-card__meta-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.vuln-card__meta-col dt {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.vuln-card__meta-col dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.86em;
+}
+
+.vuln-card__meta-col code {
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.15));
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.95em;
+}
+
+.vuln-card__fixed {
+  color: var(--vscode-charts-green, #89d185);
+  font-weight: 600;
+}
+
+.vuln-card__path {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.vuln-card__path-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.vuln-card__path-arrow {
+  color: var(--vscode-descriptionForeground);
+}
+
+.vuln-tab__showing {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+}
+
+/* -------------------------------------------------- usage & references panel */
+
+/* Same two-column shell as .overview-panel / .vuln-tab — one visual system across all three tabs. */
+.usage-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+@media (min-width: 64rem) {
+  .usage-tab {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .usage-tab__summary {
+    flex: 0 0 18rem;
+    min-width: 0;
+  }
+
+  .usage-tab__details {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+}
+
+.usage-tab__summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.usage-tab__details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.usage-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.usage-card__subtitle {
+  margin: 0.1rem 0 0.7rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.usage-card__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0 0 0.6rem;
+}
+
+.usage-card__meta-text {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.82em;
+}
+
+.usage-card__empty {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.usage-card__error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+
+.usage-card__truncated {
+  margin: 0.5rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
+}
+
+.usage-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  font-size: 0.85em;
+}
+
+.usage-status--ok {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.usage-status--error {
+  color: var(--vscode-editorError-foreground);
+}
+
+.usage-status__icon--spin {
+  animation: dashboard-spin 1.2s linear infinite;
+}
+
+.usage-ref-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.usage-ref__button {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.usage-ref__button:not(.usage-ref__button--static):hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.usage-ref__button--static {
+  cursor: default;
+}
+
+.usage-ref__icon {
+  flex-shrink: 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.usage-ref__location {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.usage-ref__path {
+  font-weight: 600;
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+
+.usage-ref__snippet {
+  overflow-x: auto;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
+  white-space: pre;
+}
+
+.usage-ref__line {
+  flex-shrink: 0;
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.25));
+  color: var(--vscode-badge-foreground, inherit);
+  font-size: 0.78em;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-show-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  align-self: flex-start;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-total);
+  font-size: 0.82em;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.usage-show-all:hover {
+  text-decoration: underline;
+}
+
+.usage-show-all__icon {
+  transform: rotate(90deg);
+}
+
+.usage-path {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.usage-path__node {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  font-weight: 600;
+  font-size: 0.85em;
+}
+
+.usage-path__node--target {
+  border-color: var(--accent-total);
+}
+
+.usage-path__node-tag {
+  color: var(--vscode-descriptionForeground);
+  font-weight: 400;
+  font-size: 0.85em;
+}
+
+.usage-path__arrow {
+  flex-shrink: 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.usage-dup-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+
+.usage-dup-table th {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.usage-dup-table td {
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.15));
+  overflow-wrap: anywhere;
+}
+
+.usage-dup-table tr:last-child td {
+  border-bottom: none;
+}
+
+.usage-dup-table code {
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.15));
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.usage-dup-table__more {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+
+.usage-dup-also {
+  margin: 0.7rem 0 0;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.18));
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.hygiene-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.5rem;
+}
+
+.hygiene-strip__item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0.3rem 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-charts-green, #89d185);
+  font: inherit;
+  text-align: left;
+}
+
+.hygiene-strip__item--warn {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.hygiene-strip__item--link {
+  cursor: pointer;
+}
+
+.hygiene-strip__item--link:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.hygiene-strip__icon {
+  grid-row: span 2;
+  display: inline-flex;
+}
+
+.hygiene-strip__label {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.hygiene-strip__value {
+  color: var(--vscode-foreground);
+  font-size: 0.9em;
+  font-weight: 600;
+}
+
+.hygiene-strip__removal-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0.7rem 0 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-total);
+  font-size: 0.82em;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.hygiene-strip__removal-link:hover {
+  text-decoration: underline;
+}
+
+/* -------------------------------------------------- upgrade/removal review panels */
+
+/* Before analysis has run — the version delta (upgrade) or a bare heading (removal), and one "Analyze" CTA. Same shell both tabs share. */
+/*
+ * Centered, same idiom as .manage-panel-empty (Vulnerabilities' "no known
+ * vulnerabilities" state) — a single message this tab has nothing else to
+ * show yet, so it reads as the page's whole content rather than a stray
+ * corner of an otherwise-empty layout. `--review-empty-accent` (set per
+ * variant below) carries through to the icon circle and the CTA, the same
+ * per-card accent language Overview's action cards use, so clicking through
+ * from Overview into a review tab keeps the same color story.
+ */
+.review-panel__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 2.6rem 1rem 2.2rem;
+  text-align: center;
+}
+
+.review-panel__empty--upgrade {
+  --review-empty-accent: var(--accent-updates);
+}
+
+.review-panel__empty--remove {
+  --review-empty-accent: var(--accent-vulnerabilities);
+}
+
+.review-panel__empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.3rem;
+  height: 2.3rem;
+  margin-bottom: 0.2rem;
+  border-radius: 999px;
+  color: var(--review-empty-accent, var(--vscode-descriptionForeground));
+  background: color-mix(in srgb, var(--review-empty-accent, transparent) 16%, transparent);
+  font-size: 1.1rem;
+}
+
+.review-panel__empty-heading {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.review-panel__empty-versions {
+  margin: 0;
+  font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.review-panel__empty-status {
+  margin: 0 0 0.3rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.review-panel__empty--upgrade .review-panel__empty-cta {
+  border-color: var(--review-empty-accent);
+  background: var(--review-empty-accent);
+  color: var(--vscode-button-foreground, #ffffff);
+}
+
+.review-panel__empty--upgrade .review-panel__empty-cta:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--review-empty-accent) 82%, black);
+}
+
+.review-panel__empty--remove .review-panel__empty-cta {
+  border-color: var(--review-empty-accent);
+  background: transparent;
+  color: var(--review-empty-accent);
+}
+
+.review-panel__empty--remove .review-panel__empty-cta:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--review-empty-accent) 14%, transparent);
+}
+
+.review-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.review-panel__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+}
+
+/* Same two-column shell as .overview-panel / .vuln-tab / .usage-tab — one visual system across every tab. */
+.upgrade-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+@media (min-width: 64rem) {
+  .upgrade-tab {
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 0.85rem;
+  }
+
+  .upgrade-tab__summary {
+    flex: 0 0 18rem;
+    min-width: 0;
+  }
+
+  .upgrade-tab__details {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+}
+
+.upgrade-tab__summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.upgrade-tab__details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.upgrade-tab__bottom-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.upgrade-tab .analysis-card,
+.upgrade-tab .vuln-recommended,
+.upgrade-tab .smart-plan-banner {
+  padding: 0.6rem 0.7rem;
+}
+
+.upgrade-tab .analysis-card__title,
+.upgrade-tab .manage-section-heading {
+  margin-bottom: 0.4rem;
+  font-size: 0.68rem;
+}
+
+.upgrade-tab .manage-glance {
+  gap: 0.32rem;
+}
+
+.upgrade-tab .manage-glance__row,
+.upgrade-tab .vuln-recommended__message {
+  font-size: 0.8em;
+}
+
+.upgrade-tab .usage-card__subtitle {
+  margin-bottom: 0.55rem;
+  font-size: 0.8em;
+}
+
+.upgrade-tab .hygiene-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.upgrade-tab .hygiene-strip__item {
+  padding: 0.42rem 0.5rem;
+}
+
+.upgrade-tab .hygiene-strip__label {
+  font-size: 0.65rem;
+}
+
+.upgrade-tab .hygiene-strip__value {
+  font-size: 0.8em;
+}
+
+.upgrade-tab .upgrade-recommended__cta {
+  align-self: stretch;
+  justify-content: center;
+  padding-block: 0.3rem;
+}
+
+/* ------------------------------------------------------- removal review */
+
+.removal-review {
+  gap: 0.7rem;
+}
+
+.removal-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.removal-tab__summary,
+.removal-tab__details {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.7rem;
+}
+
+.removal-tab__bottom-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+@media (min-width: 64rem) {
+  .removal-tab {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .removal-tab__summary {
+    flex: 0 0 18rem;
+  }
+
+  .removal-tab__details {
+    flex: 1 1 0;
+  }
+}
+
+.removal-tab .analysis-card,
+.removal-tab .vuln-recommended {
+  padding: 0.6rem 0.7rem;
+}
+
+.removal-tab .analysis-card__title,
+.removal-tab .manage-section-heading {
+  margin-bottom: 0.4rem;
+  font-size: 0.68rem;
+}
+
+.removal-tab .manage-glance {
+  gap: 0.32rem;
+}
+
+.removal-tab .manage-glance__row,
+.removal-tab .vuln-recommended__message,
+.removal-tab .usage-card__subtitle {
+  font-size: 0.8em;
+}
+
+.removal-summary__facts {
+  margin-top: 0.65rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.18));
+}
+
+.removal-recommended__references {
+  margin-top: 0;
+}
+
+.removal-recommended__cta {
+  align-self: stretch;
+  justify-content: center;
+  margin-top: 0.1rem;
+}
+
+.removal-check {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.removal-check__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 0.55rem 0.65rem;
+  border-right: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.removal-check__item:last-child {
+  border-right: none;
+}
+
+.removal-check__icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.removal-check__item--ok .removal-check__icon {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.removal-check__item--warning .removal-check__icon {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.removal-check__item--blocked .removal-check__icon {
+  color: var(--vscode-editorError-foreground);
+}
+
+.removal-check__item--unknown .removal-check__icon {
+  color: var(--vscode-descriptionForeground);
+}
+
+.removal-check__copy,
+.removal-package__identity,
+.removal-impact__copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.removal-check__label {
+  font-size: 0.78em;
+  font-weight: 600;
+}
+
+.removal-check__value {
+  margin-top: 0.15rem;
+  overflow-wrap: anywhere;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.75em;
+}
+
+.removal-package {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  padding: 0.2rem 0.1rem 0.1rem;
+}
+
+.removal-package__icon {
+  flex-shrink: 0;
+  width: 1.35rem;
+  height: 1.35rem;
+  margin-top: 0.05rem;
+  color: var(--vscode-descriptionForeground);
+}
+
+.removal-package__identity {
+  gap: 0.12rem;
+  font-size: 0.82em;
+}
+
+.removal-package__identity strong {
+  font-size: 1.06em;
+}
+
+.removal-package__identity span {
+  color: var(--vscode-descriptionForeground);
+}
+
+.removal-impact {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.removal-impact__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  min-width: 0;
+  padding: 0.45rem 0.65rem;
+  border-right: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.removal-impact__item:first-child {
+  padding-left: 0.1rem;
+}
+
+.removal-impact__item:last-child {
+  border-right: none;
+}
+
+.removal-impact__icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--vscode-descriptionForeground);
+}
+
+.removal-impact__copy {
+  gap: 0.12rem;
+}
+
+.removal-impact__label {
+  font-size: 0.76em;
+}
+
+.removal-impact__value {
+  overflow-wrap: anywhere;
+  font-size: 0.86em;
+}
+
+.removal-impact__value--good {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.removal-impact__value--warning {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.removal-impact__detail {
+  overflow-wrap: anywhere;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.72em;
+}
+
+.manage-modal--decision-review .review-panel__footer {
+  position: sticky;
+  z-index: 2;
+  bottom: -0.8rem;
+  margin: 0 -1rem -0.8rem;
+  padding: 0.65rem 1rem;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.removal-review__rollback {
+  align-items: flex-start;
+  line-height: 1.35;
+}
+
+.removal-review__footer-action {
+  flex-shrink: 0;
+  min-width: 10.5rem;
+  justify-content: center;
+  border-color: var(--vscode-editorError-foreground);
+  color: var(--vscode-button-foreground, #ffffff);
+  background: var(--vscode-editorError-foreground);
+}
+
+.removal-review__footer-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vscode-editorError-foreground) 85%, black);
+}
+
+.removal-review__loading-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+  color: var(--accent-total);
+  animation: dashboard-spin 1.2s linear infinite;
+}
+
+.removal-review__unknown {
+  align-items: center;
+  gap: 0.75rem;
+  width: min(100%, 34rem);
+  margin-inline: auto;
+  text-align: center;
+}
+
+.removal-review__unknown .outcome-status {
+  justify-content: center;
+}
+
+.upgrade-summary__before-after {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.upgrade-recommended__cta {
+  background: var(--accent-total);
+  border-color: var(--accent-total);
+  color: var(--vscode-button-foreground, #ffffff);
+}
+
+.upgrade-recommended__cta:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-total) 85%, black);
+}
+
+.upgrade-preview__versions {
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+
+/*
+ * These three reuse markup sized for a roomier context (OutcomeStatus's
+ * bulk-modal headline, SmartPlanSection's own banner) — scoped down here so
+ * this tab's cards read at the same compact scale as Overview/Vulnerabilities/
+ * Usage & references, instead of standing out larger than their neighbors.
+ */
+.upgrade-tab .outcome-status__label {
+  font-size: 0.92em;
+}
+
+.upgrade-tab .smart-plan__package {
+  font-size: 0.88em;
+}
+
+/* A third, neutral tone for a compatibility check with no real signal to report — never green (claims data it doesn't have) or orange (claims a problem that isn't known). */
+.hygiene-strip__item--unknown {
+  color: var(--vscode-descriptionForeground);
+}
+
+.security-outcome {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.security-outcome__box {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.security-outcome__label {
+  margin: 0 0 0.2rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.security-outcome__value {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.9em;
+}
+
+.security-outcome__value--bad {
+  color: var(--vscode-editorError-foreground);
+}
+
+.security-outcome__value--good {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.security-outcome__detail {
+  margin: 0.15rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+}
+
+.upgrade-files-list__item {
+  gap: 0.6rem;
+}
+
+.upgrade-files-list__item .status-badge {
+  margin-left: auto;
+}
+
+.verification-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verification-steps__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.32rem 0.5rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  font-size: 0.85em;
+}
+
+@media (max-width: 63.99rem) {
+  .upgrade-tab__bottom-grid,
+  .upgrade-tab .hygiene-strip,
+  .removal-tab__bottom-grid,
+  .removal-check,
+  .removal-impact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .removal-check__item:nth-child(2) {
+    border-right: none;
+  }
+
+  .removal-check__item:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  }
+
+  .removal-impact__item:nth-child(2) {
+    border-right: none;
+  }
+
+  .removal-impact__item:last-child {
+    grid-column: 1 / -1;
+    padding-left: 0.65rem;
+    border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  }
+}
+
+@media (max-width: 38rem) {
+  .upgrade-tab__bottom-grid,
+  .upgrade-tab .hygiene-strip,
+  .removal-tab__bottom-grid,
+  .removal-check,
+  .removal-impact {
+    grid-template-columns: 1fr;
+  }
+
+  .removal-check__item,
+  .removal-check__item:nth-child(2),
+  .removal-impact__item,
+  .removal-impact__item:nth-child(2) {
+    border-right: none;
+    border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  }
+
+  .removal-check__item:last-child,
+  .removal-impact__item:last-child {
+    grid-column: auto;
+    border-bottom: none;
+  }
+}
+
+.verification-steps__item code {
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.15));
+  font-family: var(--vscode-editor-font-family, monospace);
 }
 
 /*
@@ -2938,144 +4552,4 @@ button {
 
 .banner__icon--spin {
   animation: dashboard-spin 1.2s linear infinite;
-}
-
-.dependency-details__version-list,
-.dependency-details__references {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin: 0.5rem 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.dependency-details__version {
-  padding: 0.45rem 0.55rem;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
-  border-radius: 4px;
-}
-
-.dependency-details__version-label {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin: 0;
-}
-
-.dependency-details__version-number {
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-weight: 600;
-}
-
-.dependency-details__paths {
-  margin: 0.4rem 0 0;
-  padding: 0;
-  list-style: none;
-  font-size: 0.85em;
-}
-
-.dependency-details__path {
-  padding: 0.15rem 0;
-  color: var(--vscode-descriptionForeground);
-  font-family: var(--vscode-editor-font-family, monospace);
-}
-
-.dependency-details__more-paths {
-  margin: 0.35rem 0 0;
-  color: var(--vscode-descriptionForeground);
-  font-size: 0.8em;
-}
-
-.dependency-details__introduced {
-  margin: 0.5rem 0 0;
-}
-
-.dependency-details__introduced-name {
-  margin: 0;
-  font-weight: 600;
-}
-
-.dependency-details__deprecated-message {
-  margin: 0;
-  white-space: pre-wrap;
-}
-
-.dependency-details__suggested-replacement {
-  margin: 0.4rem 0 0;
-}
-
-.dependency-details__usage-summary {
-  margin: 0 0 0.5rem;
-  color: var(--vscode-descriptionForeground);
-  font-size: 0.85em;
-}
-
-.dependency-details__usage-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.6rem;
-}
-
-.dependency-details__usage-meta .dependency-details__usage-summary {
-  margin: 0;
-}
-
-.dependency-details__usage-status {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin: 0;
-}
-
-.dependency-details__usage-status--error {
-  color: var(--vscode-editorError-foreground);
-}
-
-.dependency-details__usage-status-icon--spin {
-  animation: dashboard-spin 1.2s linear infinite;
-}
-
-.dependency-details__empty {
-  margin: 0;
-  color: var(--vscode-descriptionForeground);
-}
-
-.dependency-details__reference {
-  padding: 0.4rem 0.55rem;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
-  border-radius: 4px;
-}
-
-.dependency-details__reference-open {
-  display: block;
-  margin: 0 0 0.3rem;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--vscode-textLink-foreground);
-  font-size: 0.85em;
-  text-align: left;
-  cursor: pointer;
-}
-
-.dependency-details__reference-open:hover {
-  text-decoration: underline;
-}
-
-.dependency-details__reference-open--static {
-  color: var(--vscode-descriptionForeground);
-  cursor: default;
-}
-
-.dependency-details__snippet {
-  display: block;
-  overflow-x: auto;
-  padding: 0.3rem 0.45rem;
-  border-radius: 3px;
-  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.12));
-  font-size: 0.82em;
-  white-space: pre;
 }

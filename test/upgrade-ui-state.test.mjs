@@ -8,9 +8,26 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  manageRemovalReplacesUpgradeReview,
+  upgradeAnalysisRequestIsAllowed,
   upgradeErrorClearsActiveState,
   upgradeErrorIsUserVisible,
 } from '../out/host/upgradeUiState.js';
+
+// ---------------------------------------------------------- starting analysis
+
+test('an upgrade analysis can start only when no analysis is already active', () => {
+  assert.equal(upgradeAnalysisRequestIsAllowed(null), true);
+  assert.equal(upgradeAnalysisRequestIsAllowed('react'), false);
+});
+
+test('starting removal replaces only the same package embedded upgrade review', () => {
+  assert.equal(manageRemovalReplacesUpgradeReview('react', 'react', 'manage-dependency'), true);
+  assert.equal(manageRemovalReplacesUpgradeReview('react', null, 'manage-dependency'), false);
+  assert.equal(manageRemovalReplacesUpgradeReview('react', 'lodash', 'manage-dependency'), false);
+  assert.equal(manageRemovalReplacesUpgradeReview('react', 'react', 'dashboard'), false);
+  assert.equal(manageRemovalReplacesUpgradeReview('react', 'react', null), false);
+});
 
 // ------------------------------------------------------- clearing active state
 

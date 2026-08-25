@@ -481,8 +481,15 @@ export function App(): ReactElement {
       setRemediationError(null);
       setRemediationBatch({ phase: 'idle' });
       setBulkActionsOpen(false);
-      setManageRow(null);
-      setManageTab('overview');
+      // `manageRow`/`manageTab` deliberately survive this reset: this branch
+      // also fires for `status: 'stale'`, which announces every
+      // revalidation attempt (manual Refresh, a file-change-triggered
+      // reload, and background-timer ticks alike — see Dashboard's own
+      // `upgradesDisabled` doc). Closing the Manage dependency modal or
+      // snapping it back to Overview on every one of those would fight the
+      // user out of a tab they're actively reading. The modal already
+      // self-heals if its row genuinely disappears from the new data — see
+      // the `row === undefined` check around ManageDependencyModal below.
       // Usage-analysis results and unused findings are relative to the rows
       // a scan just replaced — never carried forward as if they still
       // describe the current dependency set. `cleanupState` itself is left
@@ -1263,6 +1270,7 @@ function Dashboard({
             onChangeProject={onChangeProject}
             onRefresh={onRefresh}
             disabled={actionsDisabled}
+            refreshing={status === 'stale'}
             trailingActions={
               <div className="toolbar__analysis-actions">
                 {cleanupAnalysis !== null ? (

@@ -14,6 +14,7 @@ export function DashboardToolbar({
   onChangeProject,
   onRefresh,
   disabled,
+  refreshing,
   children,
   trailingActions,
 }: {
@@ -21,6 +22,8 @@ export function DashboardToolbar({
   onChangeProject: () => void;
   onRefresh: () => void;
   disabled: boolean;
+  /** True while a revalidation (manual Refresh, a file-change reload, or a background tick) is in flight — spins the Refresh icon instead of disturbing anything else on screen. */
+  refreshing: boolean;
   children?: ReactNode;
   /** Rendered before "Change project"/"Refresh" — see App.tsx's "Analyze cleanup" button. */
   trailingActions?: ReactNode;
@@ -37,7 +40,7 @@ export function DashboardToolbar({
           </button>
         ) : null}
         <button className="button button--secondary" type="button" onClick={onRefresh} disabled={disabled}>
-          <IconRefresh />
+          <IconRefresh className={refreshing ? 'banner__icon--spin' : undefined} />
           Refresh
         </button>
       </div>

@@ -4,7 +4,8 @@ import type { ReactElement } from 'react';
 import { semanticButtonClassName, upgradeConfirmationAction } from '../../../src/host/actionButtonSemantics.js';
 import type { UpgradeAnalysisPresentation } from '../../../src/host/webviewProtocol.js';
 import { compatibilityOutcomeDisplay } from '../../../src/host/outcomeCopy.js';
-import { IconX } from '../icons.js';
+import { hasPlannerAddedCoordination, upgradeAnalysisFreshness } from '../../../src/host/upgradeReviewUiState.js';
+import { IconRefresh, IconX } from '../icons.js';
 import { CompatibilitySection } from './CompatibilitySection.js';
 import { FilesSection } from './FilesSection.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
@@ -88,7 +89,13 @@ export function UpgradeAnalysisBody({
         />
       ) : null}
 
-      {analysis.smartPlan !== null ? <SmartPlanSection smartPlan={analysis.smartPlan} /> : null}
+      {analysis.smartPlan !== null && hasPlannerAddedCoordination(analysis.changes, analysis.smartPlan.changes) ? (
+        <SmartPlanSection
+          requestedChanges={analysis.changes}
+          smartPlan={analysis.smartPlan}
+          compatibility={analysis.compatibility}
+        />
+      ) : null}
 
       {analysis.changes.length > 1 ? (
         <section className="analysis-card analysis-card--full" aria-labelledby="analysis-selected-upgrades-heading">
@@ -140,9 +147,12 @@ export function UpgradeAnalysisModal({
   analyzingPhase,
   analysis,
   busy,
+  hardStale,
+  now,
   onConfirm,
   onUseSmartPlan,
   onCancel,
+  onRefresh,
   onConfigureVerification,
   onOpenAdvisory,
   pendingChanges,
@@ -152,9 +162,12 @@ export function UpgradeAnalysisModal({
   analyzingPhase: 'compatibility' | 'smart-plan' | null;
   analysis: UpgradeAnalysisPresentation | null;
   busy: boolean;
+  hardStale: boolean;
+  now: number;
   onConfirm: () => void;
   onUseSmartPlan: () => void;
   onCancel: () => void;
+  onRefresh: () => void;
   onConfigureVerification: () => void;
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
   pendingChanges?: readonly { packageName: string; targetVersion: string }[];
@@ -206,7 +219,16 @@ export function UpgradeAnalysisModal({
     return () => node.removeEventListener('keydown', onKeyDown);
   }, [busy, onCancel]);
 
-  const action = analysis !== null ? upgradeConfirmationAction(analysis) : null;
+  const coordinated =
+    analysis?.smartPlan !== null && analysis?.smartPlan !== undefined
+      ? hasPlannerAddedCoordination(analysis.changes, analysis.smartPlan.changes)
+      : false;
+  const action = analysis !== null
+    ? upgradeConfirmationAction(coordinated ? analysis : { ...analysis, smartPlan: null })
+    : null;
+  const freshness = analysis === null ? 'fresh' : upgradeAnalysisFreshness(analysis.analyzedAt, analysis.expiresAt, now);
+  const expired = freshness === 'expired';
+  const executionBlocked = hardStale || expired;
   const displayedChanges = analysis?.changes ?? pendingChanges ?? [{ packageName, targetVersion }];
   const bulk = displayedChanges.length > 1;
   const majorCount = analysis?.changes.filter((change) => change.majorUpdate).length ?? 0;
@@ -254,6 +276,19 @@ export function UpgradeAnalysisModal({
         </header>
 
         <div className="modal__body">
+          {analysis !== null && (freshness !== 'fresh' || hardStale) ? (
+            <p className={`stale-status${hardStale || expired ? ' stale-status--hard' : ''}`}>
+              <IconRefresh className="stale-status__icon stale-status__icon--static" />
+              {hardStale
+                ? 'Project files changed since this analysis ran. Refresh before continuing.'
+                : expired
+                  ? 'This analysis expired and can no longer authorize an upgrade. Analyze again to continue.'
+                  : 'Analysis is more than one hour old. Refresh is recommended; project files have not been marked as changed.'}
+              <button type="button" className="button button--subtle stale-status__action" onClick={onRefresh}>
+                {expired ? 'Analyze again' : 'Refresh'}
+              </button>
+            </p>
+          ) : null}
           <UpgradeAnalysisBody
             packageName={packageName}
             targetVersion={targetVersion}
@@ -267,7 +302,7 @@ export function UpgradeAnalysisModal({
 
         <footer className="modal__footer">
           <button type="button" className="button button--secondary" onClick={onCancel} disabled={busy}>
-            {analysis !== null && analysis.compatibility.status === 'conflict' && analysis.smartPlan === null
+            {analysis !== null && analysis.compatibility.status === 'conflict' && !coordinated
               ? 'Close'
               : 'Cancel'}
           </button>
@@ -276,7 +311,7 @@ export function UpgradeAnalysisModal({
               type="button"
               className={semanticButtonClassName(action.variant)}
               onClick={action.onClick === 'confirm' ? onConfirm : onUseSmartPlan}
-              disabled={busy || analysis === null}
+              disabled={busy || analysis === null || executionBlocked}
             >
               {action.label}
             </button>

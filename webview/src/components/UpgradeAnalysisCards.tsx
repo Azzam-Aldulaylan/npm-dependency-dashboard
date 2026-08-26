@@ -3,15 +3,20 @@ import type { ReactElement } from 'react';
 import type { PackageRow } from '../../../src/core/types.js';
 import type {
   CompatibilityFindingKind,
-  UpgradeAnalysisFiles,
   UpgradeAnalysisPresentation,
+  UpgradeAnalysisSmartPlan,
   UpgradeAnalysisVerification,
 } from '../../../src/host/webviewProtocol.js';
 import { compatibilityOutcomeDisplay, securityOutcomeDisplay } from '../../../src/host/outcomeCopy.js';
-import { severityDisplay } from '../../../src/host/severityDisplay.js';
-import { IconAlertTriangle, IconCheck, IconFile, IconGear, IconHelpCircle, IconListChecks, IconRoute, IconShield } from '../icons.js';
+import {
+  plannerAddedUpgradeChanges,
+  remainingVulnerabilityPatchedVersionLabel,
+} from '../../../src/host/upgradeReviewUiState.js';
+import { IconAlertTriangle, IconCheck, IconExternalLink, IconGear, IconHelpCircle, IconListChecks, IconRoute, IconShield } from '../icons.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { overallStatusDetail } from './UpgradeAnalysisModal.js';
+import { SeverityBadge } from './SeverityBadge.js';
+import { patchedVersionText } from './VulnerabilityCard.js';
 
 /**
  * The five Upgrade review cards shared between the fully-populated review
@@ -87,7 +92,7 @@ export function CompatibilityCheckCard({
         Compatibility check
       </h3>
       {summary !== undefined ? (
-        <p className={`usage-status${summaryTone === 'compatible' ? ' usage-status--ok' : summaryTone === 'conflict' ? ' usage-status--error' : ''}`}>
+        <p className={`usage-status upgrade-compatibility__summary${summaryTone === 'compatible' ? ' usage-status--ok' : summaryTone === 'conflict' ? ' usage-status--error' : ''}`}>
           {summaryTone === 'compatible' ? (
             <IconCheck className="usage-status__icon" />
           ) : summaryTone === 'conflict' ? (
@@ -101,7 +106,7 @@ export function CompatibilityCheckCard({
       <div className="hygiene-strip">
         <CompatCheckItem tone={peerTone} label="Peer dependencies" value={peerValue} />
         <CompatCheckItem tone="unknown" label="Engine requirements" value="Not checked" />
-        <CompatCheckItem tone={hasMajorFinding ? 'warn' : 'ok'} label="Breaking changes" value={hasMajorFinding ? 'Major version change' : 'None detected'} />
+        <CompatCheckItem tone={hasMajorFinding ? 'warn' : 'ok'} label="Breaking changes" value={hasMajorFinding ? 'Major version change' : 'No major version change'} />
         <CompatCheckItem tone="unknown" label="Deprecated APIs" value="Not checked" />
       </div>
     </section>
@@ -109,11 +114,9 @@ export function CompatibilityCheckCard({
 }
 
 /**
- * The plain, non-conflict case — every real proposed change (`changes`),
- * numbered, reusing the exact same `.smart-plan__*` markup SmartPlanSection
- * uses for the genuinely-coordinated-conflict case. No risk/impact score is
- * shown: this codebase has no such rating anywhere in the upgrade pipeline,
- * so showing one would be invented, not derived.
+ * The plain, non-conflict case. This is deliberately called "Upgrade plan",
+ * not "Smart plan": `changes` is the requested host-validated proposal, and
+ * no coordinated search was needed.
  */
 export function SimpleUpgradePlanCard({
   row,
@@ -126,10 +129,10 @@ export function SimpleUpgradePlanCard({
   return (
     <section className="analysis-card" aria-labelledby="upgrade-plan-heading">
       <h3 className="analysis-card__title" id="upgrade-plan-heading">
-        Smart upgrade plan
+        Upgrade plan
       </h3>
       <p className="usage-card__subtitle">
-        {steps.length} step{steps.length === 1 ? '' : 's'} to upgrade {row.name}
+        Requested version change for {row.name}
       </p>
       <ol className="smart-plan__changes">
         {steps.map((change) => (
@@ -145,6 +148,77 @@ export function SimpleUpgradePlanCard({
   );
 }
 
+/** A host-found coordinated plan, including only host-provided reasons. */
+export function CoordinatedUpgradePlanCard({
+  requestedChanges,
+  smartPlan,
+  compatibility,
+}: {
+  requestedChanges: UpgradeAnalysisPresentation['changes'];
+  smartPlan: UpgradeAnalysisSmartPlan;
+  compatibility: UpgradeAnalysisPresentation['compatibility'];
+}): ReactElement {
+  const reasonIds = new Set(smartPlan.reasonFindingIds);
+  const reasons = compatibility.findings.filter((finding) => reasonIds.has(finding.id));
+  const plannerAdded = plannerAddedUpgradeChanges(requestedChanges, smartPlan.changes);
+  const additionalCount = plannerAdded.length;
+
+  return (
+    <section className="smart-plan-banner" aria-labelledby="upgrade-coordinated-plan-heading">
+      <h3 className="smart-plan-banner__title" id="upgrade-coordinated-plan-heading">
+        <IconRoute className="smart-plan-banner__title-icon" />
+        Coordinated upgrade
+      </h3>
+      <p className="smart-plan-banner__hint smart-plan-banner__hint--lead">
+        The planner found {additionalCount} additional dependency change{additionalCount === 1 ? '' : 's'} needed to resolve the conflict.
+      </p>
+      <ol className="smart-plan__changes">
+        {smartPlan.changes.map((change) => (
+          <li className="smart-plan__change" key={change.packageName}>
+            <span className="smart-plan__package">{change.packageName}</span>
+            <span className="smart-plan__versions">
+              {change.currentVersion} → {change.targetVersion}
+            </span>
+          </li>
+        ))}
+      </ol>
+      {reasons.length > 0 ? (
+        <div className="coordinated-plan__reasons">
+          <p className="coordinated-plan__reasons-label">Why coordination is needed</p>
+          <ul>
+            {reasons.map((finding) => <li key={finding.id}>{finding.explanation}</li>)}
+          </ul>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+/**
+ * The protocol does not expose whether planning ended as impossible,
+ * unknown, or limit-reached. Keep this state neutral instead of claiming
+ * that no safe plan exists when the host only sent `smartPlan: null`.
+ */
+export function CoordinationUnavailableCard({ row, changes }: { row: PackageRow; changes: UpgradeAnalysisPresentation['changes'] }): ReactElement {
+  const requested = changes.find((change) => change.packageName === row.name) ?? changes[0];
+  return (
+    <section className="analysis-card" aria-labelledby="upgrade-coordination-unavailable-heading">
+      <h3 className="analysis-card__title" id="upgrade-coordination-unavailable-heading">
+        <IconAlertTriangle className="analysis-card__title-icon" />
+        Coordinated plan not confirmed
+      </h3>
+      {requested !== undefined ? (
+        <p className="upgrade-plan__requested">
+          Requested: <code>{requested.packageName}@{requested.targetVersion}</code>
+        </p>
+      ) : null}
+      <p className="usage-card__subtitle">
+        A dependency conflict was found, but this analysis did not confirm a coordinated resolution.
+      </p>
+    </section>
+  );
+}
+
 /**
  * Before → after vulnerability counts, entirely from the host-computed
  * `SecurityOutcome` — never a second, webview-side security calculation.
@@ -153,16 +227,32 @@ export function SecurityOutcomeCard({
   row,
   security,
   onChangeTab,
+  onOpenAdvisory,
 }: {
   row: PackageRow;
   security: UpgradeAnalysisPresentation['security'];
   onChangeTab: (tab: ManageTabId) => void;
+  onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[]) => void) | undefined;
 }): ReactElement | null {
-  if (security === null || row.advisories.length === 0) return null;
-  const before = severityDisplay(row.worstSeverity);
+  if (security === null) return null;
+  const beforeCount = security.resolvedAdvisories.length + security.remaining.length;
   const resolvedCount = security.resolvedAdvisories.length;
   const remainingCount = security.remaining.filter((entry) => entry.status === 'remains').length;
   const unknownCount = security.remaining.filter((entry) => entry.status === 'unknown').length;
+  const remainingGroups = [
+    {
+      status: 'remains' as const,
+      label: 'Confirmed to remain',
+      description: 'The proposed dependency tree still resolves to an affected version.',
+      entries: security.remaining.filter((entry) => entry.status === 'remains'),
+    },
+    {
+      status: 'unknown' as const,
+      label: 'Undetermined',
+      description: 'The available resolver evidence could not confirm whether this advisory is fixed.',
+      entries: security.remaining.filter((entry) => entry.status === 'unknown'),
+    },
+  ].filter((group) => group.entries.length > 0);
   const after = securityOutcomeDisplay(security.status);
   const subtitle =
     security.status === 'resolved'
@@ -189,9 +279,9 @@ export function SecurityOutcomeCard({
         <div className="security-outcome__box">
           <p className="security-outcome__label">Before upgrade</p>
           <p className="security-outcome__value security-outcome__value--bad">
-            {row.advisories.length} {before.label} vulnerabilit{row.advisories.length === 1 ? 'y' : 'ies'}
+            {beforeCount} known vulnerabilit{beforeCount === 1 ? 'y' : 'ies'}
           </p>
-          <p className="security-outcome__detail">Affecting {row.advisories.length} advisor{row.advisories.length === 1 ? 'y' : 'ies'}</p>
+          <p className="security-outcome__detail">From this analysis</p>
         </div>
         <span className="usage-path__arrow" aria-hidden="true">
           →
@@ -205,36 +295,58 @@ export function SecurityOutcomeCard({
           <p className="security-outcome__detail">{after.label}</p>
         </div>
       </div>
-    </section>
-  );
-}
-
-function baseName(path: string): string {
-  const parts = path.split(/[\\/]/);
-  return parts.at(-1) ?? path;
-}
-
-/** Only the manifest and lockfile — the only two files any upgrade transaction in this codebase ever modifies. Never a fabricated "+N more". */
-export function FilesModifiedCard({ files }: { files: UpgradeAnalysisFiles }): ReactElement {
-  return (
-    <section className="analysis-card" aria-labelledby="upgrade-files-heading">
-      <h3 className="analysis-card__title" id="upgrade-files-heading">
-        <IconFile className="analysis-card__title-icon" />
-        Files to be modified
-      </h3>
-      <p className="usage-card__subtitle">This upgrade will modify the following files.</p>
-      <ul className="usage-ref-list upgrade-files-list">
-        <li className="usage-ref__button usage-ref__button--static upgrade-files-list__item">
-          <IconFile className="usage-ref__icon" aria-hidden="true" />
-          <span className="usage-ref__path">{baseName(files.manifestPath)}</span>
-          <span className="status-badge status-badge--neutral">Modified</span>
-        </li>
-        <li className="usage-ref__button usage-ref__button--static upgrade-files-list__item">
-          <IconFile className="usage-ref__icon" aria-hidden="true" />
-          <span className="usage-ref__path">{baseName(files.lockfilePath)}</span>
-          <span className="status-badge status-badge--neutral">Modified</span>
-        </li>
-      </ul>
+      {security.remaining.length > 0 ? (
+        <details className="security-remaining">
+          <summary className="security-remaining__summary">
+            Inspect {remainingCount > 0 ? `${remainingCount} remaining` : ''}
+            {remainingCount > 0 && unknownCount > 0 ? ' and ' : ''}
+            {unknownCount > 0 ? `${unknownCount} undetermined` : ''}
+          </summary>
+          <div className="security-remaining__content">
+            {remainingGroups.map((group) => (
+              <section className="security-remaining__group" key={group.status} aria-labelledby={`security-remaining-${group.status}`}>
+                <h4 id={`security-remaining-${group.status}`}>{group.label}</h4>
+                <p>{group.description}</p>
+                <ul className="security-remaining__list">
+                  {group.entries.map((entry, index) => (
+                    <li className="security-remaining__item" key={`${String(entry.advisory.id)}:${entry.flaggedPackage}:${index}`}>
+                      <div className="security-remaining__head">
+                        <SeverityBadge severity={entry.advisory.severity} />
+                        <strong>{entry.advisory.title}</strong>
+                        <code className="security-remaining__advisory-id">{String(entry.advisory.id)}</code>
+                      </div>
+                      <dl className="security-remaining__meta">
+                        <dt>Flagged package</dt>
+                        <dd><code>{entry.flaggedPackage}</code></dd>
+                        <dt>Dependency path</dt>
+                        <dd><code>{entry.path.join(' → ')}</code></dd>
+                        <dt>{remainingVulnerabilityPatchedVersionLabel(entry.flaggedPackage)}</dt>
+                        <dd><code>{patchedVersionText(entry.patchedVersion)}</code></dd>
+                        {entry.resolvedVersion !== null ? (
+                          <>
+                            <dt>Proposed resolved version</dt>
+                            <dd><code>{entry.resolvedVersion}</code></dd>
+                          </>
+                        ) : null}
+                      </dl>
+                      {onOpenAdvisory !== undefined ? (
+                        <button
+                          type="button"
+                          className="advisory__source"
+                          onClick={() => onOpenAdvisory(row.name, entry.advisory.id, [...entry.path])}
+                        >
+                          View advisory source
+                          <IconExternalLink />
+                        </button>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
+        </details>
+      ) : null}
     </section>
   );
 }

@@ -51,6 +51,7 @@ import { pickProject } from './projectPicker.js';
 import type { DiscoveredProject, ResolvedProject } from './projectResolution.js';
 import { discoverProjects, loadProject } from './projectResolution.js';
 import { UpgradeAssistantCoordinator } from './upgradeAssistantCoordinator.js';
+import { canRetryMutationEnrichment, classifyMutationEnrichmentStart } from './upgradeAssistantOutcome.js';
 import { UsageAnalysisCoordinator } from './usage/usageCoordinator.js';
 import type { ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
 import type { WebviewToHostMessage } from './webviewProtocol.js';
@@ -216,7 +217,12 @@ export class DashboardPanel {
       getSelectedProject: () => this.selectedProject,
       isDisposed: () => this.disposed,
       reloadFinalState: () => this.reloadAndScan(undefined, { forceUsageRecheck: true }),
-      flushDeferredChanges: () => this.fileChangeCoordinator.flushDeferred(),
+      readAndApplyMutationLocalState: () => this.readAndApplyMutationLocalState(),
+      refreshMutationEnrichmentInBackground: (refreshId, packageName, structurallyCurrent) =>
+        this.refreshMutationEnrichmentInBackground(refreshId, packageName, structurallyCurrent),
+      flushDeferredChanges: async () => {
+        await this.fileChangeCoordinator.flushAll();
+      },
       onMutationLockReleased: () => {
         void this.usageCoordinator.runPendingBackgroundRefresh();
       },
@@ -334,6 +340,10 @@ export class DashboardPanel {
     }
     if (message.type === 'use-smart-plan') {
       await this.upgradeCoordinator.handleUseSmartPlan(message);
+      return;
+    }
+    if (message.type === 'retry-upgrade-enrichment') {
+      this.retryMutationEnrichment(message.refreshId);
       return;
     }
     if (message.type === 'cancel-upgrade') {
@@ -733,6 +743,119 @@ export class DashboardPanel {
   }
 
   /**
+   * Applies the package-manager transaction's freshly re-read local project
+   * state without starting a registry/audit scan. Every watcher event queued
+   * before this snapshot is already represented by the read and is discarded;
+   * new watchers are installed immediately so later external edits retain the
+   * normal structural-invalidation path.
+   */
+  private async readAndApplyMutationLocalState(): Promise<
+    { project: ResolvedProject; structurallyCurrent: boolean } | undefined
+  > {
+    const candidate = this.selectedProject;
+    const controller = this.controller;
+    if (candidate === undefined || controller === undefined) return undefined;
+
+    this.reloadGeneration += 1;
+    const generation = this.reloadGeneration;
+    // Only events already queued before this read belong to the transaction
+    // whose final state we are about to capture. Events arriving during the
+    // read remain queued and are drained after the mutation lock is released.
+    this.fileChangeCoordinator.discardPending();
+    const generationAtReadStart = controller.beginRevalidation();
+    const project = await this.loadProjectMeasured(candidate, 'Dependency Dashboard post-upgrade local refresh');
+    if (
+      this.disposed ||
+      generation !== this.reloadGeneration ||
+      candidate !== this.selectedProject ||
+      project.root !== controller.root
+    ) {
+      return undefined;
+    }
+    controller.invalidateCache();
+    const update = controller.updateProjectSnapshot(
+      {
+        ...project,
+        projectInfo: toProjectInfo(candidate),
+        canChangeProject: this.candidateCount > 1,
+        cacheKey: this.cacheKeyFor(candidate, project),
+      },
+      generationAtReadStart
+    );
+    this.setupFileWatchers(candidate, path.join(project.root, 'package.json'));
+    this.selectedLockfilePath = project.lockfilePath;
+    return { project, structurallyCurrent: update.structurallyCurrent };
+  }
+
+  private mutationEnrichment:
+    | {
+        refreshId: string;
+        packageName: string;
+        state: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'superseded';
+      }
+    | undefined;
+
+  /** Starts only the derived/network phase after local facts are already visible. */
+  private refreshMutationEnrichmentInBackground(
+    refreshId: string,
+    packageName: string,
+    structurallyCurrent = true
+  ): void {
+    const controller = this.controller;
+    const lifecycle = { refreshId, packageName, state: 'running' as const };
+    this.mutationEnrichment = lifecycle;
+    if (classifyMutationEnrichmentStart(structurallyCurrent) === 'superseded') {
+      // A watcher advanced while the final local read was in flight. That
+      // read may still supply useful display facts, but it cannot seed a
+      // targeted scan or authorize "applied"; the retained watcher burst
+      // owns the structurally authoritative reload after lock release.
+      this.mutationEnrichment = { ...lifecycle, state: 'superseded' };
+      this.sink.postMessage({
+        status: 'upgrade-enrichment-result',
+        refreshId,
+        package: packageName,
+        outcome: 'superseded',
+      });
+      return;
+    }
+    if (controller === undefined) {
+      this.mutationEnrichment = { ...lifecycle, state: 'failed' };
+      this.sink.postMessage({
+        status: 'upgrade-enrichment-result',
+        refreshId,
+        package: packageName,
+        outcome: 'failed',
+        error: { code: 'NO_PROJECT', message: 'The project is not available for dependency data refresh.' },
+      });
+      return;
+    }
+    void controller.refreshInBackground(this.sink, 'local-mutation').then((outcome) => {
+      if (this.disposed) return;
+      const current = this.mutationEnrichment;
+      const terminalOutcome = current === lifecycle ? outcome : { status: 'superseded' as const };
+      if (current === lifecycle) {
+        this.mutationEnrichment = { ...lifecycle, state: terminalOutcome.status };
+      }
+      this.sink.postMessage({
+        status: 'upgrade-enrichment-result',
+        refreshId,
+        package: packageName,
+        outcome: terminalOutcome.status,
+        ...(terminalOutcome.status === 'failed' ? { error: terminalOutcome.error } : {}),
+      });
+      if (terminalOutcome.status !== 'succeeded' || this.controller !== controller) return;
+      void this.usageCoordinator.requestBackgroundUsageRefresh({ force: true });
+    });
+  }
+
+  /** Replays only the exact failed/cancelled lifecycle named by the webview. */
+  private retryMutationEnrichment(refreshId: string): void {
+    const lifecycle = this.mutationEnrichment;
+    if (!canRetryMutationEnrichment(lifecycle, refreshId) || lifecycle === undefined) return;
+    this.refreshMutationEnrichmentInBackground(lifecycle.refreshId, lifecycle.packageName);
+  }
+
+  /**
    * Project resolution is async and can fail (no folder open, no package.json,
    * or the user cancels the initial picker). That is reported as fatal-error
    * over the same channel rather than thrown during construction, so the
@@ -868,8 +991,8 @@ export class DashboardPanel {
     if (this.disposed || this.controller === undefined || this.upgradeCoordinator.isBusy()) return;
     if (!this.controller.needsBackgroundRefresh()) return;
     const controller = this.controller;
-    void controller.refreshInBackground(this.sink).then(() => {
-      if (this.disposed || this.controller !== controller) return;
+    void controller.refreshInBackground(this.sink, 'time').then((outcome) => {
+      if (outcome.status !== 'succeeded' || this.disposed || this.controller !== controller) return;
       void this.usageCoordinator.requestBackgroundUsageRefresh();
     });
   }

@@ -19,6 +19,7 @@ function baseOptions(overrides) {
   return {
     analysisId: 'abc123',
     analyzedAt: '2026-08-26T12:00:00.000Z',
+    expiresAt: '2026-08-26T14:00:00.000Z',
     packageName: 'react-toastify',
     currentVersion: '10.0.6',
     targetVersion: '11.1.0',
@@ -126,6 +127,11 @@ test('coordinated changes are preserved and each computes its own major-update f
 test('analyzedAt passes through unchanged — the timestamp the coordinator computed once at final assembly', () => {
   const result = buildUpgradeAnalysisPresentation(baseOptions({ analyzedAt: '2026-08-26T09:15:00.000Z' }));
   assert.equal(result.analyzedAt, '2026-08-26T09:15:00.000Z');
+});
+
+test('expiresAt passes through unchanged from the exact stored-analysis deadline', () => {
+  const result = buildUpgradeAnalysisPresentation(baseOptions({ expiresAt: '2026-08-26T13:59:59.000Z' }));
+  assert.equal(result.expiresAt, '2026-08-26T13:59:59.000Z');
 });
 
 test('buildUpgradeAnalysisChanges produces the exact same shape buildUpgradeAnalysisPresentation embeds — the Stage-0 overview partial and the final object can never diverge', () => {

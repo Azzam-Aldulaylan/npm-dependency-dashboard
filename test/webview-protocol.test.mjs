@@ -79,6 +79,7 @@ const DATA = {
 const MINIMAL_ANALYSIS = {
   analysisId: 'abc123',
   analyzedAt: '2026-08-01T09:00:00.000Z',
+  expiresAt: '2026-08-01T11:00:00.000Z',
   package: 'react-toastify',
   currentVersion: '10.0.6',
   targetVersion: '11.1.0',
@@ -299,6 +300,13 @@ test('a well-formed confirm-upgrade / use-smart-plan request is accepted', () =>
   assert.equal(isWebviewToHostMessage({ type: 'use-smart-plan', analysisId: 'abc123' }), true);
 });
 
+test('retry-upgrade-enrichment accepts only a host-issued-looking non-empty correlation id', () => {
+  assert.equal(isWebviewToHostMessage({ type: 'retry-upgrade-enrichment', refreshId: 'refresh-1' }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'retry-upgrade-enrichment', refreshId: '' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'retry-upgrade-enrichment' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'retry-upgrade-enrichment', refreshId: 'refresh-1', package: 'react' }), false);
+});
+
 test('confirm-upgrade / use-smart-plan reject a missing, empty, or null analysisId', () => {
   for (const type of ['confirm-upgrade', 'use-smart-plan']) {
     assert.equal(isWebviewToHostMessage({ type }), false);
@@ -373,6 +381,49 @@ test('every host-to-webview variant is accepted', () => {
     true
   );
   assert.equal(isHostToWebviewMessage({ status: 'upgrade-analysis-stale', analysisId: 'abc123' }), true);
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-result',
+    result: {
+      package: 'react',
+      refreshId: 'refresh-1',
+      install: 'succeeded',
+      application: 'applied',
+      verification: 'passed',
+      refreshingDerivedData: true,
+      changes: [{
+        packageName: 'react', previousVersion: '18.3.1', requestedVersion: '19.0.0',
+        currentVersion: '19.0.0', declaredRange: '^19.0.0', classification: 'prod',
+      }],
+    },
+  }), true);
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-result',
+    result: {
+      package: 'react', refreshId: 'refresh-1', install: 'succeeded', application: 'applied', verification: 'passed',
+      refreshingDerivedData: true, changes: [], untrusted: true,
+    },
+  }), false);
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-result',
+    result: {
+      package: 'react', refreshId: 'refresh-1', install: 'succeeded', application: 'unconfirmed', verification: 'not-configured',
+      refreshingDerivedData: true, changes: [],
+    },
+  }), false);
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-enrichment-result', refreshId: 'refresh-1', package: 'react', outcome: 'succeeded',
+  }), true);
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-enrichment-result', refreshId: 'refresh-1', package: 'react', outcome: 'failed',
+    error: { code: 'NETWORK', message: 'offline' },
+  }), true);
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-enrichment-result', refreshId: 'refresh-1', package: 'react', outcome: 'failed',
+  }), false);
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-enrichment-result', refreshId: 'refresh-1', package: 'react', outcome: 'succeeded',
+    error: { code: 'NETWORK', message: 'must be absent' },
+  }), false);
 });
 
 test('scan progress accepts real stage/count data and rejects fake or inconsistent progress', () => {
@@ -449,6 +500,20 @@ test('upgrade-analysis rejects a missing or malformed analysis payload', () => {
   assert.equal(isHostToWebviewMessage({ status: 'upgrade-analysis' }), false);
   assert.equal(isHostToWebviewMessage({ status: 'upgrade-analysis', analysis: null }), false);
   assert.equal(isHostToWebviewMessage({ status: 'upgrade-analysis', analysis: {} }), false);
+});
+
+test('upgrade-analysis requires a valid host expiry after analyzedAt', () => {
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-analysis', requestId: 'req-1', analysis: { ...MINIMAL_ANALYSIS, expiresAt: 'not-a-date' },
+  }), false);
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-analysis', requestId: 'req-1', analysis: { ...MINIMAL_ANALYSIS, expiresAt: '1' },
+  }), false);
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-analysis', requestId: 'req-1', analysis: { ...MINIMAL_ANALYSIS, expiresAt: MINIMAL_ANALYSIS.analyzedAt },
+  }), false);
+  const { expiresAt: _expiresAt, ...withoutExpiry } = MINIMAL_ANALYSIS;
+  assert.equal(isHostToWebviewMessage({ status: 'upgrade-analysis', requestId: 'req-1', analysis: withoutExpiry }), false);
 });
 
 test('upgrade-analysis rejects extra top-level keys on the analysis payload', () => {

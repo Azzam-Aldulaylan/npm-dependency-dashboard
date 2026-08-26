@@ -8,10 +8,11 @@ const component = readFileSync(
   'utf8'
 );
 
-test('the target selector offers explicit manual entry without silently analyzing', () => {
-  assert.match(component, /Enter another version/);
-  assert.match(component, /Exact published version/);
-  assert.match(component, /npm verifies this version before analysis/);
-  assert.match(component, /onSubmit=\{applyManualVersion\}/);
+test('the target selector is registry-backed and has no free-text version entry', () => {
+  assert.match(component, /<select/);
+  assert.match(component, /optgroup label="Stable releases"/);
+  assert.match(component, /optgroup label="Prereleases — review carefully"/);
+  assert.match(component, /onChange=\{\(event\) => onChange\(event\.currentTarget\.value\)\}/);
+  assert.doesNotMatch(component, /Enter another version|Exact published version|manualVersion|<input/);
   assert.doesNotMatch(component, /onAnalyzeUpgrade/);
 });

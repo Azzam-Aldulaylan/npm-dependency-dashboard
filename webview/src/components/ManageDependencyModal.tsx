@@ -4,10 +4,15 @@ import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent
 import type { PackageRow, Severity } from '../../../src/core/types.js';
 import type { DependencyFinding } from '../../../src/core/hygiene/types.js';
 import type { TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
-import type { RemoveAnalysisPresentation, UpgradeAnalysisPresentation } from '../../../src/host/webviewProtocol.js';
+import type { RemoveAnalysisPresentation, UpgradeAnalysisPresentation, UpgradeResultPresentation } from '../../../src/host/webviewProtocol.js';
 import type { UpgradeAnalysisSections } from '../../../src/host/upgradeAnalysisSections.js';
+import {
+  shouldQuarantineUpgradeDerivedData,
+  shouldShowUpgradeVulnerabilitySeverity,
+} from '../../../src/host/upgradeReviewUiState.js';
+import type { UpgradeEnrichmentUiState } from '../../../src/host/upgradeReviewUiState.js';
 import { CLASSIFICATION_LABEL, classificationOf } from '../dependencyClassification.js';
-import { IconFolder, IconInfo, IconShield, IconSliders, IconTrash, IconTrendUp, IconX } from '../icons.js';
+import { IconFolder, IconInfo, IconRefresh, IconShield, IconSliders, IconTrash, IconTrendUp, IconX } from '../icons.js';
 import type { RemovalImpactState } from '../removalImpactState.js';
 import { OverviewPanel } from './OverviewPanel.js';
 import { PackageIcon } from './PackageIcon.js';
@@ -56,6 +61,121 @@ interface RemovalReviewState {
   onAnalyze: () => void;
   onConfirm: () => void;
   onConfigureVerification: () => void;
+}
+
+function UpgradeResultPanel({
+  result,
+  enrichment,
+  onRetryEnrichment,
+}: {
+  result: UpgradeResultPresentation;
+  enrichment: UpgradeEnrichmentUiState | null;
+  onRetryEnrichment: () => void;
+}): ReactElement {
+  const title =
+    result.application === 'applied'
+      ? result.verification === 'passed' ? 'Upgrade verified' : 'Upgrade applied'
+      : result.application === 'rolled-back' ? 'Upgrade rolled back' : 'Upgrade not confirmed';
+  const applicationLabel =
+    result.application === 'applied'
+      ? 'Requested dependency state confirmed'
+      : result.application === 'rolled-back'
+        ? 'Dependency files restored'
+        : 'Resulting dependency state could not be confirmed';
+  const verificationLabel =
+    result.verification === 'passed'
+      ? 'Passed'
+      : result.verification === 'not-configured'
+        ? 'Not configured'
+        : result.verification === 'failed'
+          ? 'Failed'
+          : 'Not run';
+
+  return (
+    <div className="upgrade-tab" role="status" aria-live="polite">
+      <section className="analysis-card analysis-card--full" aria-labelledby="upgrade-result-heading">
+        <h3 className="analysis-card__title" id="upgrade-result-heading">{title}</h3>
+        {result.changes.map((change) => (
+          <p key={change.packageName} className="analysis-card__hint">
+            <code>{change.packageName}</code>: <code>{change.previousVersion}</code> <span aria-hidden="true">→</span>{' '}
+            <code>{change.currentVersion ?? 'not resolved'}</code>
+          </p>
+        ))}
+        <dl className="manage-glance">
+          <div className="manage-glance__row"><dt>Install</dt><dd>{result.install === 'succeeded' ? 'Succeeded' : 'Failed'}</dd></div>
+          <div className="manage-glance__row"><dt>Applied state</dt><dd>{applicationLabel}</dd></div>
+          <div className="manage-glance__row"><dt>Verification</dt><dd>{verificationLabel}</dd></div>
+        </dl>
+        {enrichment?.phase === 'refreshing' ? (
+          <p className="analysis-card__pending-label">
+            <IconRefresh className="banner__icon--spin" aria-hidden="true" /> Refreshing dependency security and update data…
+          </p>
+        ) : enrichment !== null ? (
+          <div className="upgrade-enrichment-warning" role="alert">
+            <p>
+              <IconInfo aria-hidden="true" /> {enrichment.message} Confirmed local dependency facts are still shown.
+            </p>
+            {enrichment.phase === 'failed' ? (
+              <button type="button" className="button button--secondary" onClick={onRetryEnrichment}>
+                Retry dependency data refresh
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
+function DerivedDataQuarantinePanel({
+  label,
+  row,
+  enrichment,
+  onRetryEnrichment,
+}: {
+  label: string;
+  row?: PackageRow | undefined;
+  enrichment: UpgradeEnrichmentUiState;
+  onRetryEnrichment: () => void;
+}): ReactElement {
+  return (
+    <section
+      className="analysis-card analysis-card--full"
+      role={enrichment.phase === 'refreshing' ? 'status' : 'alert'}
+      aria-live="polite"
+    >
+      <h3 className="analysis-card__title">
+        {enrichment.phase === 'refreshing'
+          ? 'Refreshing dependency data'
+          : enrichment.phase === 'failed'
+            ? 'Dependency data refresh failed'
+            : 'Dependency data refresh superseded'}
+      </h3>
+      {row !== undefined ? (
+        <dl className="manage-glance">
+          <div className="manage-glance__row"><dt>Current version</dt><dd><code>{row.current ?? 'Not resolved'}</code></dd></div>
+          <div className="manage-glance__row"><dt>Declared range</dt><dd><code>{row.range}</code></dd></div>
+          <div className="manage-glance__row"><dt>Dependency type</dt><dd>{CLASSIFICATION_LABEL[classificationOf(row)]}</dd></div>
+        </dl>
+      ) : null}
+      {enrichment.phase === 'refreshing' ? (
+        <p className="analysis-card__pending-label">
+          <IconRefresh className="banner__icon--spin" aria-hidden="true" /> {label}
+        </p>
+      ) : (
+        <div className="upgrade-enrichment-warning">
+          <p>
+            <IconInfo aria-hidden="true" /> {enrichment.message} Registry and vulnerability details remain unavailable until a refresh succeeds.
+          </p>
+          {enrichment.phase === 'failed' ? (
+            <button type="button" className="button button--secondary" onClick={onRetryEnrichment}>
+              Retry dependency data refresh
+            </button>
+          ) : null}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function TabButton({
@@ -153,12 +273,15 @@ export function ManageDependencyModal({
   updateResolutionAvailable,
   advisoriesAvailable,
   blockClose,
+  upgradeResult,
+  upgradeEnrichment,
   upgrade,
   removal,
   onAnalyzeRemediation,
   onOpenAdvisory,
   onReanalyzeUsage,
   onOpenUsageReference,
+  onRetryUpgradeEnrichment,
   now,
   onClose,
 }: {
@@ -177,12 +300,15 @@ export function ManageDependencyModal({
   advisoriesAvailable: boolean;
   /** True only while a protected, hard-to-reverse operation this modal itself started is actually running (a file-mutating install/removal, or the removal-impact scan) — X/Escape refuse to close until it settles, same discipline the modal already had. */
   blockClose: boolean;
+  upgradeResult: UpgradeResultPresentation | null;
+  upgradeEnrichment: UpgradeEnrichmentUiState | null;
   upgrade: UpgradeReviewState;
   removal: RemovalReviewState;
   onAnalyzeRemediation: (packageName: string) => void;
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
   onReanalyzeUsage: (packageName: string) => void;
   onOpenUsageReference: (usageId: string, referenceIndex: number) => void;
+  onRetryUpgradeEnrichment: () => void;
   now: number;
   onClose: () => void;
 }): ReactElement {
@@ -256,8 +382,18 @@ export function ManageDependencyModal({
     onChangeTab('overview');
   };
 
+  const quarantineDerivedData = shouldQuarantineUpgradeDerivedData(upgradeEnrichment);
   let content: ReactNode;
-  if (activeTab === 'overview') {
+  if (activeTab === 'overview' && upgradeEnrichment !== null) {
+    content = (
+      <DerivedDataQuarantinePanel
+        row={row}
+        enrichment={upgradeEnrichment}
+        label="Refreshing security and available-version information…"
+        onRetryEnrichment={onRetryUpgradeEnrichment}
+      />
+    );
+  } else if (activeTab === 'overview') {
     content = (
       <OverviewPanel
         row={row}
@@ -266,12 +402,20 @@ export function ManageDependencyModal({
         usage={usage}
         actionsDisabled={actionsDisabled}
         upgradeDisabled={upgradeDisabled}
-        updateResolutionAvailable={updateResolutionAvailable}
-        advisoriesAvailable={advisoriesAvailable}
+        updateResolutionAvailable={quarantineDerivedData ? false : updateResolutionAvailable}
+        advisoriesAvailable={quarantineDerivedData ? false : advisoriesAvailable}
         onStartUpgradeReview={startUpgradeReview}
         onStartRemovalReview={startRemovalReview}
         onAnalyzeRemediation={onAnalyzeRemediation}
         onChangeTab={onChangeTab}
+      />
+    );
+  } else if (activeTab === 'vulnerabilities' && upgradeEnrichment !== null) {
+    content = (
+      <DerivedDataQuarantinePanel
+        enrichment={upgradeEnrichment}
+        label="Refreshing vulnerability data…"
+        onRetryEnrichment={onRetryUpgradeEnrichment}
       />
     );
   } else if (activeTab === 'vulnerabilities') {
@@ -280,8 +424,8 @@ export function ManageDependencyModal({
         row={row}
         remediation={remediation}
         actionsDisabled={upgradeDisabled}
-        updateResolutionAvailable={updateResolutionAvailable}
-        advisoriesAvailable={advisoriesAvailable}
+        updateResolutionAvailable={quarantineDerivedData ? false : updateResolutionAvailable}
+        advisoriesAvailable={quarantineDerivedData ? false : advisoriesAvailable}
         onOpenAdvisory={onOpenAdvisory}
         onStartUpgradeReview={(target) => startUpgradeReview(row.name, target)}
         onStartTransitiveCheck={startTransitiveCheckFromVulnerabilities}
@@ -293,12 +437,20 @@ export function ManageDependencyModal({
         row={row}
         hygieneFindings={hygieneFindings}
         usage={usage}
-        updateResolutionAvailable={updateResolutionAvailable}
-        advisoriesAvailable={advisoriesAvailable}
+        updateResolutionAvailable={quarantineDerivedData ? false : updateResolutionAvailable}
+        advisoriesAvailable={quarantineDerivedData ? false : advisoriesAvailable}
         onReanalyzeUsage={onReanalyzeUsage}
         onOpenUsageReference={onOpenUsageReference}
         onChangeTab={onChangeTab}
         now={now}
+      />
+    );
+  } else if (activeTab === 'upgrade' && upgradeResult !== null) {
+    content = (
+      <UpgradeResultPanel
+        result={upgradeResult}
+        enrichment={upgradeEnrichment}
+        onRetryEnrichment={onRetryUpgradeEnrichment}
       />
     );
   } else if (activeTab === 'upgrade') {
@@ -317,7 +469,7 @@ export function ManageDependencyModal({
         error={upgrade.error}
         disabled={upgradeDisabled}
         usage={usage}
-        advisoriesAvailable={advisoriesAvailable}
+        advisoriesAvailable={quarantineDerivedData ? false : advisoriesAvailable}
         onAnalyzeUpgrade={upgrade.onAnalyze}
         onTargetChange={upgrade.onTargetChange}
         onConfirm={upgrade.onConfirm}
@@ -326,6 +478,7 @@ export function ManageDependencyModal({
         onConfigureVerification={upgrade.onConfigureVerification}
         onRefresh={upgrade.onRefresh}
         onChangeTab={onChangeTab}
+        onOpenAdvisory={onOpenAdvisory}
       />
     );
   } else {
@@ -337,7 +490,7 @@ export function ManageDependencyModal({
         busy={removal.busy}
         removalImpact={removalImpact}
         usage={usage}
-        advisoriesAvailable={advisoriesAvailable}
+        advisoriesAvailable={quarantineDerivedData ? false : advisoriesAvailable}
         onAnalyzeRemoval={removal.onAnalyze}
         onConfirm={removal.onConfirm}
         onViewReferences={() => onChangeTab('usage')}
@@ -392,7 +545,7 @@ export function ManageDependencyModal({
             label="Vulnerabilities"
             icon={<IconShield />}
             active={activeTab === 'vulnerabilities'}
-            dotTone={worstSeverity ?? undefined}
+            dotTone={shouldShowUpgradeVulnerabilitySeverity(upgradeEnrichment) ? worstSeverity ?? undefined : undefined}
             onSelect={onChangeTab}
           />
           <TabButton

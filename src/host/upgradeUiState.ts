@@ -6,6 +6,30 @@
  * compiled `out/` counterpart to import from a test).
  */
 
+import type { DashboardData, UpgradeResultPresentation } from './webviewProtocol.js';
+
+/** Overlay only freshly-confirmed local facts; all registry/security fields remain untouched until the UI's refreshing guard is replaced by a new scan. */
+export function applyUpgradeResultLocalFacts(
+  data: DashboardData,
+  result: UpgradeResultPresentation
+): DashboardData {
+  const changes = new Map(result.changes.map((change) => [change.packageName, change]));
+  return {
+    ...data,
+    rows: data.rows.map((row) => {
+      const change = changes.get(row.name);
+      if (change === undefined) return row;
+      return {
+        ...row,
+        current: change.currentVersion ?? row.current,
+        range: change.declaredRange ?? row.range,
+        dev: change.classification === null ? row.dev : change.classification === 'dev',
+        optional: change.classification === null ? row.optional : change.classification === 'optional',
+      };
+    }),
+  };
+}
+
 /**
  * An analysis request may only start while no upgrade flow is active. Once an
  * analysis has been issued, the host owns a project-wide lock until that

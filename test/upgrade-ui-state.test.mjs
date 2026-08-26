@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  applyUpgradeResultLocalFacts,
   manageRemovalReplacesUpgradeReview,
   targetChangeInvalidatesManageAnalysis,
   upgradeAnalysisMessageMatchesRequest,
@@ -15,6 +16,29 @@ import {
   upgradeErrorClearsActiveState,
   upgradeErrorIsUserVisible,
 } from '../out/host/upgradeUiState.js';
+
+test('post-upgrade local facts replace current/range/classification without inventing derived data', () => {
+  const oldAdvisory = { id: 1 };
+  const data = {
+    rows: [{
+      name: 'react', current: '18.3.1', range: '^18.3.1', dev: false, optional: false,
+      wanted: '18.3.1', latest: '19.0.0', advisories: [oldAdvisory], worstSeverity: 'high', upgradeTo: '19.0.0', upgradeReason: 'update',
+    }],
+    availability: { updates: 'complete', advisories: 'complete', unavailableUpdatePackages: [] },
+    generatedAt: '2026-01-01T00:00:00.000Z', project: { label: 'app', manifestPath: 'package.json' }, canChangeProject: false,
+    hygieneFindings: [], extensionVersion: '0.0.1', builtAt: '2026-01-01T00:00:00.000Z',
+  };
+  const patched = applyUpgradeResultLocalFacts(data, {
+    package: 'react', install: 'succeeded', application: 'applied', verification: 'not-configured', refreshingDerivedData: true,
+    changes: [{ packageName: 'react', previousVersion: '18.3.1', requestedVersion: '19.0.0', currentVersion: '19.0.0', declaredRange: '^19.0.0', classification: 'dev' }],
+  });
+
+  assert.equal(patched.rows[0].current, '19.0.0');
+  assert.equal(patched.rows[0].range, '^19.0.0');
+  assert.equal(patched.rows[0].dev, true);
+  assert.equal(patched.rows[0].optional, false);
+  assert.equal(patched.rows[0].advisories, data.rows[0].advisories);
+});
 
 // ---------------------------------------------------------- starting analysis
 

@@ -222,7 +222,7 @@ test('a cold scan exposes only loading and real progress until the atomic core s
   assert.equal(sink.posted.at(-1).data.availability.advisories, 'complete');
 });
 
-test('handleReady with a warm cache replays it as stale, then posts fresh data', async () => {
+test('handleReady with a warm age-expired cache keeps it usable while fresh data replaces it', async () => {
   const controller = makeController(generationalClient({ versions: ['1.0.1', '1.0.2'] }));
 
   const priming = recordingSink();
@@ -231,7 +231,7 @@ test('handleReady with a warm cache replays it as stale, then posts fresh data',
   const sink = recordingSink();
   await controller.handleReady(sink);
 
-  assert.deepEqual(sink.statuses, ['stale', 'partial-error']);
+  assert.deepEqual(sink.statuses, ['partial-error', 'partial-error']);
   assert.equal(latestOf(sink.posted[0]), '1.0.1', 'the replay is the cached run, not a new one');
   assert.equal(latestOf(sink.posted[1]), '1.0.2', 'a fresh run still follows the replay');
 });
@@ -247,7 +247,7 @@ test('the replayed snapshot keeps the timestamp of the run that produced it', as
   assert.equal(
     sink.posted[0].data.generatedAt,
     priming.posted[1].data.generatedAt,
-    'a stale banner must not claim the data is from now'
+    'an age-refresh replay must retain the timestamp of the data it shows'
   );
 });
 
@@ -292,7 +292,7 @@ test('a refresh after a refresh does not serve the discarded cache', async () =>
     'partial-error',
     'loading',
     'partial-error',
-    'stale',
+    'partial-error',
     'partial-error',
   ]);
   assert.equal(latestOf(sink.posted[4]), '1.0.2', 'the replay is the most recent completed run');
@@ -419,7 +419,7 @@ test('a superseded run does not poison the cache either', async () => {
   const sink = recordingSink();
   await controller.handleReady(sink);
 
-  assert.equal(sink.posted[0].status, 'stale');
+  assert.equal(sink.posted[0].status, 'partial-error');
   assert.equal(latestOf(sink.posted[0]), '1.0.2', 'the cache holds the winning run, not the stale one');
 });
 
@@ -812,7 +812,7 @@ test('a fresh persisted cache renders as ready with no pipeline/network run at a
   assert.deepEqual(sink.posted[0].data.rows, [CACHED_ROW]);
 });
 
-test('a stale persisted cache renders immediately as stale, then a real revalidation follows', async () => {
+test('an age-expired, fingerprint-matching cache stays ready while a real revalidation follows', async () => {
   const projectCacheStore = new PersistentProjectCacheStore(fakeKeyValueStore());
   const oldTimestamp = new Date(Date.now() - 60 * 60_000).toISOString();
   projectCacheStore.set('cache-key-stale', {
@@ -832,8 +832,8 @@ test('a stale persisted cache renders immediately as stale, then a real revalida
 
   await controller.handleReady(sink);
 
-  assert.deepEqual(sink.statuses, ['stale', 'partial-error']);
-  assert.deepEqual(sink.posted[0].data.rows, [CACHED_ROW], 'the stale replay is the persisted snapshot');
+  assert.deepEqual(sink.statuses, ['ready', 'partial-error']);
+  assert.deepEqual(sink.posted[0].data.rows, [CACHED_ROW], 'the immediate replay is the persisted snapshot');
   assert.equal(latestOf(sink.posted[1]), '1.0.1', 'a real scan still follows');
 });
 
@@ -945,7 +945,7 @@ test('TTL boundary at the controller level: exactly at the limit revalidates, ju
   });
   const atBoundarySink = recordingSink();
   await atBoundaryController.handleReady(atBoundarySink);
-  assert.equal(atBoundarySink.statuses[0], 'stale', 'age === ttl revalidates');
+  assert.equal(atBoundarySink.statuses[0], 'ready', 'age === ttl revalidates without structural invalidation');
 
   const underBoundaryStore = new PersistentProjectCacheStore(fakeKeyValueStore());
   underBoundaryStore.set('under-boundary', {
@@ -986,7 +986,7 @@ test('ttlMinutesProvider returning 0 always revalidates, even for a snapshot gen
   const sink = recordingSink();
   await controller.handleReady(sink);
 
-  assert.deepEqual(sink.statuses, ['stale', 'partial-error']);
+  assert.deepEqual(sink.statuses, ['ready', 'partial-error']);
 });
 
 test('a manifest edited while the panel was closed cannot produce a fresh cache hit after reopening — the source fingerprint no longer matches', async () => {
@@ -1243,7 +1243,7 @@ test('refreshInBackground never posts loading first — the last render stays on
   assert.equal(latestOf(sink.posted[sink.posted.length - 1]), '1.0.1');
 });
 
-test('a failed background revalidation does not destroy the last renderable snapshot, and posts nothing at all', async () => {
+test('a failed background revalidation reports failure without destroying the last renderable snapshot', async () => {
   // A degraded advisory/audit fetch is folded into partial-error by the
   // pipeline itself, not thrown — run()'s catch block only ever sees
   // something that makes buildPackageRows reject outright, e.g. a manifest
@@ -1268,13 +1268,15 @@ test('a failed background revalidation does not destroy the last renderable snap
   });
 
   const sink = recordingSink();
-  await controller.refreshInBackground(sink);
+  const outcome = await controller.refreshInBackground(sink);
   // run() announces the revalidation as it begins (carrying the still-good
   // prior snapshot as 'stale' — requirement: background revalidation must be
   // visible to the webview so it can disable Upgrade buttons) — but the
   // failure itself posts nothing further: no fatal-error, no second message.
   assert.deepEqual(sink.statuses, ['stale'], 'only the start-of-revalidation announcement — the failure itself is silent');
   assert.equal(latestOf(sink.posted[0]), '1.0.1', 'the announcement carries the still-good prior snapshot, not the failed one');
+  assert.equal(outcome.status, 'failed');
+  assert.equal(outcome.error.code, 'SyntaxError');
 });
 
 test('switching project never replays the previous project’s cached rows under the new label', async () => {
@@ -1396,11 +1398,36 @@ test('a manual reload begins revalidation before its disk read even starts — a
   );
 });
 
-test('a timer-triggered background refresh — no watcher event, no project reload at all — still revokes eligibility for its whole duration', async () => {
-  // Mirrors DashboardPanel's onBackgroundTick(): calls refreshInBackground()
-  // directly, with nothing else having called beginRevalidation() first.
-  // run()'s own internal beginRevalidation() call must be the thing that
-  // revokes eligibility here — there is no other trigger to rely on.
+test('updateProjectSnapshot reports a watcher generation that advanced during the final disk read', async () => {
+  const controller = makeController(staticClient('1.0.1'), { ttlMinutesProvider: () => 30 });
+  await controller.handleReady(recordingSink());
+
+  const generationAtReadStart = controller.beginRevalidation();
+  controller.beginRevalidation(); // watcher event B lands while the final local read is in flight
+  const result = controller.updateProjectSnapshot(
+    {
+      root: ROOT,
+      manifestText: MANIFEST,
+      lockfileText: LOCKFILE,
+      lockfilePath: null,
+      registry: REGISTRY,
+      projectInfo: PROJECT_INFO,
+      canChangeProject: false,
+      cacheKey: 'test-project',
+    },
+    generationAtReadStart
+  );
+
+  assert.deepEqual(result, { structurallyCurrent: false });
+  assert.deepEqual(controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }), {
+    ok: false,
+    reason: 'revalidating',
+  });
+});
+
+test('a timer-triggered background refresh preserves eligibility and ready UI for its whole duration', async () => {
+  // DashboardPanel's timer opts into the explicit time-only reason. Unlike a
+  // watcher/project reload, cache age says nothing about local source state.
   const client = generationalClient({ versions: ['1.0.1'], delayMs: { 0: 30 } });
   const controller = makeController(client, { ttlMinutesProvider: () => 30 });
   await controller.handleReady(recordingSink());
@@ -1409,29 +1436,144 @@ test('a timer-triggered background refresh — no watcher event, no project relo
     'revalidating'
   );
 
-  const tick = controller.refreshInBackground(recordingSink());
-  assert.deepEqual(
-    controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }),
-    { ok: false, reason: 'revalidating' },
-    'rejected while the background refresh itself is still in flight'
-  );
-
-  await tick;
+  const sink = recordingSink();
+  const tick = controller.refreshInBackground(sink, 'time');
   assert.notEqual(
     controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }).reason,
     'revalidating',
-    'restored once the background refresh completes cleanly'
+    'cache age alone does not revoke mutation eligibility'
+  );
+  assert.deepEqual(sink.statuses, [], 'time-only refresh does not replace ready UI with structural stale UI');
+
+  assert.equal((await tick).status, 'succeeded');
+  assert.notEqual(
+    controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }).reason,
+    'revalidating',
+    'still eligible once the background refresh completes cleanly'
   );
 });
 
-test('a second, later background-only revalidation (no project reload in between either) also restores eligibility — the watermark keeps up across repeated timer ticks', async () => {
-  // Every run() call advances the shared revalidation generation via its own
-  // beginRevalidation() call, including a plain background tick with no
-  // updateProjectSnapshot anywhere nearby. If granting eligibility didn't
-  // also re-confirm `optionsGeneration` forward (not just `eligibleGeneration`),
-  // this would wedge permanently after the *first* successful scan: the
-  // second tick's own generation would always be one step ahead of a
-  // watermark stuck at whatever it was after the first grant.
+test('a source mutation supersedes an in-flight time-only refresh and still hard-invalidates actions', async () => {
+  const client = generationalClient({ versions: ['1.0.1'], delayMs: { 1: 30 } });
+  const controller = makeController(client, { ttlMinutesProvider: () => 30 });
+  await controller.handleReady(recordingSink());
+
+  const sink = recordingSink();
+  const tick = controller.refreshInBackground(sink, 'time');
+  controller.beginRevalidation();
+
+  assert.deepEqual(
+    controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }),
+    { ok: false, reason: 'revalidating' },
+    'the watcher signal remains an immediate hard invalidation'
+  );
+
+  assert.equal((await tick).status, 'superseded');
+  assert.deepEqual(sink.statuses, [], 'the pre-mutation time-only result is discarded instead of overwriting stale UI');
+  assert.deepEqual(controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }), {
+    ok: false,
+    reason: 'revalidating',
+  });
+});
+
+test('a requested time-only refresh falls back to structural mode when a watcher already invalidated the source', async () => {
+  const controller = makeController(staticClient('1.0.1'), { ttlMinutesProvider: () => 30 });
+  await controller.handleReady(recordingSink());
+  controller.beginRevalidation();
+
+  const sink = recordingSink();
+  const refresh = controller.refreshInBackground(sink, 'time');
+
+  assert.deepEqual(sink.statuses, ['stale'], 'a pending structural change cannot be hidden by a timer refresh');
+  assert.deepEqual(controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }), {
+    ok: false,
+    reason: 'revalidating',
+  });
+
+  await refresh;
+  assert.deepEqual(controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }), {
+    ok: false,
+    reason: 'revalidating',
+  });
+});
+
+test('post-mutation enrichment avoids stale UI only after a fresh local snapshot and grants eligibility on success', async () => {
+  const controller = makeController(staticClient('1.0.1'), { ttlMinutesProvider: () => 30 });
+  await controller.handleReady(recordingSink());
+  updateProjectSnapshot(controller, {
+    root: ROOT,
+    manifestText: MANIFEST,
+    lockfileText: LOCKFILE,
+    lockfilePath: null,
+    registry: REGISTRY,
+    projectInfo: PROJECT_INFO,
+    canChangeProject: false,
+    cacheKey: 'test-project',
+  });
+  assert.deepEqual(controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }), {
+    ok: false,
+    reason: 'revalidating',
+  });
+
+  const sink = recordingSink();
+  const enrichment = controller.refreshInBackground(sink, 'local-mutation');
+  assert.deepEqual(sink.statuses, [], 'fresh local state does not flash a whole-dashboard stale state');
+
+  assert.equal((await enrichment).status, 'succeeded');
+  assert.equal(sink.statuses.includes('stale'), false);
+  assert.notEqual(
+    controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }).reason,
+    'revalidating',
+    'the successful enrichment scan grants eligibility for the fresh local snapshot'
+  );
+});
+
+test('disposing a controller gives an in-flight targeted enrichment a cancelled terminal outcome', async () => {
+  const client = generationalClient({ versions: ['1.0.1', '1.0.2'], delayMs: { 1: 30 } });
+  const controller = makeController(client, { ttlMinutesProvider: () => 30 });
+  await controller.handleReady(recordingSink());
+  updateProjectSnapshot(controller, {
+    root: ROOT,
+    manifestText: MANIFEST,
+    lockfileText: LOCKFILE,
+    lockfilePath: null,
+    registry: REGISTRY,
+    projectInfo: PROJECT_INFO,
+    canChangeProject: false,
+    cacheKey: 'test-project',
+  });
+
+  const enrichment = controller.refreshInBackground(recordingSink(), 'local-mutation');
+  controller.dispose();
+  assert.equal((await enrichment).status, 'cancelled');
+});
+
+test('a watcher generation supersedes an in-flight targeted enrichment before it can publish current data', async () => {
+  const client = generationalClient({ versions: ['1.0.1', '1.0.2'], delayMs: { 1: 30 } });
+  const controller = makeController(client, { ttlMinutesProvider: () => 30 });
+  await controller.handleReady(recordingSink());
+  updateProjectSnapshot(controller, {
+    root: ROOT,
+    manifestText: MANIFEST,
+    lockfileText: LOCKFILE,
+    lockfilePath: null,
+    registry: REGISTRY,
+    projectInfo: PROJECT_INFO,
+    canChangeProject: false,
+    cacheKey: 'test-project',
+  });
+
+  const sink = recordingSink();
+  const enrichment = controller.refreshInBackground(sink, 'local-mutation');
+  controller.beginRevalidation();
+
+  assert.equal((await enrichment).status, 'superseded');
+  assert.deepEqual(sink.statuses, [], 'the raced targeted result is never published as current');
+});
+
+test('repeated time-only refreshes preserve eligibility without advancing the structural watermark', async () => {
+  // A timer tick has no local mutation evidence, so repeated cache-age
+  // refreshes must leave the structural generation untouched.
   const controller = makeController(staticClient('1.0.1'), { ttlMinutesProvider: () => 30 });
   await controller.handleReady(recordingSink());
   assert.notEqual(
@@ -1440,14 +1582,14 @@ test('a second, later background-only revalidation (no project reload in between
     'sanity check: eligible after the first scan'
   );
 
-  await controller.refreshInBackground(recordingSink());
+  await controller.refreshInBackground(recordingSink(), 'time');
   assert.notEqual(
     controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }).reason,
     'revalidating',
     'still eligible after a second, independent background-only revalidation'
   );
 
-  await controller.refreshInBackground(recordingSink());
+  await controller.refreshInBackground(recordingSink(), 'time');
   assert.notEqual(
     controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }).reason,
     'revalidating',
@@ -1664,7 +1806,7 @@ test('fresh, fingerprint-matching persisted data may authorize an Upgrade purely
   );
 });
 
-test('TTL-stale persisted data — even with a matching fingerprint — never grants eligibility merely from hydration', async () => {
+test('TTL-stale persisted data with a matching fingerprint remains eligible during age-only revalidation', async () => {
   const projectCacheStore = new PersistentProjectCacheStore(fakeKeyValueStore());
   const oldTimestamp = new Date(Date.now() - 60 * 60_000).toISOString();
   projectCacheStore.set('cache-key-stale-ineligible', {
@@ -1683,15 +1825,15 @@ test('TTL-stale persisted data — even with a matching fingerprint — never gr
   const sink = recordingSink();
   const readyPromise = controller.handleReady(sink);
 
-  // Checked synchronously, right after the call returns: the stale replay
+  // Checked synchronously, right after the call returns: the ready replay
   // has already posted (handleReady's synchronous prefix), and the
   // follow-up rescan it triggers is in flight but hasn't resolved yet — no
   // `await` has handed control back to this test in between.
-  assert.deepEqual(sink.statuses, ['stale'], 'sanity check: the stale replay already posted');
-  assert.deepEqual(
-    controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }),
-    { ok: false, reason: 'revalidating' },
-    'stale persisted data must be ineligible before the rescan it triggers even completes'
+  assert.deepEqual(sink.statuses, ['ready'], 'the structurally-valid replay stays ready while its age refresh runs');
+  assert.notEqual(
+    controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }).reason,
+    'revalidating',
+    'time age alone must not invalidate a fingerprint-matching snapshot'
   );
 
   await readyPromise;

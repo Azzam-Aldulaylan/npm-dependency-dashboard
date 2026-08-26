@@ -3305,6 +3305,10 @@ button {
   gap: 0.4rem;
 }
 
+.upgrade-tab .upgrade-compatibility__summary {
+  margin-bottom: 0.8rem;
+}
+
 .upgrade-tab .hygiene-strip__item {
   padding: 0.42rem 0.5rem;
 }
@@ -3597,6 +3601,38 @@ button {
   font-size: 0.85rem;
 }
 
+.upgrade-preview__files {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin: 0.55rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+  line-height: 1.45;
+}
+
+.upgrade-preview__files svg {
+  flex-shrink: 0;
+  margin-top: 0.15em;
+}
+
+.upgrade-preview__files code,
+.upgrade-plan__requested code,
+.security-remaining__meta code,
+.security-remaining__advisory-id {
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.15));
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.95em;
+}
+
+.upgrade-plan__requested {
+  margin: 0 0 0.45rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.82em;
+}
+
 /*
  * These three reuse markup sized for a roomier context (OutcomeStatus's
  * bulk-modal headline, SmartPlanSection's own banner) — scoped down here so
@@ -3658,6 +3694,141 @@ button {
   margin: 0.15rem 0 0;
   color: var(--vscode-descriptionForeground);
   font-size: 0.78em;
+}
+
+.security-remaining {
+  margin-top: 0.65rem;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.security-remaining__summary {
+  padding-top: 0.6rem;
+  color: var(--accent-total);
+  font-size: 0.82em;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.security-remaining__summary:hover {
+  text-decoration: underline;
+}
+
+.security-remaining__summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.security-remaining__content,
+.security-remaining__group,
+.security-remaining__list {
+  display: flex;
+  flex-direction: column;
+}
+
+.security-remaining__content {
+  gap: 0.7rem;
+  margin-top: 0.65rem;
+}
+
+.security-remaining__group {
+  gap: 0.25rem;
+}
+
+.security-remaining__group h4,
+.security-remaining__group p {
+  margin: 0;
+}
+
+.security-remaining__group h4 {
+  font-size: 0.8em;
+}
+
+.security-remaining__group > p {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.76em;
+  line-height: 1.4;
+}
+
+.security-remaining__list {
+  gap: 0.45rem;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.security-remaining__item {
+  min-width: 0;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.security-remaining__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  min-width: 0;
+}
+
+.security-remaining__head strong {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.84em;
+}
+
+.security-remaining__advisory-id {
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+
+.security-remaining__meta {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.3rem 0.65rem;
+  margin: 0.55rem 0 0;
+  font-size: 0.76em;
+}
+
+.security-remaining__meta dt {
+  color: var(--vscode-descriptionForeground);
+}
+
+.security-remaining__meta dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.security-remaining__meta code {
+  white-space: normal;
+}
+
+.upgrade-enrichment-warning {
+  display: grid;
+  justify-items: start;
+  gap: 0.65rem;
+  margin-top: 0.8rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--vscode-inputValidation-warningBorder);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--vscode-inputValidation-warningBackground) 58%, transparent);
+  color: var(--vscode-inputValidation-warningForeground);
+}
+
+.upgrade-enrichment-warning p {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.upgrade-enrichment-warning svg {
+  width: 1rem;
+  min-width: 1rem;
+  margin-top: 0.1rem;
 }
 
 .upgrade-files-list__item {
@@ -4358,6 +4529,33 @@ button {
   font-size: 0.85em;
 }
 
+.smart-plan-banner__hint--lead {
+  margin: 0 0 0.55rem;
+}
+
+.coordinated-plan__reasons {
+  margin-top: 0.65rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid color-mix(in srgb, var(--accent-updates) 35%, transparent);
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+}
+
+.coordinated-plan__reasons-label {
+  margin: 0 0 0.25rem;
+  color: var(--vscode-foreground);
+  font-weight: 600;
+}
+
+.coordinated-plan__reasons ul {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.coordinated-plan__reasons li + li {
+  margin-top: 0.2rem;
+}
+
 .smart-plan__changes {
   display: flex;
   flex-direction: column;
@@ -4624,49 +4822,6 @@ button {
   color: var(--vscode-inputValidation-warningForeground, var(--vscode-editorWarning-foreground));
 }
 
-.upgrade-target-picker__manual-toggle {
-  justify-self: start;
-  min-height: 1.75rem;
-  padding-inline: 0;
-}
-
-.upgrade-target-picker__manual {
-  display: grid;
-  gap: 0.35rem;
-  padding-top: 0.25rem;
-  border-top: 1px solid var(--vscode-panel-border);
-}
-
-.upgrade-target-picker__manual-label {
-  color: var(--vscode-foreground);
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-
-.upgrade-target-picker__manual-row {
-  display: flex;
-  align-items: stretch;
-  gap: 0.5rem;
-}
-
-.upgrade-target-picker__manual-input {
-  min-width: 0;
-  flex: 1 1 auto;
-  border: 1px solid var(--vscode-input-border, transparent);
-  border-radius: 2px;
-  padding: 0.45rem 0.55rem;
-  background: var(--vscode-input-background);
-  color: var(--vscode-input-foreground);
-  font-family: var(--vscode-editor-font-family);
-  font-size: 0.8125rem;
-}
-
-.upgrade-target-picker__manual-input:focus {
-  border-color: var(--vscode-focusBorder);
-  outline: 1px solid var(--vscode-focusBorder);
-  outline-offset: -1px;
-}
-
 /* -------------------------------------- Manage dependency responsive pass */
 
 /* Keep ordinary content inside the workspace fluid. Horizontal scrolling is
@@ -4899,14 +5054,6 @@ button {
 /* Extremely narrow editor groups need label/value pairs and secondary
    controls to become vertical; the information order remains unchanged. */
 @media (max-width: 26rem) {
-  .upgrade-target-picker__manual-row {
-    flex-direction: column;
-  }
-
-  .upgrade-target-picker__manual-row .button {
-    width: 100%;
-  }
-
   .manage-glance__row {
     flex-direction: column;
     align-items: flex-start;

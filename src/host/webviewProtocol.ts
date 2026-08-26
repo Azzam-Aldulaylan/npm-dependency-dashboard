@@ -201,8 +201,10 @@ export interface UpgradeAnalysisCompatibility {
 
 export interface UpgradeAnalysisPresentation {
   analysisId: string;
-  /** ISO timestamp this analysis was produced — the basis for the Upgrade review panel's soft (time-based) staleness indicator. Structural staleness is signalled separately, out-of-band, by `upgrade-analysis-stale`. */
+  /** ISO timestamp this analysis was produced — the basis for the Upgrade review panel's one-hour soft age hint. Structural staleness is signalled separately by `upgrade-analysis-stale`. */
   analyzedAt: string;
+  /** Exact host retention deadline. At/after this instant execution is no longer available and the review must be re-analyzed. */
+  expiresAt: string;
   package: string;
   currentVersion: string;
   targetVersion: string;
@@ -228,6 +230,33 @@ export interface UpgradeTargetOptions {
   recommendedVersion: string | null;
   options: UpgradeTargetOption[];
   truncated: boolean;
+}
+
+export interface UpgradeResultChange {
+  packageName: string;
+  previousVersion: string;
+  requestedVersion: string;
+  currentVersion: string | null;
+  declaredRange: string | null;
+  classification: DependencyClassification | null;
+}
+
+/**
+ * Evidence-backed result of a completed upgrade transaction. `install`
+ * reports the VS Code task process result; `application` is a separate fresh
+ * package.json/lockfile confirmation; `verification` only reports configured
+ * checks that actually ran. Derived registry/security data is intentionally
+ * absent and must be treated as refreshing until a new dashboard snapshot.
+ */
+export interface UpgradeResultPresentation {
+  package: string;
+  /** Host-minted correlation id for the exact targeted enrichment lifecycle following this result. */
+  refreshId: string;
+  install: 'succeeded' | 'failed';
+  application: 'applied' | 'unconfirmed' | 'rolled-back';
+  verification: 'passed' | 'not-configured' | 'failed' | 'not-run';
+  changes: UpgradeResultChange[];
+  refreshingDerivedData: boolean;
 }
 
 /**
@@ -370,6 +399,15 @@ export type HostToWebviewMessage =
   | { status: 'upgrade-targets-loading'; package: string; requestId: string }
   | { status: 'upgrade-targets'; package: string; requestId: string; targets: UpgradeTargetOptions }
   | { status: 'upgrade-targets-error'; package: string; requestId: string; error: ProtocolError }
+  | { status: 'upgrade-result'; result: UpgradeResultPresentation }
+  /** Terminal state for only the targeted enrichment identified by `refreshId`; generic dashboard messages never complete it. */
+  | {
+      status: 'upgrade-enrichment-result';
+      refreshId: string;
+      package: string;
+      outcome: 'succeeded' | 'failed' | 'cancelled' | 'superseded';
+      error?: ProtocolError;
+    }
   /**
    * A specific package's upgrade could not run — rejected by host-side
    * validation, cancelled at the confirmation step, or the task itself
@@ -498,6 +536,8 @@ export type WebviewToHostMessage =
    */
   | { type: 'cancel-upgrade'; analysisId: string | null }
   | { type: 'use-smart-plan'; analysisId: string }
+  /** Retries only the most recent matching failed/cancelled targeted enrichment; the id is host-issued by `upgrade-result`. */
+  | { type: 'retry-upgrade-enrichment'; refreshId: string }
   /** Same analysisId-lookup discipline as confirm-upgrade/cancel-upgrade, targeting a stored removal analysis instead. */
   | { type: 'confirm-remove'; analysisId: string }
   | { type: 'cancel-remove'; analysisId: string | null }
@@ -686,6 +726,9 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   }
   if (type === 'confirm-upgrade' || type === 'use-smart-plan') {
     return hasOnlyKeys(value, ['type', 'analysisId']) && isNonEmptyString(value['analysisId']);
+  }
+  if (type === 'retry-upgrade-enrichment') {
+    return hasOnlyKeys(value, ['type', 'refreshId']) && isNonEmptyString(value['refreshId']);
   }
   if (type === 'cancel-upgrade') {
     const analysisId = value['analysisId'];
@@ -960,6 +1003,7 @@ function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysis
     !hasOnlyKeys(value, [
       'analysisId',
       'analyzedAt',
+      'expiresAt',
       'package',
       'currentVersion',
       'targetVersion',
@@ -991,9 +1035,16 @@ function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysis
   if (!isUpgradeAnalysisFilesValue(value['files'])) return false;
 
   const firstChange = changes[0];
+  if (typeof value['analyzedAt'] !== 'string' || typeof value['expiresAt'] !== 'string') return false;
+  const analyzedMs = Date.parse(value['analyzedAt']);
+  const expiresMs = Date.parse(value['expiresAt']);
   return (
     typeof value['analysisId'] === 'string' &&
-    typeof value['analyzedAt'] === 'string' &&
+    Number.isFinite(analyzedMs) &&
+    Number.isFinite(expiresMs) &&
+    new Date(analyzedMs).toISOString() === value['analyzedAt'] &&
+    new Date(expiresMs).toISOString() === value['expiresAt'] &&
+    expiresMs > analyzedMs &&
     typeof value['package'] === 'string' &&
     typeof value['currentVersion'] === 'string' &&
     typeof value['targetVersion'] === 'string' &&
@@ -1261,6 +1312,45 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
       isNonEmptyString(value['package']) &&
       isNonEmptyString(value['requestId']) &&
       isProtocolError(value['error'])
+    );
+  }
+  if (status === 'upgrade-result') {
+    const result = value['result'];
+    if (!isRecord(result) || !hasOnlyKeys(result, ['package', 'refreshId', 'install', 'application', 'verification', 'changes', 'refreshingDerivedData'])) {
+      return false;
+    }
+    const changes = result['changes'];
+    return (
+      isNonEmptyString(result['package']) &&
+      isNonEmptyString(result['refreshId']) &&
+      (result['install'] === 'succeeded' || result['install'] === 'failed') &&
+      (result['application'] === 'applied' || result['application'] === 'unconfirmed' || result['application'] === 'rolled-back') &&
+      (result['verification'] === 'passed' || result['verification'] === 'not-configured' || result['verification'] === 'failed' || result['verification'] === 'not-run') &&
+      Array.isArray(changes) &&
+      changes.length > 0 &&
+      new Set(changes.map((change) => isRecord(change) ? change['packageName'] : undefined)).size === changes.length &&
+      changes.every((change) =>
+        isRecord(change) &&
+        hasOnlyKeys(change, ['packageName', 'previousVersion', 'requestedVersion', 'currentVersion', 'declaredRange', 'classification']) &&
+        isNonEmptyString(change['packageName']) &&
+        isNonEmptyString(change['previousVersion']) &&
+        isNonEmptyString(change['requestedVersion']) &&
+        (change['currentVersion'] === null || isNonEmptyString(change['currentVersion'])) &&
+        (change['declaredRange'] === null || typeof change['declaredRange'] === 'string') &&
+        (change['classification'] === null || change['classification'] === 'prod' || change['classification'] === 'dev' || change['classification'] === 'optional')
+      ) &&
+      typeof result['refreshingDerivedData'] === 'boolean'
+    );
+  }
+  if (status === 'upgrade-enrichment-result') {
+    const outcome = value['outcome'];
+    const error = value['error'];
+    return (
+      hasOnlyKeys(value, ['status', 'refreshId', 'package', 'outcome', 'error']) &&
+      isNonEmptyString(value['refreshId']) &&
+      isNonEmptyString(value['package']) &&
+      (outcome === 'succeeded' || outcome === 'failed' || outcome === 'cancelled' || outcome === 'superseded') &&
+      (outcome === 'failed' ? isProtocolError(error) : error === undefined)
     );
   }
   if (status === 'upgrade-error') {

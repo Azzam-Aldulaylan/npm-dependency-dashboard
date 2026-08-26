@@ -48,6 +48,7 @@ import { fetchPackument } from '../core/registry/versions.js';
 import type { EtagStore } from '../core/registry/versions.js';
 import type { PerformanceRecorder } from '../core/performance/measurement.js';
 import { createPerformanceSession } from '../core/performance/measurement.js';
+import { inspectAppliedUpgradeState } from '../core/upgrade/appliedState.js';
 import { planSmartUpgrade } from '../core/upgrade/smartPlan.js';
 import { loadUpgradeTargets, publishedUpgradeTargetsForRequest } from '../core/upgrade/targets.js';
 import { buildStagedManifest, buildStagedManifestForRemoval } from '../core/upgrade/stagedManifest.js';
@@ -70,6 +71,7 @@ import { loadProject } from './projectResolution.js';
 import { IsolatedResolverVerifier } from './resolverVerifier.js';
 import { resolveAnalysisForExecution } from './upgradeAnalysisLookup.js';
 import type { AnalysisLookupRejection } from './upgradeAnalysisLookup.js';
+import { UPGRADE_ANALYSIS_RETENTION_MS } from './upgradeFreshness.js';
 import {
   buildUpgradeAnalysisChanges,
   buildUpgradeAnalysisFiles,
@@ -77,7 +79,11 @@ import {
   buildUpgradeAnalysisVerification,
 } from './upgradeAnalysisPresentation.js';
 import { buildRemoveAnalysisPresentation } from './removeAnalysisPresentation.js';
-import { describeRemoveTransactionOutcome, describeUpgradeTransactionOutcome } from './upgradeAssistantOutcome.js';
+import {
+  classifyUpgradeApplication,
+  describeRemoveTransactionOutcome,
+  describeUpgradeTransactionOutcome,
+} from './upgradeAssistantOutcome.js';
 import { UpgradeExecutionSession } from './upgradeRunner.js';
 import { runUpgradeTransaction } from './upgradeTransaction.js';
 import { selectVerificationScripts } from './verificationPolicy.js';
@@ -87,6 +93,7 @@ import type {
   RemediationOutcomeStatus,
   SecurityOutcome,
   UpgradeAnalysisSmartPlan,
+  UpgradeResultPresentation,
 } from './webviewProtocol.js';
 
 export interface UpgradeChangeRequest {
@@ -141,6 +148,16 @@ export interface UpgradeAssistantCoordinatorOptions {
   getSelectedProject(): DiscoveredProject | undefined;
   isDisposed(): boolean;
   reloadFinalState(): Promise<void>;
+  /** Reads and applies post-mutation package.json/lockfile state without waiting for registry/audit enrichment. */
+  readAndApplyMutationLocalState?(): Promise<
+    { project: ResolvedProject; structurallyCurrent: boolean } | undefined
+  >;
+  /** Starts the expensive derived-data scan after local state has already been published. */
+  refreshMutationEnrichmentInBackground?(
+    refreshId: string,
+    packageName: string,
+    structurallyCurrent: boolean
+  ): void;
   flushDeferredChanges(): Promise<void>;
   /**
    * Fires once the mutation lock is actually released after a transaction
@@ -160,8 +177,8 @@ export interface UpgradeAssistantCoordinatorOptions {
   getUpgradeConfiguration?: () => { ignoreScripts: boolean; verificationScripts: unknown[] };
 }
 
-/** How long an opened-but-abandoned analysis holds the panel's upgrade lock before a later analyze request reclaims it. The real invalidation is always the disk-snapshot recheck below, not this — see handleConfirmUpgrade/handleUseSmartPlan. */
-const ANALYSIS_TTL_MS = 10 * 60_000;
+/** Removal review retention is unchanged; Upgrade Review has its own longer, soft-stale-aware retention. */
+const REMOVAL_ANALYSIS_TTL_MS = 10 * 60_000;
 
 /** Production default for `UpgradeAssistantCoordinatorOptions.withCompatibilityProgress` — the exact `vscode.window.withProgress`/`AbortController` wiring `handleAnalyzeUpgradeRequests`'s compatibility preflight used inline before this seam existed. */
 async function defaultWithCompatibilityProgress<T>(title: string, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -818,6 +835,7 @@ export class UpgradeAssistantCoordinator {
 
       const analysisId = randomBytes(16).toString('hex');
       const analyzedAt = new Date().toISOString();
+      const expiresAt = Date.now() + UPGRADE_ANALYSIS_RETENTION_MS;
       this.analysis = {
         id: analysisId,
         requests: [...messages],
@@ -829,7 +847,7 @@ export class UpgradeAssistantCoordinator {
         smartPlanProposal,
         ignoreScripts: upgradeConfiguration.ignoreScripts,
         verificationScripts,
-        expiresAt: Date.now() + ANALYSIS_TTL_MS,
+        expiresAt,
       };
 
       this.options.sink.postMessage({
@@ -838,6 +856,7 @@ export class UpgradeAssistantCoordinator {
         analysis: buildUpgradeAnalysisPresentation({
           analysisId,
           analyzedAt,
+          expiresAt: new Date(expiresAt).toISOString(),
           packageName: eligibility.packageName,
           currentVersion: eligibility.currentVersion,
           targetVersion: eligibility.target,
@@ -1071,7 +1090,7 @@ export class UpgradeAssistantCoordinator {
         snapshot: preflightProject,
         ignoreScripts,
         verificationScripts,
-        expiresAt: Date.now() + ANALYSIS_TTL_MS,
+        expiresAt: Date.now() + REMOVAL_ANALYSIS_TTL_MS,
       };
 
       this.options.sink.postMessage({
@@ -1578,17 +1597,94 @@ export class UpgradeAssistantCoordinator {
             }),
       });
 
-      // Reload the kept/restored/partial state while the coordinator still
-      // owns the project-wide mutation lock.
-      if (!this.options.isDisposed()) await this.options.reloadFinalState();
+      let finalProject: ResolvedProject | undefined;
+      let structurallyCurrent = false;
+      let appliedState: ReturnType<typeof inspectAppliedUpgradeState> = {
+        confirmed: false,
+        changes: proposal.changes.map((change) => ({
+          packageName: change.packageName,
+          previousVersion: change.currentVersion,
+          requestedVersion: change.targetVersion,
+          currentVersion: null,
+          declaredRange: null,
+          classification: null,
+        })),
+      };
+      try {
+        if (this.options.readAndApplyMutationLocalState === undefined) {
+          finalProject = await this.projectLoader(selected);
+        } else {
+          const localRead = await this.options.readAndApplyMutationLocalState();
+          finalProject = localRead?.project;
+          structurallyCurrent = localRead?.structurallyCurrent === true;
+        }
+        if (finalProject !== undefined) appliedState = inspectAppliedUpgradeState(finalProject, proposal.changes);
+      } catch {
+        // A successful task is not enough to claim the requested state was
+        // applied. Keep the explicit unconfirmed result and let the normal
+        // enrichment reload recover/display whatever can still be read.
+      }
+
+      const usedTargetedRefresh =
+        finalProject !== undefined &&
+        this.options.readAndApplyMutationLocalState !== undefined &&
+        this.options.refreshMutationEnrichmentInBackground !== undefined;
+      const refreshId = randomBytes(16).toString('hex');
+      if (this.options.isDisposed()) return;
+
+      const application: UpgradeResultPresentation['application'] = classifyUpgradeApplication(
+        transaction.completion,
+        structurallyCurrent,
+        appliedState.confirmed
+      );
+      const verification: UpgradeResultPresentation['verification'] =
+        transaction.verification.status === 'passed'
+          ? 'passed'
+          : transaction.verification.status === 'failed'
+            ? 'failed'
+            : transaction.verification.status === 'not-run' && transaction.verification.reason === 'not-configured'
+              ? 'not-configured'
+              : 'not-run';
+
+      if (transaction.install.status === 'succeeded' || application === 'rolled-back') {
+        this.options.sink.postMessage({
+          status: 'upgrade-result',
+          result: {
+            package: stored.eligibility.packageName,
+            refreshId,
+            install: transaction.install.status === 'succeeded' ? 'succeeded' : 'failed',
+            application,
+            verification,
+            changes: appliedState.changes,
+            refreshingDerivedData: usedTargetedRefresh,
+          },
+        });
+      }
+
+      if (usedTargetedRefresh) {
+        this.options.refreshMutationEnrichmentInBackground?.(
+          refreshId,
+          stored.eligibility.packageName,
+          structurallyCurrent
+        );
+      } else if (!this.options.isDisposed()) {
+        // Compatibility fallback for embedders/tests that have not supplied
+        // the targeted-refresh hooks. The result above is still surfaced
+        // before this potentially expensive scan.
+        await this.options.reloadFinalState();
+      }
       if (this.options.isDisposed()) return;
 
       const presentation = describeUpgradeTransactionOutcome(
         stored.eligibility.packageName,
         source.packageManager,
-        transaction
+        transaction,
+        structurallyCurrent && appliedState.confirmed
       );
-      if (presentation.kind === 'verified') {
+      if (
+        presentation.kind === 'verified' ||
+        (presentation.kind === 'unverified' && transaction.verification.status === 'not-run')
+      ) {
         void vscode.window.showInformationMessage(presentation.message);
       } else if (presentation.kind === 'error') {
         this.options.sink.postMessage({

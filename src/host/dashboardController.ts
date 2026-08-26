@@ -50,6 +50,19 @@ export interface MessageSink {
   postMessage(message: HostToWebviewMessage): void;
 }
 
+export type BackgroundRefreshReason = 'structural' | 'time' | 'local-mutation';
+
+export interface ProjectSnapshotUpdateResult {
+  /** True only when no watcher/reload generation advanced during the disk read that produced this snapshot. */
+  structurallyCurrent: boolean;
+}
+
+export type BackgroundRefreshOutcome =
+  | { status: 'succeeded' }
+  | { status: 'failed'; error: ProtocolError }
+  | { status: 'cancelled' }
+  | { status: 'superseded' };
+
 export interface DashboardControllerOptions {
   /** Absolute path to the directory holding package.json. */
   root: string;
@@ -146,6 +159,7 @@ export class DashboardController {
   private lastResult: ScanSnapshot | undefined;
   private lastGeneratedAt: string | undefined;
   private inFlight: AbortController | undefined;
+  private disposed = false;
   /**
    * Derived from `options.manifestText` — recomputed by `updateProjectSnapshot`
    * whenever the snapshot changes, so it always reflects the manifest the most
@@ -165,27 +179,20 @@ export class DashboardController {
    * `beginRevalidation()`, the single explicit entry point for "eligibility
    * must not be trusted from this point forward until a matching
    * revalidation proves otherwise": a watcher event (called by the panel
-   * *before* its debounce, not after), the start of every reload attempt
-   * (`reloadAndScan`, each drained `reloadAfterFileChange` iteration,
-   * `run()` itself — covering manual reloads, file-change reloads, timer
-   * refreshes, and stale-`handleReady` revalidation alike), and a project
-   * snapshot replacement (`updateProjectSnapshot`, via its own
-   * `beginRevalidation()` call). This is the Upgrade-eligibility security
-   * boundary's other half — see `isEligible`.
+   * *before* its debounce, not after), a manual or structural reload, and a
+   * project snapshot replacement. Timer/cache-age refreshes deliberately do
+   * not advance this generation because age is not evidence of source
+   * mutation. This is the Upgrade-eligibility security boundary's other
+   * half — see `isEligible`.
    */
   private revalidationGeneration = 0;
   /**
    * The `revalidationGeneration` value as of the last time `this.options`
    * were confirmed to accurately describe reality — set at construction, by
    * `updateProjectSnapshot` (an actual fresh disk read), and re-confirmed
-   * forward by `run()` itself every time it grants eligibility (a granted
-   * scan proves `this.options` were still accurate as of that generation,
-   * chaining the watermark forward without needing another real disk read —
-   * see `run()`'s grant site for why this chaining is required:
-   * `revalidationGeneration` advances on *every* `run()` call, including a
-   * plain background-timer tick with no project reload at all, so without
-   * re-confirming here, `optionsGeneration` would permanently fall behind
-   * after the very first successful scan). `handleReady`'s fresh-hydration
+   * forward by a structurally-invalidating `run()` every time it grants
+   * eligibility (a granted scan proves `this.options` were still accurate
+   * as of that generation). `handleReady`'s fingerprint-matching hydration
    * branch grants eligibility too, but never needs to touch this field
    * itself — its own precondition (`optionsGeneration ===
    * revalidationGeneration`) is already required to hold before it grants
@@ -295,7 +302,7 @@ export class DashboardController {
    *   attributed to *this* update instead of the change it actually
    *   described.
    */
-  updateProjectSnapshot(snapshot: ProjectSnapshot, generationAtReadStart: number): void {
+  updateProjectSnapshot(snapshot: ProjectSnapshot, generationAtReadStart: number): ProjectSnapshotUpdateResult {
     const optionsAreStillConfirmedCurrent = generationAtReadStart === this.revalidationGeneration;
     this.options = { ...this.options, ...snapshot };
     this.declaredDependencies = DashboardController.parseDeclaredDependencies(snapshot.manifestText);
@@ -312,6 +319,7 @@ export class DashboardController {
     // optionsGeneration) — `snapshot` is applied for display, but
     // optionsGeneration is deliberately left where it was, so a subsequent
     // run() cannot mistake this update for "fully confirmed current."
+    return { structurallyCurrent: optionsAreStillConfirmedCurrent };
   }
 
   /**
@@ -329,10 +337,8 @@ export class DashboardController {
    * (before its own debounce even runs — the debounce window is exactly the
    * gap where the file has already changed on disk but `lastResult` still
    * reflects the old content), the start of every reload attempt
-   * (`reloadAndScan`, each drained `reloadAfterFileChange` iteration, and
-   * `run()` itself internally — covering manual reloads, file-change
-   * reloads, timer-triggered background refreshes, and stale-`handleReady`
-   * revalidation alike), and `updateProjectSnapshot` (a project reload must
+   * (`reloadAndScan`, each drained `reloadAfterFileChange` iteration, and a
+   * structural `run()`), and `updateProjectSnapshot` (a project reload must
    * never grant eligibility — routing it through here guarantees that by
    * construction, since this method only ever revokes).
    *
@@ -351,14 +357,13 @@ export class DashboardController {
    * `beginRevalidation()`, from the *earliest* point a revalidation is known
    * to be starting — a watcher event, before its own debounce; the start of
    * a manual/post-upgrade reload, before its own disk read — not only once
-   * `run()` itself actually begins scanning. `run()` also calls this itself
-   * (covering paths, like a background-timer tick, with no earlier call
-   * site to have announced it already); calling it more than once for the
+   * `run()` itself actually begins scanning. A structural `run()` also calls
+   * this itself; calling it more than once for the
    * same revalidation is a harmless, idempotent duplicate — always the same
    * data, since nothing updates `lastResult` until a scan actually
    * completes.
    *
-   * This is what makes background revalidation (timer- or file-change-
+   * This is what makes structural background revalidation (file-change-
    * triggered, which otherwise posts nothing until it completes) visible in
    * the webview at all, so it can disable Upgrade buttons for the entire
    * duration — including the debounce window and the disk read, not just
@@ -384,12 +389,10 @@ export class DashboardController {
    * True only for data validated against the exact source state currently in
    * `this.options` — no watcher event, project reload, or reload attempt has
    * begun since `lastResult` was last confirmed to match it.
-   * `eligibleGeneration` is only ever set in two places, and both already
-   * apply the TTL gate at the moment eligibility is granted rather than
-   * here: `handleReady`'s hydration branch only sets it when
-   * `classifyFreshness` said `'fresh'` (a TTL-stale persisted entry is never
-   * granted eligibility to begin with — "fresh fingerprint-matching
-   * persisted data may be eligible, stale persisted data must not"), and
+   * `eligibleGeneration` is only ever set in two places. `handleReady` may
+   * set it for a complete fingerprint-matching persisted snapshot regardless
+   * of age, because TTL controls background enrichment rather than structural
+   * authority; and
    * `run()`'s success path only sets it when nothing called
    * `beginRevalidation()` again while the scan that just produced this exact
    * data was in flight — and both sites additionally require
@@ -407,7 +410,7 @@ export class DashboardController {
    * purposes), which would then make Upgrade permanently ineligible even
    * one millisecond after a scan that just completed cleanly. The TTL
    * decides whether to *trust a replay without revalidating*; it is not a
-   * ticking expiry on a scan that already ran moments ago.
+   * ticking expiry on structurally-valid data.
    */
   private isEligible(): boolean {
     return this.eligibleGeneration !== undefined && this.eligibleGeneration === this.revalidationGeneration;
@@ -418,9 +421,9 @@ export class DashboardController {
    * whatever the webview sent, trusted only as far as it matches `lastResult`
    * and `declaredDependencies` — both derived from the host's own last scan,
    * never from the webview — and only when `isEligible()` confirms that scan
-   * still describes the current source state. A stale replay, a hydrated-
-   * but-TTL-expired persisted entry, data mid-revalidation after a file
-   * change or project reload, or a revalidation that failed are all rejected
+   * still describes the current source state. A source-fingerprint mismatch,
+   * data mid-revalidation after a file change or project reload, or a
+   * structural revalidation that failed are all rejected
    * here regardless of what `lastResult` itself contains — this is the
    * actual gate; the webview disabling its own Upgrade buttons in the same
    * situations is a UX nicety, not the boundary.
@@ -580,8 +583,9 @@ export class DashboardController {
    * cold controller (new panel, or just switched to this project) may still
    * have a usable snapshot from a previous session. Then classify freshness
    * against the configured TTL: a fresh snapshot renders as `ready` and skips
-   * the network entirely; anything else (stale, or no timestamp to judge by)
-   * renders immediately as a head start while a real run follows underneath.
+   * the network entirely. A complete but age-expired snapshot also stays
+   * ready/eligible while a time-only revalidation runs; incomplete core data
+   * remains structurally gated until a complete run succeeds.
    */
   async handleReady(sink: MessageSink): Promise<void> {
     const cachePerformance = createPerformanceSession('Dependency Dashboard cache', this.performanceEnabled());
@@ -600,8 +604,8 @@ export class DashboardController {
     const freshness = classifyFreshness(this.lastGeneratedAt, this.options.ttlMinutesProvider(), this.now());
     endFreshness({ freshness });
     cachePerformance.finish({ hit: true, freshness });
-    if (freshness === 'fresh' && hasCompleteCoreData(cached)) {
-      // Fresh, fingerprint-matching data (hydrateFromPersistedCache already
+    if (hasCompleteCoreData(cached)) {
+      // Complete, fingerprint-matching data (hydrateFromPersistedCache already
       // deleted and refused to hydrate anything that didn't match) may
       // authorize an Upgrade — restore eligibility for it explicitly, since
       // a cold controller's `eligibleGeneration` starts undefined and
@@ -627,11 +631,16 @@ export class DashboardController {
           this.lastGeneratedAt
         )
       );
+      if (freshness !== 'fresh') {
+        // Age only affects network/cache freshness. The source fingerprint
+        // already matched locally-authoritative input, so keep the snapshot
+        // usable while its derived data is refreshed in the background.
+        await this.run(sink, 'time');
+      }
       return;
     }
 
-    // Not fresh (TTL-stale, no timestamp to judge by, or a fresh-but-core-
-    // incomplete snapshot) — `run()` itself
+    // Core-incomplete snapshot — `run()` itself
     // announces the stale replay (carrying `cached`) as its own first
     // action via `beginRevalidation`'s call site there, then continues with
     // a real scan; posting it again here would just be a redundant duplicate.
@@ -653,15 +662,21 @@ export class DashboardController {
   }
 
   /**
-   * S7 — background revalidation: file-watcher- or timer-triggered. Unlike
+   * S7 — background revalidation: file-watcher- or timer-triggered. Callers
+   * must explicitly pass `time` for cache-age-only refreshes or
+   * `local-mutation` after applying a confirmed post-transaction disk
+   * snapshot; the safe default is structural. Unlike
    * `handleRefresh`, it never clears `lastResult` or posts `loading` first —
    * the whole point is that the last good render stays on screen, unchanged,
    * until (and unless) a new result actually arrives. A failure here is
    * silently absorbed by `run()`'s own catch block (it only posts
    * `fatal-error` when there is nothing renderable at all).
    */
-  async refreshInBackground(sink: MessageSink): Promise<void> {
-    await this.run(sink);
+  async refreshInBackground(
+    sink: MessageSink,
+    reason: BackgroundRefreshReason = 'structural'
+  ): Promise<BackgroundRefreshOutcome> {
+    return this.run(sink, reason);
   }
 
   /**
@@ -678,18 +693,32 @@ export class DashboardController {
 
   /** Call from the panel's onDidDispose so an in-flight run stops with it. */
   dispose(): void {
+    this.disposed = true;
     this.inFlight?.abort();
     this.inFlight = undefined;
   }
 
-  private async run(sink: MessageSink): Promise<void> {
+  private async run(
+    sink: MessageSink,
+    reason: BackgroundRefreshReason = 'structural'
+  ): Promise<BackgroundRefreshOutcome> {
     const performance = createPerformanceSession('Dependency Dashboard scan', this.performanceEnabled());
-    // Every run — manual, background-timer-triggered, file-change-triggered,
-    // or a stale-handleReady follow-up alike — is itself a revalidation
-    // attempt: eligibility must not be trusted while it's in flight, however
-    // it was triggered. `generationBeforeThisRun` is captured *before* this
-    // run's own `beginRevalidation()` call — it's what lets completion tell
-    // apart "nothing else was pending when I started, my own bump is the
+    // Time-only refresh requires an already-eligible snapshot. A targeted
+    // local-mutation refresh starts one step earlier: updateProjectSnapshot
+    // has applied a fresh disk read and advanced optionsGeneration, but no
+    // scan has made the new rows eligible yet. Both fall back to the hard
+    // path if their respective structural precondition does not hold.
+    const effectiveReason: BackgroundRefreshReason =
+      reason === 'time' && !this.isEligible()
+        ? 'structural'
+        : reason === 'local-mutation' && this.optionsGeneration !== this.revalidationGeneration
+          ? 'structural'
+          : reason;
+    // Structural runs revoke authority; time-only runs preserve existing
+    // authority, while local-mutation waits to grant it on success.
+    // `generationBeforeThisRun` is captured
+    // before a structural run's own `beginRevalidation()` call — it lets
+    // completion tell apart "nothing else was pending when I started, my own bump is the
     // only thing that happened" from "something *else* had already called
     // beginRevalidation() and `this.options` never caught up to it before I
     // started scanning against them" (see the `optionsGeneration` check
@@ -699,19 +728,20 @@ export class DashboardController {
     // every single time, even for the very first scan a fresh controller
     // ever runs.
     //
-    // `generationAtStart` (the value *after* this run's own bump) is what
-    // completion compares `this.revalidationGeneration` against — captured
-    // now, before the network round trip, so completion can tell whether the
+    // `generationAtStart` is the post-bump structural generation, or the
+    // unchanged generation for a time-only run. Completion compares it with
+    // `this.revalidationGeneration`, so it can tell whether the
     // source changed *again* (a watcher event, a project reload, another
     // call to this same method) while this scan was still running. Not the
     // same thing `controller.signal.aborted` guards below: that only catches
     // an explicit newer `run()` call superseding this one; a bare
     // `beginRevalidation()` call (e.g. from a watcher event) does not itself
     // start a new run, and this scan's rows can still finish and be worth
-    // *showing* — they just must not be trusted to *authorize an Upgrade*
-    // against a source that has already moved on.
+    // *showing* in a structural run. A time-only result is discarded when
+    // the generation moves so it cannot overwrite a hard-stale signal.
     const generationBeforeThisRun = this.revalidationGeneration;
-    const generationAtStart = this.beginRevalidation();
+    const generationAtStart =
+      effectiveReason === 'structural' ? this.beginRevalidation() : this.revalidationGeneration;
 
     // A newer run supersedes an older one outright. Without this, two runs race
     // to post and the slower — older — one can land last and win.
@@ -726,7 +756,7 @@ export class DashboardController {
     // duplicate if an earlier call site (a watcher event, reloadAndScan's own
     // start) already announced this same revalidation — see
     // `announceRevalidating`'s own doc.
-    this.announceRevalidating(sink);
+    if (effectiveReason === 'structural') this.announceRevalidating(sink);
 
     const buildOptions: BuildPackageRowsOptions = {
       root: this.options.root,
@@ -757,7 +787,15 @@ export class DashboardController {
       // was already past the last boundary when the abort fired still resolves
       // normally. Superseded or disposed, its result — and any cache write —
       // is not wanted either way.
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        return { status: this.disposed ? 'cancelled' : 'superseded' };
+      }
+      // A watcher/project mutation that lands during an age-only refresh
+      // supersedes it. Do not let its pre-mutation result overwrite the
+      // structural stale signal or the authoritative reload that follows.
+      if (effectiveReason !== 'structural' && generationAtStart !== this.revalidationGeneration) {
+        return { status: 'superseded' };
+      }
 
       const generatedAt = new Date().toISOString();
       const snapshot = toScanSnapshot(result);
@@ -779,8 +817,8 @@ export class DashboardController {
       // always advances past whatever `optionsGeneration` says, even for a
       // perfectly ordinary first scan, so comparing against the post-bump
       // value would reject every run unconditionally) without `this.options`
-      // catching up to it yet (a background-timer tick racing an already-
-      // pending, not-yet-applied file-change reload), `this.options` — and
+      // catching up to it yet (a scan racing an already-pending,
+      // not-yet-applied file-change reload), `this.options` — and
       // therefore this whole scan — was stale from the moment it began,
       // regardless of what happened afterward.
       if (
@@ -789,18 +827,9 @@ export class DashboardController {
         this.optionsGeneration === generationBeforeThisRun
       ) {
         this.eligibleGeneration = generationAtStart;
-        // A granted scan is itself a re-confirmation that `this.options`
-        // are accurate as of this generation — advance the watermark to
-        // match, not just `eligibleGeneration`. Without this, a second
-        // background-only revalidation (a plain timer tick — no
-        // `updateProjectSnapshot` in between, since nothing re-reads disk
-        // for that path) would find `optionsGeneration` still stuck at
-        // whatever it was after the *first* grant while `revalidationGeneration`
-        // had already moved on from this run's own `beginRevalidation()`
-        // call, permanently failing the check above for every scan after
-        // the first. Chaining the confirmation forward like this is safe
-        // precisely because we only reach here when both checks already
-        // passed — nothing invalidated it in between.
+        // A granted structural scan is itself a re-confirmation that
+        // `this.options` are accurate as of this generation. In time-only
+        // mode this is an idempotent assignment because no generation moved.
         this.optionsGeneration = generationAtStart;
       }
       sink.postMessage(
@@ -813,8 +842,12 @@ export class DashboardController {
           generatedAt
         )
       );
+      return { status: 'succeeded' };
     } catch (cause) {
-      if (controller.signal.aborted || isCancellation(cause)) return;
+      if (controller.signal.aborted) {
+        return { status: this.disposed ? 'cancelled' : 'superseded' };
+      }
+      if (isCancellation(cause)) return { status: 'cancelled' };
       // Nothing renderable at all: an unreadable manifest, an unsupported
       // lockfile version. Degraded-data failures never reach here — the
       // pipeline folds those into advisoriesError/auditUnavailable. If a good
@@ -823,6 +856,7 @@ export class DashboardController {
       if (this.lastResult === undefined) {
         sink.postMessage({ status: 'fatal-error', error: toProtocolError(cause) });
       }
+      return { status: 'failed', error: toProtocolError(cause) };
     } finally {
       performance.finish({ cancelled: controller.signal.aborted });
     }

@@ -73,6 +73,39 @@ test('flushDeferred() with nothing deferred is a no-op', async () => {
   assert.equal(calls.length, 0);
 });
 
+test('flushAll atomically merges pending and deferred mutation bursts into one reload', async () => {
+  const { reload, calls } = recordingReload();
+  let busy = true;
+  const coordinator = new FileChangeCoordinator({ isBusy: () => busy, currentGeneration: () => 7, reload });
+
+  coordinator.notify('manifest');
+  await coordinator.flush(); // moves the first burst to deferred while the mutation owns the files
+  coordinator.notify('lockfile'); // arrives later and remains pending at release time
+
+  busy = false;
+  assert.equal(await coordinator.flushAll(), true);
+  assert.equal(calls.length, 1, 'one authoritative reload covers both retained buckets');
+  assert.deepEqual(calls[0], { kinds: ['manifest', 'lockfile'], generation: 7 });
+  assert.equal(coordinator.hasPending, false);
+  assert.equal(coordinator.hasDeferred, false);
+  assert.equal(await coordinator.flushAll(), false, 'an already-drained coordinator reports no work');
+});
+
+test('flushAll replays retained mutation events against the current generation', async () => {
+  const { reload, calls } = recordingReload();
+  let busy = true;
+  let generation = 3;
+  const coordinator = new FileChangeCoordinator({ isBusy: () => busy, currentGeneration: () => generation, reload });
+
+  coordinator.notify('manifest');
+  await coordinator.flush();
+  generation = 4;
+  busy = false;
+  await coordinator.flushAll();
+
+  assert.deepEqual(calls, [{ kinds: ['manifest'], generation: 4 }]);
+});
+
 test('a burst deferred during busy, then released and re-acquired before flushDeferred() runs, defers again rather than racing it', async () => {
   const { reload, calls } = recordingReload();
   let busy = true;

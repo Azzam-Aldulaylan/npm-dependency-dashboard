@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react';
 
-import type { UpgradeAnalysisSmartPlan } from '../../../src/host/webviewProtocol.js';
+import type { UpgradeAnalysisChange, UpgradeAnalysisCompatibility, UpgradeAnalysisSmartPlan } from '../../../src/host/webviewProtocol.js';
+import { plannerAddedUpgradeChanges } from '../../../src/host/upgradeReviewUiState.js';
 import { IconRoute } from '../icons.js';
 
 /**
@@ -17,7 +18,18 @@ import { IconRoute } from '../icons.js';
  * action itself lives in the modal footer, so there's exactly one place to
  * trigger it, not two.
  */
-export function SmartPlanSection({ smartPlan }: { smartPlan: UpgradeAnalysisSmartPlan }): ReactElement {
+export function SmartPlanSection({
+  requestedChanges,
+  smartPlan,
+  compatibility,
+}: {
+  requestedChanges: UpgradeAnalysisChange[];
+  smartPlan: UpgradeAnalysisSmartPlan;
+  compatibility: UpgradeAnalysisCompatibility;
+}): ReactElement {
+  const additionalCount = plannerAddedUpgradeChanges(requestedChanges, smartPlan.changes).length;
+  const reasonIds = new Set(smartPlan.reasonFindingIds);
+  const reasons = compatibility.findings.filter((finding) => reasonIds.has(finding.id));
   return (
     <section className="smart-plan-banner" aria-labelledby="analysis-smart-plan-heading">
       <h3 className="smart-plan-banner__title" id="analysis-smart-plan-heading">
@@ -35,8 +47,14 @@ export function SmartPlanSection({ smartPlan }: { smartPlan: UpgradeAnalysisSmar
         ))}
       </ol>
       <p className="smart-plan-banner__hint">
-        This upgrade alone conflicts with another dependency. Upgrading these packages together resolves it.
+        The planner added {additionalCount} dependency change{additionalCount === 1 ? '' : 's'} to the requested upgrade.
       </p>
+      {reasons.length > 0 ? (
+        <div className="coordinated-plan__reasons">
+          <p className="coordinated-plan__reasons-label">Why coordination is needed</p>
+          <ul>{reasons.map((finding) => <li key={finding.id}>{finding.explanation}</li>)}</ul>
+        </div>
+      ) : null}
     </section>
   );
 }

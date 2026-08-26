@@ -11,9 +11,29 @@
 
 export const UPGRADE_ANALYSIS_SOFT_STALE_MS = 60 * 60_000;
 
+/**
+ * Host retention deliberately outlives the one-hour soft-stale threshold.
+ * This leaves a real refresh-recommended window in which age is visible but
+ * does not itself revoke execution authority; disk/source validation at
+ * confirm time remains the hard-staleness boundary.
+ */
+export const UPGRADE_ANALYSIS_RETENTION_MS = 2 * UPGRADE_ANALYSIS_SOFT_STALE_MS;
+
+function parseCanonicalIsoTimestamp(value: string): number | null {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  return new Date(parsed).toISOString() === value ? parsed : null;
+}
+
 /** An unparseable `analyzedAt` is treated as "can't tell", not as stale — the same graceful-degrade choice src/core/cache/freshness.ts's own `classifyFreshness` makes for a missing/malformed timestamp. */
 export function isUpgradeAnalysisSoftStale(analyzedAt: string, now: number): boolean {
-  const analyzedMs = Date.parse(analyzedAt);
-  if (!Number.isFinite(analyzedMs)) return false;
+  const analyzedMs = parseCanonicalIsoTimestamp(analyzedAt);
+  if (analyzedMs === null) return false;
   return now - analyzedMs >= UPGRADE_ANALYSIS_SOFT_STALE_MS;
+}
+
+/** Hard retained-analysis expiry. Malformed values fail closed for execution. */
+export function isUpgradeAnalysisExpired(expiresAt: string, now: number): boolean {
+  const expiresMs = parseCanonicalIsoTimestamp(expiresAt);
+  return expiresMs === null || now >= expiresMs;
 }

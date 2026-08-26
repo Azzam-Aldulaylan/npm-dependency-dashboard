@@ -18,6 +18,7 @@ import { nextColumnSortState, sortRows } from '../../src/host/tableSort.js';
 import type { TransitiveRemediationUiState } from '../../src/host/upgradeAction.js';
 import { resolveActionState } from '../../src/host/upgradeAction.js';
 import {
+  applyUpgradeResultLocalFacts,
   manageRemovalReplacesUpgradeReview,
   targetChangeInvalidatesManageAnalysis,
   upgradeAnalysisMessageMatchesRequest,
@@ -25,12 +26,22 @@ import {
   upgradeErrorClearsActiveState,
   upgradeErrorIsUserVisible,
 } from '../../src/host/upgradeUiState.js';
+import {
+  advisoryNavigationRequest,
+  applyUpgradeEnrichmentTerminal,
+  beginUpgradeEnrichment,
+  completedDashboardSnapshotAbandonsUpgradeEnrichment,
+  retryUpgradeEnrichment,
+  shouldQuarantineUpgradeDerivedData,
+} from '../../src/host/upgradeReviewUiState.js';
+import type { UpgradeEnrichmentUiState } from '../../src/host/upgradeReviewUiState.js';
 import type {
   DashboardData,
   HostToWebviewMessage,
   RemoveAnalysisPresentation,
   ScanProgressStage,
   UpgradeAnalysisPresentation,
+  UpgradeResultPresentation,
 } from '../../src/host/webviewProtocol.js';
 import { isHostToWebviewMessage } from '../../src/host/webviewProtocol.js';
 import type { UpgradeAnalysisSections } from '../../src/host/upgradeAnalysisSections.js';
@@ -243,6 +254,11 @@ export function App(): ReactElement {
   // standalone UpgradeAnalysisModal). Same split removeOrigin already uses
   // for removal below.
   const [upgradeOrigin, setUpgradeOrigin] = useState<'dashboard' | 'manage-dependency' | null>(null);
+  const [upgradeResult, setUpgradeResult] = useState<UpgradeResultPresentation | null>(null);
+  const upgradeResultRef = useRef<UpgradeResultPresentation | null>(null);
+  const [upgradeEnrichment, setUpgradeEnrichment] = useState<UpgradeEnrichmentUiState | null>(null);
+  const upgradeEnrichmentRef = useRef<UpgradeEnrichmentUiState | null>(null);
+  const pendingEnrichmentDashboardMessageRef = useRef<HostToWebviewMessage | null>(null);
   const [usageByPackage, setUsageByPackage] = useState<ReadonlyMap<string, UsageRequestState>>(() => new Map());
   // Read inside the auto-scan effect below without making it a dependency —
   // the effect must only re-run when `manageRow` itself changes (a new
@@ -275,6 +291,26 @@ export function App(): ReactElement {
     const timer = window.setInterval(() => setMinuteClock(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  // The minute clock is sufficient for the one-hour advisory copy, but the
+  // host-provided execution expiry is a real authority boundary. Schedule a
+  // dedicated tick at that exact deadline so an open review cannot remain
+  // visibly actionable for the remainder of an arbitrary minute interval.
+  useEffect(() => {
+    if (analysis === null) return;
+    const expiresAt = Date.parse(analysis.expiresAt);
+    if (!Number.isFinite(expiresAt)) {
+      setMinuteClock(Date.now());
+      return;
+    }
+    const remaining = expiresAt - Date.now();
+    if (remaining <= 0) {
+      setMinuteClock(Date.now());
+      return;
+    }
+    const timer = window.setTimeout(() => setMinuteClock(Date.now()), remaining);
+    return () => window.clearTimeout(timer);
+  }, [analysis]);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent): void => {
@@ -314,6 +350,58 @@ export function App(): ReactElement {
       if (incoming.status === 'upgrade-targets-error') {
         if (upgradeAnalysisMessageMatchesRequest(activeTargetRequestIdRef.current, incoming.requestId)) {
           setUpgradeTargetState({ phase: 'error', error: incoming.error });
+        }
+        return;
+      }
+
+      if (incoming.status === 'upgrade-result') {
+        const enrichment = beginUpgradeEnrichment(incoming.result);
+        upgradeEnrichmentRef.current = enrichment;
+        setUpgradeEnrichment(enrichment);
+        pendingEnrichmentDashboardMessageRef.current = null;
+        upgradeResultRef.current = incoming.result;
+        setUpgradeResult(incoming.result);
+        activeUpgradeRef.current = null;
+        activeRequestIdRef.current = null;
+        setActiveUpgrade(null);
+        setActiveTarget(null);
+        setActiveUpgradeChanges([]);
+        setAnalysis(null);
+        setAnalyzingPhase(null);
+        setAnalysisSections(WAITING_UPGRADE_ANALYSIS_SECTIONS);
+        setHardStaleAnalysisId(null);
+        setConfirmBusy(false);
+        setUpgradeError(null);
+        setMessage((previous) => {
+          if (previous === undefined || !('data' in previous)) return previous;
+          return {
+            status: 'stale',
+            data: applyUpgradeResultLocalFacts(previous.data, incoming.result),
+          };
+        });
+        return;
+      }
+
+      if (incoming.status === 'upgrade-enrichment-result') {
+        const previousEnrichment = upgradeEnrichmentRef.current;
+        const nextEnrichment = applyUpgradeEnrichmentTerminal(previousEnrichment, incoming);
+        if (nextEnrichment === previousEnrichment) return;
+        upgradeEnrichmentRef.current = nextEnrichment;
+        setUpgradeEnrichment(nextEnrichment);
+        const pendingResult = upgradeResultRef.current;
+        if (
+          pendingResult !== null &&
+          pendingResult.refreshId === incoming.refreshId &&
+          pendingResult.package === incoming.package
+        ) {
+          const completedResult = { ...pendingResult, refreshingDerivedData: false };
+          upgradeResultRef.current = completedResult;
+          setUpgradeResult(completedResult);
+        }
+        if (incoming.outcome === 'succeeded') {
+          const enrichedDashboard = pendingEnrichmentDashboardMessageRef.current;
+          pendingEnrichmentDashboardMessageRef.current = null;
+          if (enrichedDashboard !== null && 'data' in enrichedDashboard) setMessage(enrichedDashboard);
         }
         return;
       }
@@ -548,8 +636,44 @@ export function App(): ReactElement {
         return;
       }
 
-      // Any other message is a fresh snapshot that supersedes whatever
+      // Any other message is a dashboard snapshot that supersedes whatever
       // optimistic upgrade state was showing.
+      let nextMessage = incoming;
+      const pendingUpgradeResult = upgradeResultRef.current;
+      if (pendingUpgradeResult !== null && 'data' in incoming) {
+        const enrichment = upgradeEnrichmentRef.current;
+        if (completedDashboardSnapshotAbandonsUpgradeEnrichment(enrichment, incoming.status)) {
+          // A full authoritative reload completed after the targeted refresh
+          // had already failed/cancelled/been superseded. Abandon the old
+          // targeted result instead of calling it successful; this snapshot
+          // now owns the UI and its own availability flags remain honest.
+          upgradeResultRef.current = null;
+          setUpgradeResult(null);
+          upgradeEnrichmentRef.current = null;
+          setUpgradeEnrichment(null);
+          pendingEnrichmentDashboardMessageRef.current = null;
+        } else if (shouldQuarantineUpgradeDerivedData(enrichment)) {
+          // Keep every derived-data snapshot quarantined until the exact
+          // targeted lifecycle reports success. The original message is
+          // retained privately so that correlated success can publish it;
+          // unrelated dashboard traffic can neither end refreshing nor make
+          // its registry/security values appear current in the meantime.
+          pendingEnrichmentDashboardMessageRef.current = incoming;
+          nextMessage = {
+            status: 'stale',
+            data: applyUpgradeResultLocalFacts(incoming.data, pendingUpgradeResult),
+          };
+        } else if (incoming.status === 'stale') {
+          // A later structural/manual revalidation supersedes the retained
+          // completion card. Time-only refreshes do not emit stale, so the
+          // result survives its own enrichment replacement.
+          upgradeResultRef.current = null;
+          setUpgradeResult(null);
+          upgradeEnrichmentRef.current = null;
+          setUpgradeEnrichment(null);
+          pendingEnrichmentDashboardMessageRef.current = null;
+        }
+      }
       activeUpgradeRef.current = null;
       activeRequestIdRef.current = null;
       setActiveUpgrade(null);
@@ -578,10 +702,10 @@ export function App(): ReactElement {
       setRemediationBatch({ phase: 'idle' });
       setBulkActionsOpen(false);
       // `manageRow`/`manageTab` deliberately survive this reset: this branch
-      // also fires for `status: 'stale'`, which announces every
-      // revalidation attempt (manual Refresh, a file-change-triggered
-      // reload, and background-timer ticks alike — see Dashboard's own
-      // `upgradesDisabled` doc). Closing the Manage dependency modal or
+      // also fires for `status: 'stale'`, which announces structural/manual
+      // revalidation and the explicit post-mutation derived-data refresh.
+      // Cache-age-only timer refreshes deliberately stay `ready`. Closing
+      // the Manage dependency modal or
       // snapping it back to Overview on every one of those would fight the
       // user out of a tab they're actively reading. The modal already
       // self-heals if its row genuinely disappears from the new data — see
@@ -591,7 +715,7 @@ export function App(): ReactElement {
       // describe the current dependency set. `cleanupState` itself is left
       // alone: a running "Analyze cleanup" scan is independent host-side
       // work this message doesn't affect.
-      setUsageByPackage(new Map());
+      if (pendingUpgradeResult === null) setUsageByPackage(new Map());
       setCleanupFindings([]);
       setCleanupError(null);
       cleanupShouldSelectFilter.current = false;
@@ -606,7 +730,7 @@ export function App(): ReactElement {
       ) {
         initialRenderStartedAt.current = performance.now();
       }
-      setMessage(incoming);
+      setMessage(nextMessage);
     };
 
     // Listen before announcing readiness, so the host's reply cannot be missed.
@@ -648,6 +772,22 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'refresh' });
   }, []);
 
+  const requestRetryUpgradeEnrichment = useCallback(() => {
+    const current = upgradeEnrichmentRef.current;
+    if (current === null || current.phase !== 'failed') return;
+    const retrying = retryUpgradeEnrichment(current);
+    upgradeEnrichmentRef.current = retrying;
+    setUpgradeEnrichment(retrying);
+    pendingEnrichmentDashboardMessageRef.current = null;
+    const result = upgradeResultRef.current;
+    if (result !== null) {
+      const refreshingResult = { ...result, refreshingDerivedData: true };
+      upgradeResultRef.current = refreshingResult;
+      setUpgradeResult(refreshingResult);
+    }
+    vscode.postMessage({ type: 'retry-upgrade-enrichment', refreshId: current.refreshId });
+  }, []);
+
   const changeProject = useCallback(() => {
     vscode.postMessage({ type: 'change-project' });
   }, []);
@@ -664,6 +804,11 @@ export function App(): ReactElement {
     if (!upgradeAnalysisRequestIsAllowed(activeUpgradeRef.current)) return;
     const requestId = String(++nextRequestIdRef.current);
     activeUpgradeRef.current = packageName;
+    upgradeResultRef.current = null;
+    setUpgradeResult(null);
+    upgradeEnrichmentRef.current = null;
+    setUpgradeEnrichment(null);
+    pendingEnrichmentDashboardMessageRef.current = null;
     activeRequestIdRef.current = requestId;
     setActiveUpgrade(packageName);
     setActiveTarget(target);
@@ -683,6 +828,11 @@ export function App(): ReactElement {
     if (first === undefined) return;
     const requestId = String(++nextRequestIdRef.current);
     activeUpgradeRef.current = first.packageName;
+    upgradeResultRef.current = null;
+    setUpgradeResult(null);
+    upgradeEnrichmentRef.current = null;
+    setUpgradeEnrichment(null);
+    pendingEnrichmentDashboardMessageRef.current = null;
     activeRequestIdRef.current = requestId;
     setActiveUpgrade(first.packageName);
     setActiveTarget(first.targetVersion);
@@ -856,7 +1006,7 @@ export function App(): ReactElement {
   // Never carries a URL — see webviewProtocol.ts's own doc on 'open-advisory'
   // and src/core/advisories/resolve.ts for the actual trust boundary.
   const requestOpenAdvisory = useCallback((packageName: string, advisoryId: string | number, path: string[]) => {
-    vscode.postMessage({ type: 'open-advisory', package: packageName, advisoryId, path });
+    vscode.postMessage(advisoryNavigationRequest(packageName, advisoryId, path));
   }, []);
 
   // Only ever a package name — see analyze-remediation's own doc in
@@ -879,6 +1029,13 @@ export function App(): ReactElement {
   }, []);
 
   const openManage = useCallback((packageName: string) => {
+    if (upgradeResultRef.current?.package !== packageName) {
+      upgradeResultRef.current = null;
+      setUpgradeResult(null);
+      upgradeEnrichmentRef.current = null;
+      setUpgradeEnrichment(null);
+      pendingEnrichmentDashboardMessageRef.current = null;
+    }
     setManageRow(packageName);
     setManageTab('overview');
   }, []);
@@ -950,6 +1107,11 @@ export function App(): ReactElement {
     if (upgradeOrigin === 'manage-dependency' && activeUpgrade !== null) requestCancelUpgrade();
     if (removeOrigin === 'manage-dependency' && activeRemove !== null) requestCancelRemove();
     setManageRow(null);
+    upgradeResultRef.current = null;
+    setUpgradeResult(null);
+    upgradeEnrichmentRef.current = null;
+    setUpgradeEnrichment(null);
+    pendingEnrichmentDashboardMessageRef.current = null;
     setManageTab('overview');
     activeTargetRequestIdRef.current = null;
     setUpgradeTargetState({ phase: 'idle' });
@@ -1227,6 +1389,8 @@ export function App(): ReactElement {
                 updateResolutionAvailable={!data.availability.unavailableUpdatePackages.includes(row.name)}
                 advisoriesAvailable={data.availability.advisories === 'complete'}
                 blockClose={removalImpact.phase === 'analyzing' || confirmBusy || removeBusy}
+                upgradeResult={upgradeResult?.package === row.name ? upgradeResult : null}
+                upgradeEnrichment={upgradeResult?.package === row.name ? upgradeEnrichment : null}
                 upgrade={{
                   targetVersion: selectedManageTarget,
                   targetState: upgradeTargetState,
@@ -1264,6 +1428,7 @@ export function App(): ReactElement {
                 onOpenAdvisory={requestOpenAdvisory}
                 onReanalyzeUsage={requestReanalyzeUsage}
                 onOpenUsageReference={requestOpenUsageReference}
+                onRetryUpgradeEnrichment={requestRetryUpgradeEnrichment}
                 now={minuteClock}
                 onClose={closeManage}
               />
@@ -1299,9 +1464,16 @@ export function App(): ReactElement {
           analysis={analysis}
           pendingChanges={activeUpgradeChanges}
           busy={confirmBusy}
+          hardStale={hardStaleAnalysisId !== null && hardStaleAnalysisId === analysis?.analysisId}
+          now={minuteClock}
           onConfirm={requestConfirmUpgrade}
           onUseSmartPlan={requestUseSmartPlan}
           onCancel={requestCancelUpgrade}
+          onRefresh={() => {
+            const changes = [...activeUpgradeChanges];
+            requestCancelUpgrade();
+            requestBulkUpgrade(changes);
+          }}
           onConfigureVerification={requestConfigureVerification}
           onOpenAdvisory={requestOpenAdvisory}
         />
@@ -1389,12 +1561,12 @@ function Dashboard({
   // against stale/revalidating data regardless of what this webview shows
   // (DashboardController.isEligible/beginRevalidation); this just keeps a
   // button from inviting a click the host is about to refuse anyway.
-  // `run()` announces every revalidation attempt — manual-refresh-follow-up,
-  // file-change-triggered, and plain background-timer ticks alike — as a
-  // `stale` message carrying whatever was already on screen before it does
-  // anything else, so this single check covers all of them: `stale` is up
-  // for the entire duration a revalidation is in flight, and a failed one
-  // (which posts nothing further) leaves it up until the next attempt.
+  // Structural/manual revalidation announces `stale` with whatever was
+  // already on screen, so this single check covers the interval in which
+  // mutation authority has been revoked. Cache-age-only refreshes remain
+  // `ready`; the post-upgrade targeted path sets `stale` once because its
+  // local facts are fresh while registry/security fields are still being
+  // enriched.
   // Also disabled while a removal holds the shared panel-wide lock — the
   // same "the host would refuse this anyway" reasoning as `stale` above.
   const upgradesDisabled =

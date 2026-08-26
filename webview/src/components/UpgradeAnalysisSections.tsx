@@ -2,12 +2,13 @@ import type { ReactElement } from 'react';
 
 import type { PackageRow } from '../../../src/core/types.js';
 import type { UpgradeAnalysisSections as UpgradeAnalysisSectionsState } from '../../../src/host/upgradeAnalysisSections.js';
+import { hasPlannerAddedCoordination } from '../../../src/host/upgradeReviewUiState.js';
 import { LoadingRing } from './DependencyLoadingState.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
-import { SmartPlanSection } from './SmartPlanSection.js';
 import {
   CompatibilityCheckCard,
-  FilesModifiedCard,
+  CoordinatedUpgradePlanCard,
+  CoordinationUnavailableCard,
   SecurityOutcomeCard,
   SimpleUpgradePlanCard,
   VerificationStepsCard,
@@ -45,12 +46,14 @@ export function UpgradeAnalysisSections({
   sections,
   onChangeTab,
   onConfigureVerification,
+  onOpenAdvisory,
 }: {
   row: PackageRow;
   targetVersion: string;
   sections: UpgradeAnalysisSectionsState;
   onChangeTab: (tab: ManageTabId) => void;
   onConfigureVerification: () => void;
+  onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[]) => void) | undefined;
 }): ReactElement {
   const { overview, compatibility, security, smartPlan } = sections;
 
@@ -69,38 +72,42 @@ export function UpgradeAnalysisSections({
           <SectionPlaceholder label={compatibility.status === 'loading' ? PHASE_LABEL.compatibility : 'Waiting to check compatibility…'} />
         )}
 
-        {smartPlan.status === 'complete' && smartPlan.value !== null ? (
+        {smartPlan.status === 'complete' &&
+        smartPlan.value !== null &&
+        overview.status === 'complete' &&
+        hasPlannerAddedCoordination(overview.value.changes, smartPlan.value.changes) ? (
           // A found, validated coordinated plan.
-          <SmartPlanSection smartPlan={smartPlan.value} />
-        ) : (smartPlan.status === 'not-applicable' || (smartPlan.status === 'complete' && smartPlan.value === null)) &&
+          compatibility.status === 'complete' ? (
+            <CoordinatedUpgradePlanCard
+              requestedChanges={overview.value.changes}
+              smartPlan={smartPlan.value}
+              compatibility={compatibility.value}
+            />
+          ) : (
+            <SectionPlaceholder label="Preparing coordinated plan…" />
+          )
+        ) : (smartPlan.status === 'not-applicable' || smartPlan.status === 'complete') &&
           overview.status === 'complete' ? (
-          // Either no conflict existed at all, or one did and no coordinated
-          // plan was found — both show the plain requested-changes list, the
-          // same "always render one or the other" behavior the fully-
-          // populated view below already has.
-          <SimpleUpgradePlanCard row={row} changes={overview.value.changes} />
+          compatibility.status === 'complete' && compatibility.value.status === 'conflict' ? (
+            <CoordinationUnavailableCard row={row} changes={overview.value.changes} />
+          ) : (
+            <SimpleUpgradePlanCard row={row} changes={overview.value.changes} />
+          )
         ) : (
           <SectionPlaceholder label={smartPlan.status === 'loading' ? PHASE_LABEL['smart-plan'] : 'Waiting for compatibility results…'} />
         )}
 
         {security.status === 'complete' ? (
-          <SecurityOutcomeCard row={row} security={security.value} onChangeTab={onChangeTab} />
+          <SecurityOutcomeCard row={row} security={security.value} onChangeTab={onChangeTab} onOpenAdvisory={onOpenAdvisory} />
         ) : (
           <SectionPlaceholder label="Checking known vulnerabilities…" />
         )}
 
-        <div className="upgrade-tab__bottom-grid">
-          {overview.status === 'complete' ? (
-            <FilesModifiedCard files={overview.value.files} />
-          ) : (
-            <SectionPlaceholder label="Preparing file list…" />
-          )}
-          {overview.status === 'complete' ? (
-            <VerificationStepsCard verification={overview.value.verification} onConfigureVerification={onConfigureVerification} />
-          ) : (
-            <SectionPlaceholder label="Preparing verification…" />
-          )}
-        </div>
+        {overview.status === 'complete' ? (
+          <VerificationStepsCard verification={overview.value.verification} onConfigureVerification={onConfigureVerification} />
+        ) : (
+          <SectionPlaceholder label="Preparing verification…" />
+        )}
       </div>
     </div>
   );

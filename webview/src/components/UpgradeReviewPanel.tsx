@@ -4,18 +4,18 @@ import type { PackageRow, Severity } from '../../../src/core/types.js';
 import { semanticButtonClassName, upgradeConfirmationAction } from '../../../src/host/actionButtonSemantics.js';
 import type { UpgradeAnalysisPresentation } from '../../../src/host/webviewProtocol.js';
 import type { UpgradeAnalysisSections as UpgradeAnalysisSectionsState } from '../../../src/host/upgradeAnalysisSections.js';
-import { isUpgradeAnalysisSoftStale } from '../../../src/host/upgradeFreshness.js';
+import { hasPlannerAddedCoordination, upgradeAnalysisFreshness } from '../../../src/host/upgradeReviewUiState.js';
 import { compatibilityOutcomeDisplay, upgradeSafetyHeadline } from '../../../src/host/outcomeCopy.js';
 import { classifyUpdate } from '../../../src/host/updateClassification.js';
 import { severityDisplay } from '../../../src/host/severityDisplay.js';
 import { summarizeUpgradeSecurity } from '../../../src/host/upgradeSecuritySummary.js';
-import { IconAlertTriangle, IconHistory, IconRefresh, IconTrendUp } from '../icons.js';
+import { IconAlertTriangle, IconFile, IconRefresh, IconTrendUp } from '../icons.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
-import { SmartPlanSection } from './SmartPlanSection.js';
 import {
   CompatibilityCheckCard,
-  FilesModifiedCard,
+  CoordinatedUpgradePlanCard,
+  CoordinationUnavailableCard,
   SecurityOutcomeCard,
   SimpleUpgradePlanCard,
   VerificationStepsCard,
@@ -152,16 +152,20 @@ function AtAGlanceCard({
  */
 function RecommendedActionCard({
   analysis,
+  coordinated,
+  executionBlocked,
   busy,
   onConfirm,
   onUseSmartPlan,
 }: {
   analysis: UpgradeAnalysisPresentation;
+  coordinated: boolean;
+  executionBlocked: boolean;
   busy: boolean;
   onConfirm: () => void;
   onUseSmartPlan: () => void;
 }): ReactElement {
-  const action = upgradeConfirmationAction(analysis);
+  const action = upgradeConfirmationAction(coordinated ? analysis : { ...analysis, smartPlan: null });
   const compatDetail = compatibilityOutcomeDisplay(analysis.compatibility.status).label;
   const security = analysis.security;
   const resolvedCount = security?.resolvedAdvisories.length ?? 0;
@@ -171,9 +175,9 @@ function RecommendedActionCard({
   let message: string;
   if (analysis.compatibility.status === 'conflict') {
     message =
-      analysis.smartPlan !== null
+      coordinated
         ? `${compatDetail} — a coordinated upgrade resolves it.`
-        : `${compatDetail}. No safe path is currently available.`;
+        : `${compatDetail}. A coordinated resolution could not be confirmed by this analysis.`;
   } else {
     const safe = analysis.compatibility.status === 'compatible' ? 'safe' : 'compatible';
     if (security === null) {
@@ -201,7 +205,7 @@ function RecommendedActionCard({
         <button
           type="button"
           className={semanticButtonClassName(action.variant, 'vuln-recommended__cta upgrade-recommended__cta')}
-          disabled={busy}
+          disabled={busy || executionBlocked}
           onClick={action.onClick === 'confirm' ? onConfirm : onUseSmartPlan}
         >
           {action.label} →
@@ -209,6 +213,11 @@ function RecommendedActionCard({
       ) : null}
     </section>
   );
+}
+
+function baseName(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts.at(-1) ?? path;
 }
 
 function UpgradePreviewCard({ analysis }: { analysis: UpgradeAnalysisPresentation }): ReactElement {
@@ -229,6 +238,13 @@ function UpgradePreviewCard({ analysis }: { analysis: UpgradeAnalysisPresentatio
         <span className="manage-action-card__version manage-action-card__version--target">{analysis.targetVersion}</span>
         {updateKind !== null ? <span className="status-badge status-badge--neutral">{UPDATE_KIND_LABEL[updateKind]} update</span> : null}
       </div>
+      <p className="upgrade-preview__files">
+        <IconFile aria-hidden="true" />
+        <span>
+          Will update <code>{baseName(analysis.files.manifestPath)}</code> and <code>{baseName(analysis.files.lockfilePath)}</code>
+          {analysis.files.rollbackAvailable ? ' · Restore point included' : ''}
+        </span>
+      </p>
     </section>
   );
 }
@@ -257,25 +273,30 @@ function formatUpgradeAnalysisAge(analyzedAt: string, now: number): string {
  */
 function UpgradeFreshnessBar({
   analyzedAt,
+  expiresAt,
   hardStale,
   now,
   onRefresh,
 }: {
   analyzedAt: string;
+  expiresAt: string;
   hardStale: boolean;
   now: number;
   onRefresh: () => void;
 }): ReactElement | null {
-  const softStale = isUpgradeAnalysisSoftStale(analyzedAt, now);
-  if (!softStale && !hardStale) return null;
+  const freshness = upgradeAnalysisFreshness(analyzedAt, expiresAt, now);
+  const expired = freshness === 'expired';
+  if (freshness === 'fresh' && !hardStale) return null;
   return (
-    <p className={`stale-status${hardStale ? ' stale-status--hard' : ''}`}>
+    <p className={`stale-status${hardStale || expired ? ' stale-status--hard' : ''}`}>
       <IconRefresh className="stale-status__icon stale-status__icon--static" />
       {hardStale
         ? 'Project files changed since this analysis ran. Refresh before continuing.'
-        : `Dependency data may be out of date. Last analyzed ${formatUpgradeAnalysisAge(analyzedAt, now)}.`}
+        : expired
+          ? 'This analysis expired and can no longer authorize an upgrade. Analyze again to continue.'
+          : `Analysis is more than one hour old. Refresh is recommended; project files have not been marked as changed. Last analyzed ${formatUpgradeAnalysisAge(analyzedAt, now)}.`}
       <button type="button" className="button button--subtle stale-status__action" onClick={onRefresh}>
-        Refresh
+        {expired ? 'Analyze again' : 'Refresh'}
       </button>
     </p>
   );
@@ -317,6 +338,7 @@ export function UpgradeReviewPanel({
   onConfigureVerification,
   onRefresh,
   onChangeTab,
+  onOpenAdvisory,
 }: {
   row: PackageRow;
   active: boolean;
@@ -343,6 +365,7 @@ export function UpgradeReviewPanel({
   onConfigureVerification: () => void;
   onRefresh: () => void;
   onChangeTab: (tab: ManageTabId) => void;
+  onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[]) => void) | undefined;
 }): ReactElement {
   const targetSelector = row.upgradeTo === null ? null : (
     <UpgradeTargetSelector
@@ -424,50 +447,69 @@ export function UpgradeReviewPanel({
           sections={sections}
           onChangeTab={onChangeTab}
           onConfigureVerification={onConfigureVerification}
+          onOpenAdvisory={onOpenAdvisory}
         />
       </div>
     );
   }
 
-  const action = upgradeConfirmationAction(analysis);
+  const coordinated =
+    analysis.smartPlan !== null && hasPlannerAddedCoordination(analysis.changes, analysis.smartPlan.changes);
+  const expired = upgradeAnalysisFreshness(analysis.analyzedAt, analysis.expiresAt, now) === 'expired';
+  const executionBlocked = hardStale || expired;
+  const action = upgradeConfirmationAction(coordinated ? analysis : { ...analysis, smartPlan: null });
 
   return withTargetSelector(
     <div className="review-panel">
-      <UpgradeFreshnessBar analyzedAt={analysis.analyzedAt} hardStale={hardStale} now={now} onRefresh={onRefresh} />
+      <UpgradeFreshnessBar
+        analyzedAt={analysis.analyzedAt}
+        expiresAt={analysis.expiresAt}
+        hardStale={hardStale}
+        now={now}
+        onRefresh={onRefresh}
+      />
       <div className="upgrade-tab">
         <div className="upgrade-tab__summary">
           <UpgradeSummaryCard analysis={analysis} />
           <AtAGlanceCard row={row} analysis={analysis} usage={usage} advisoriesAvailable={advisoriesAvailable} />
-          <RecommendedActionCard analysis={analysis} busy={busy} onConfirm={onConfirm} onUseSmartPlan={onUseSmartPlan} />
+          <RecommendedActionCard
+            analysis={analysis}
+            coordinated={coordinated}
+            executionBlocked={executionBlocked}
+            busy={busy}
+            onConfirm={onConfirm}
+            onUseSmartPlan={onUseSmartPlan}
+          />
         </div>
         <div className="upgrade-tab__details">
           <UpgradePreviewCard analysis={analysis} />
           <CompatibilityCheckCard compatibility={analysis.compatibility} majorUpdate={analysis.majorUpdate} />
-          {analysis.smartPlan !== null ? <SmartPlanSection smartPlan={analysis.smartPlan} /> : <SimpleUpgradePlanCard row={row} changes={analysis.changes} />}
-          <SecurityOutcomeCard row={row} security={analysis.security} onChangeTab={onChangeTab} />
-          <div className="upgrade-tab__bottom-grid">
-            <FilesModifiedCard files={analysis.files} />
-            <VerificationStepsCard verification={analysis.verification} onConfigureVerification={onConfigureVerification} />
-          </div>
+          {analysis.smartPlan !== null && coordinated ? (
+            <CoordinatedUpgradePlanCard
+              requestedChanges={analysis.changes}
+              smartPlan={analysis.smartPlan}
+              compatibility={analysis.compatibility}
+            />
+          ) : analysis.compatibility.status === 'conflict' ? (
+            <CoordinationUnavailableCard row={row} changes={analysis.changes} />
+          ) : (
+            <SimpleUpgradePlanCard row={row} changes={analysis.changes} />
+          )}
+          <SecurityOutcomeCard row={row} security={analysis.security} onChangeTab={onChangeTab} onOpenAdvisory={onOpenAdvisory} />
+          <VerificationStepsCard verification={analysis.verification} onConfigureVerification={onConfigureVerification} />
         </div>
       </div>
 
       <div className="review-panel__footer">
-        {analysis.files.rollbackAvailable ? (
-          <p className="manage-modal__footer-note">
-            <IconHistory className="manage-modal__footer-note-icon" aria-hidden="true" />
-            A restore point will be created before upgrading. You can roll back if something goes wrong.
-          </p>
-        ) : null}
         <button type="button" className="button button--secondary" onClick={onCancel} disabled={busy}>
-          {analysis.compatibility.status === 'conflict' && analysis.smartPlan === null ? 'Close review' : 'Cancel analysis'}
+          {analysis.compatibility.status === 'conflict' && !coordinated ? 'Close review' : 'Cancel analysis'}
         </button>
         {action !== null ? (
           <button
             type="button"
             className={semanticButtonClassName(action.variant)}
             onClick={action.onClick === 'confirm' ? onConfirm : onUseSmartPlan}
-            disabled={busy || hardStale}
+            disabled={busy || executionBlocked}
           >
             {action.label}
           </button>

@@ -88,6 +88,8 @@ export interface BuildUpgradeAnalysisPresentationOptions extends BuildUpgradeAna
   analysisId: string;
   /** ISO timestamp — computed once by the coordinator at final-assembly time, passed in rather than computed here so this builder stays deterministic/pure. */
   analyzedAt: string;
+  /** ISO timestamp derived from the exact stored-analysis retention deadline. */
+  expiresAt: string;
   compatibility: UpgradeAnalysisCompatibility;
   security: SecurityOutcome | null;
   smartPlan: UpgradeAnalysisSmartPlan | null;
@@ -103,6 +105,7 @@ export function buildUpgradeAnalysisPresentation(
   return {
     analysisId: options.analysisId,
     analyzedAt: options.analyzedAt,
+    expiresAt: options.expiresAt,
     package: options.packageName,
     currentVersion: options.currentVersion,
     targetVersion: options.targetVersion,

@@ -93,6 +93,28 @@ export class FileChangeCoordinator {
     await this.enqueue(kinds, this.options.currentGeneration());
   }
 
+  /**
+   * Atomically drains every watcher burst retained across a busy mutation.
+   * Calling `flush()` and `flushDeferred()` separately after releasing the
+   * mutation lock leaves a race where each bucket can trigger its own full
+   * reload. Merging them first preserves every kind while requiring exactly
+   * one authoritative post-mutation reload.
+   *
+   * Returns false when there was nothing to process. The merged burst uses
+   * the current generation because deferred work is intentionally replayed
+   * against the project that is current when the mutation lock releases.
+   */
+  async flushAll(): Promise<boolean> {
+    if (this.disposed) return false;
+    const kinds = mergeKinds(this.deferredKinds, this.pendingKinds);
+    this.pendingKinds = new Set();
+    this.pendingGeneration = undefined;
+    this.deferredKinds = undefined;
+    if (kinds.size === 0) return false;
+    await this.enqueue(kinds, this.options.currentGeneration());
+    return true;
+  }
+
   /** A full, authoritative reload the host already knows about (an explicit project switch) makes any pending/deferred burst for the old selection moot. */
   discardPending(): void {
     this.pendingKinds = new Set();

@@ -42,14 +42,17 @@ import { parseManifest } from '../core/manifest/parse.js';
 import { analyzeCompatibility, CompatibilityCancelledError } from '../core/compatibility/preflight.js';
 import type { CompatibilityStatus, UpgradeProposal } from '../core/compatibility/types.js';
 import { RegistryPackageMetadataProvider, registryForPackage } from '../core/compatibility/registryMetadataProvider.js';
+import { FetchError } from '../core/registry/http.js';
 import type { HttpClient } from '../core/registry/http.js';
 import { fetchPackument } from '../core/registry/versions.js';
 import type { EtagStore } from '../core/registry/versions.js';
 import type { PerformanceRecorder } from '../core/performance/measurement.js';
 import { createPerformanceSession } from '../core/performance/measurement.js';
+import { inspectAppliedUpgradeState } from '../core/upgrade/appliedState.js';
 import { planSmartUpgrade } from '../core/upgrade/smartPlan.js';
+import { loadUpgradeTargets, publishedUpgradeTargetsForRequest } from '../core/upgrade/targets.js';
 import { buildStagedManifest, buildStagedManifestForRemoval } from '../core/upgrade/stagedManifest.js';
-import { requiresManifestReconciliation } from '../core/upgrade/plan.js';
+import { isMajorUpgrade, requiresManifestReconciliation } from '../core/upgrade/plan.js';
 import { stillRequiredBy } from '../core/upgrade/removeImpact.js';
 import { describeBulkRejection, describeBulkRemoveRejection } from '../core/upgrade/validate.js';
 import type { EligibleRemoval, EligibleUpgrade } from '../core/upgrade/validate.js';
@@ -68,9 +71,19 @@ import { loadProject } from './projectResolution.js';
 import { IsolatedResolverVerifier } from './resolverVerifier.js';
 import { resolveAnalysisForExecution } from './upgradeAnalysisLookup.js';
 import type { AnalysisLookupRejection } from './upgradeAnalysisLookup.js';
-import { buildUpgradeAnalysisPresentation } from './upgradeAnalysisPresentation.js';
+import { UPGRADE_ANALYSIS_RETENTION_MS } from './upgradeFreshness.js';
+import {
+  buildUpgradeAnalysisChanges,
+  buildUpgradeAnalysisFiles,
+  buildUpgradeAnalysisPresentation,
+  buildUpgradeAnalysisVerification,
+} from './upgradeAnalysisPresentation.js';
 import { buildRemoveAnalysisPresentation } from './removeAnalysisPresentation.js';
-import { describeRemoveTransactionOutcome, describeUpgradeTransactionOutcome } from './upgradeAssistantOutcome.js';
+import {
+  classifyUpgradeApplication,
+  describeRemoveTransactionOutcome,
+  describeUpgradeTransactionOutcome,
+} from './upgradeAssistantOutcome.js';
 import { UpgradeExecutionSession } from './upgradeRunner.js';
 import { runUpgradeTransaction } from './upgradeTransaction.js';
 import { selectVerificationScripts } from './verificationPolicy.js';
@@ -80,15 +93,27 @@ import type {
   RemediationOutcomeStatus,
   SecurityOutcome,
   UpgradeAnalysisSmartPlan,
+  UpgradeResultPresentation,
 } from './webviewProtocol.js';
 
-export interface UpgradeMessage {
+export interface UpgradeChangeRequest {
   package: string;
   target: string;
 }
 
+export interface UpgradeMessage extends UpgradeChangeRequest {
+  /** Client-minted correlation nonce for this analysis attempt — see webviewProtocol.ts's own doc on `WebviewToHostMessage`'s `requestId`. Never trust/execution surface; echoed back verbatim on every message belonging to this attempt, never stored on StoredAnalysis. */
+  requestId: string;
+}
+
+export interface LoadUpgradeTargetsMessage {
+  package: string;
+  requestId: string;
+}
+
 export interface BulkUpgradeMessage {
-  changes: UpgradeMessage[];
+  changes: UpgradeChangeRequest[];
+  requestId: string;
 }
 
 export interface RemoveMessage {
@@ -123,6 +148,16 @@ export interface UpgradeAssistantCoordinatorOptions {
   getSelectedProject(): DiscoveredProject | undefined;
   isDisposed(): boolean;
   reloadFinalState(): Promise<void>;
+  /** Reads and applies post-mutation package.json/lockfile state without waiting for registry/audit enrichment. */
+  readAndApplyMutationLocalState?(): Promise<
+    { project: ResolvedProject; structurallyCurrent: boolean } | undefined
+  >;
+  /** Starts the expensive derived-data scan after local state has already been published. */
+  refreshMutationEnrichmentInBackground?(
+    refreshId: string,
+    packageName: string,
+    structurallyCurrent: boolean
+  ): void;
   flushDeferredChanges(): Promise<void>;
   /**
    * Fires once the mutation lock is actually released after a transaction
@@ -136,12 +171,42 @@ export interface UpgradeAssistantCoordinatorOptions {
   performanceEnabled?(): boolean;
   /** Test seam; production always uses the host-owned project loader. */
   loadProject?: (candidate: DiscoveredProject) => Promise<ResolvedProject>;
+  /** Test seam; production always uses vscode.window.withProgress with a real cancellation token — see defaultWithCompatibilityProgress. */
+  withCompatibilityProgress?: <T>(title: string, run: (signal: AbortSignal) => Promise<T>) => Promise<T>;
+  /** Test seam; production always reads the real `dependencyDashboard` upgrade configuration — see defaultGetUpgradeConfiguration. */
+  getUpgradeConfiguration?: () => { ignoreScripts: boolean; verificationScripts: unknown[] };
 }
 
-/** How long an opened-but-abandoned analysis holds the panel's upgrade lock before a later analyze request reclaims it. The real invalidation is always the disk-snapshot recheck below, not this — see handleConfirmUpgrade/handleUseSmartPlan. */
-const ANALYSIS_TTL_MS = 10 * 60_000;
+/** Removal review retention is unchanged; Upgrade Review has its own longer, soft-stale-aware retention. */
+const REMOVAL_ANALYSIS_TTL_MS = 10 * 60_000;
+
+/** Production default for `UpgradeAssistantCoordinatorOptions.withCompatibilityProgress` — the exact `vscode.window.withProgress`/`AbortController` wiring `handleAnalyzeUpgradeRequests`'s compatibility preflight used inline before this seam existed. */
+async function defaultWithCompatibilityProgress<T>(title: string, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  return vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title, cancellable: true },
+    async (_progress, token) => {
+      const abort = new AbortController();
+      const cancellation = token.onCancellationRequested(() => abort.abort());
+      try {
+        return await run(abort.signal);
+      } finally {
+        cancellation.dispose();
+      }
+    }
+  );
+}
+
+/** Production default for `UpgradeAssistantCoordinatorOptions.getUpgradeConfiguration`. */
+function defaultGetUpgradeConfiguration(): { ignoreScripts: boolean; verificationScripts: unknown[] } {
+  const configuration = vscode.workspace.getConfiguration('dependencyDashboard');
+  return {
+    ignoreScripts: configuration.get<boolean>('upgrade.ignoreScripts', true),
+    verificationScripts: configuration.get<unknown[]>('upgrade.verificationScripts', []),
+  };
+}
 
 function toProtocolError(cause: unknown): ProtocolError {
+  if (cause instanceof FetchError) return { code: cause.code, message: cause.message };
   if (cause instanceof Error) return { code: cause.name, message: cause.message };
   return { code: 'UNKNOWN', message: String(cause) };
 }
@@ -184,7 +249,9 @@ export function compatibilitySummary(analysis: Awaited<ReturnType<typeof analyze
 interface StoredAnalysis {
   id: string;
   /** Original lookup keys — every item is re-validated fresh at confirm time. */
-  requests: UpgradeMessage[];
+  requests: UpgradeChangeRequest[];
+  /** Host-proven selectable targets used when a request differs from row.upgradeTo. */
+  publishedTargetsByPackage: ReadonlyMap<string, ReadonlySet<string>>;
   eligibility: EligibleUpgrade;
   /** The disk snapshot preflight ran against — the baseline the post-confirm recheck below compares fresh disk reads to. */
   snapshot: ResolvedProject;
@@ -221,6 +288,8 @@ interface SharedRemediationWork {
 export class UpgradeAssistantCoordinator {
   private readonly session = new UpgradeExecutionSession();
   private readonly projectLoader: (candidate: DiscoveredProject) => Promise<ResolvedProject>;
+  private readonly withCompatibilityProgress: <T>(title: string, run: (signal: AbortSignal) => Promise<T>) => Promise<T>;
+  private readonly getUpgradeConfiguration: () => { ignoreScripts: boolean; verificationScripts: unknown[] };
   private analysis: StoredAnalysis | undefined;
   private removal: StoredRemoval | undefined;
   /** The package a handleAnalyzeUpgrade call is currently in flight for, or null — the target `cancel-upgrade { analysisId: null }` refers to, since no analysisId exists yet at that point. */
@@ -231,6 +300,8 @@ export class UpgradeAssistantCoordinator {
 
   constructor(private readonly options: UpgradeAssistantCoordinatorOptions) {
     this.projectLoader = options.loadProject ?? loadProject;
+    this.withCompatibilityProgress = options.withCompatibilityProgress ?? defaultWithCompatibilityProgress;
+    this.getUpgradeConfiguration = options.getUpgradeConfiguration ?? defaultGetUpgradeConfiguration;
   }
 
   isBusy(): boolean {
@@ -264,19 +335,146 @@ export class UpgradeAssistantCoordinator {
   }
 
   /**
+   * Checked before every progressive partial post in
+   * handleAnalyzeUpgradeRequests — a mid-stream `cancel-upgrade{analysisId:
+   * null}` (recorded as `cancelRequestedFor`) or panel disposal should stop
+   * further sections from being computed/posted, not merely be discarded at
+   * the very end the way a single pre-final check would. Returns true (and,
+   * for a real cancellation match, clears `cancelRequestedFor`) exactly when
+   * the caller should stop and return without posting.
+   */
+  private droppedByCancellation(packageName: string): boolean {
+    if (this.options.isDisposed()) return true;
+    if (this.cancelRequestedFor !== packageName) return false;
+    this.cancelRequestedFor = null;
+    return true;
+  }
+
+  /**
+   * Load one package's bounded, host-derived upgrade choices on demand.
+   * This is deliberately outside the dashboard's Stage-1 scan: opening the
+   * Manage workspace for one dependency is the point at which a full
+   * packument becomes useful enough to justify its parse cost.
+   */
+  async handleLoadUpgradeTargets(message: LoadUpgradeTargetsMessage): Promise<void> {
+    const controller = await this.options.ensureController();
+    if (controller === undefined) return;
+
+    const row = controller.lastResultRows().find((candidate) => candidate.name === message.package);
+    if (row === undefined || row.current === null || row.upgradeTo === null) {
+      this.options.sink.postMessage({
+        status: 'upgrade-targets-error',
+        package: message.package,
+        requestId: message.requestId,
+        error: { code: 'NO_ELIGIBLE_UPGRADE', message: 'No upgrade is currently available for this package.' },
+      });
+      return;
+    }
+
+    // Reuse the existing default-target eligibility gate before doing any
+    // network work. This proves the package is declared, safe, and backed by
+    // a current trusted scan without adding a weaker read-only side door.
+    const eligibility = controller.validateUpgradeRequest({ package: row.name, target: row.upgradeTo });
+    if (!eligibility.ok) {
+      this.options.sink.postMessage({
+        status: 'upgrade-targets-error',
+        package: message.package,
+        requestId: message.requestId,
+        error: describeBulkRejection({
+          ok: false,
+          reason: 'change-rejected',
+          packageName: message.package,
+          changeReason: eligibility.reason,
+        }),
+      });
+      return;
+    }
+
+    this.options.sink.postMessage({
+      status: 'upgrade-targets-loading',
+      package: message.package,
+      requestId: message.requestId,
+    });
+    try {
+      const source = controller.upgradeSource;
+      const targets = await loadUpgradeTargets(
+        this.options.httpClient,
+        this.options.etagStore,
+        registryForPackage(source.resolvedRegistry, row.name),
+        row.name,
+        row.current,
+        row.upgradeTo
+      );
+      const stillEligible = controller.validateUpgradeRequest({ package: row.name, target: row.upgradeTo });
+      if (!stillEligible.ok) {
+        this.options.sink.postMessage({
+          status: 'upgrade-targets-error',
+          package: message.package,
+          requestId: message.requestId,
+          error: describeBulkRejection({
+            ok: false,
+            reason: 'change-rejected',
+            packageName: message.package,
+            changeReason: stillEligible.reason,
+          }),
+        });
+        return;
+      }
+      this.options.sink.postMessage({
+        status: 'upgrade-targets',
+        package: message.package,
+        requestId: message.requestId,
+        targets,
+      });
+    } catch (cause) {
+      if (this.options.isDisposed()) return;
+      this.options.sink.postMessage({
+        status: 'upgrade-targets-error',
+        package: message.package,
+        requestId: message.requestId,
+        error: toProtocolError(cause),
+      });
+    }
+  }
+
+  private async publishedTargetsFor(
+    controller: DashboardController,
+    requests: readonly UpgradeChangeRequest[]
+  ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
+    const source = controller.upgradeSource;
+    const entries = await Promise.all(
+      requests.map(async (request): Promise<readonly [string, ReadonlySet<string>]> => {
+        const row = controller.lastResultRows().find((candidate) => candidate.name === request.package);
+        if (row === undefined || row.current === null) return [request.package, new Set()];
+        const published = await publishedUpgradeTargetsForRequest(
+          this.options.httpClient,
+          this.options.etagStore,
+          registryForPackage(source.resolvedRegistry, row.name),
+          row.name,
+          row.current,
+          row.upgradeTo,
+          request.target
+        );
+        return [row.name, published];
+      })
+    );
+    return new Map(entries);
+  }
+
+  /**
    * Phase 1: eligibility, lock, preflight, smart-plan search, security
    * outcome. Ends by storing the analysis and posting it — never by
    * executing anything.
    */
   async handleAnalyzeUpgrade(message: UpgradeMessage): Promise<void> {
-    await this.handleAnalyzeUpgradeRequests([message]);
+    await this.handleAnalyzeUpgradeRequests(message.requestId, [{ package: message.package, target: message.target }]);
   }
 
   async handleAnalyzeBulkUpgrade(message: BulkUpgradeMessage): Promise<void> {
-    await this.handleAnalyzeUpgradeRequests(message.changes);
+    await this.handleAnalyzeUpgradeRequests(message.requestId, message.changes);
   }
 
-  private async handleAnalyzeUpgradeRequests(messages: readonly UpgradeMessage[]): Promise<void> {
+  private async handleAnalyzeUpgradeRequests(requestId: string, messages: readonly UpgradeChangeRequest[]): Promise<void> {
     this.reclaimExpiredAnalysis();
     this.reclaimExpiredRemoval();
 
@@ -292,7 +490,21 @@ export class UpgradeAssistantCoordinator {
     const controller = await this.options.ensureController();
     if (controller === undefined) return;
 
-    const batch = controller.validateBulkUpgradeRequest(messages);
+    let publishedTargetsByPackage: ReadonlyMap<string, ReadonlySet<string>> = new Map();
+    let batch = controller.validateBulkUpgradeRequest(messages);
+    if (!batch.ok && batch.reason === 'change-rejected' && batch.changeReason === 'stale-target') {
+      try {
+        publishedTargetsByPackage = await this.publishedTargetsFor(controller, messages);
+      } catch (cause) {
+        this.options.sink.postMessage({
+          status: 'upgrade-error',
+          package: batch.packageName ?? messages[0]?.package ?? 'unknown',
+          error: toProtocolError(cause),
+        });
+        return;
+      }
+      batch = controller.validateBulkUpgradeRequest(messages, publishedTargetsByPackage);
+    }
     if (!batch.ok) {
       this.options.sink.postMessage({
         status: 'upgrade-error',
@@ -351,6 +563,69 @@ export class UpgradeAssistantCoordinator {
           error: { code: 'STALE_SOURCE', message: 'Project dependency files changed. Refresh and try again.' },
         });
         return;
+      }
+
+      // --- Stage 0: overview — everything below is synchronous/cheap, no
+      // network or resolver work, so it can post immediately. ---
+      const upgradeConfiguration = this.getUpgradeConfiguration();
+      const verificationScripts = selectVerificationScripts(source.manifestText, upgradeConfiguration.verificationScripts);
+
+      const manifestPath = path.join(controller.root, 'package.json');
+      const expectedLockfilePath =
+        source.lockfilePath ??
+        path.join(controller.root, source.packageManager === 'pnpm' ? 'pnpm-lock.yaml' : 'package-lock.json');
+
+      const overviewChanges = buildUpgradeAnalysisChanges({
+        packageName: eligibility.packageName,
+        currentVersion: eligibility.currentVersion,
+        targetVersion: eligibility.target,
+        classification: eligibility.classification,
+        changes: eligibilities.map((item) => ({
+          packageName: item.packageName,
+          currentVersion: item.currentVersion,
+          targetVersion: item.target,
+          classification: item.classification,
+        })),
+      });
+
+      if (this.droppedByCancellation(eligibility.packageName)) return;
+      this.options.sink.postMessage({
+        status: 'upgrade-analysis-partial',
+        requestId,
+        package: eligibility.packageName,
+        section: {
+          kind: 'overview',
+          currentVersion: eligibility.currentVersion,
+          targetVersion: eligibility.target,
+          classification: eligibility.classification,
+          majorUpdate: isMajorUpgrade(eligibility.currentVersion, eligibility.target),
+          changes: overviewChanges,
+          verification: buildUpgradeAnalysisVerification(verificationScripts.map((script) => script.scriptName)),
+          files: buildUpgradeAnalysisFiles(manifestPath, expectedLockfilePath),
+        },
+      });
+
+      // Security's real cost (a resolver-graph materialization) only applies
+      // when there's actually something to evaluate — when none of the
+      // requested packages currently carry advisories, the outcome is
+      // knowable right now, before compatibility even runs. `securityPosted`
+      // short-circuits the deferred, resolver-driven branch further below
+      // once this has already answered the question.
+      const rows = controller.lastResultRows();
+      const securityInputs = eligibilities.flatMap((item) => {
+        const before = rows.find((row) => row.name === item.packageName)?.advisories ?? [];
+        return before.length === 0 ? [] : [{ item, before }];
+      });
+      let securityPosted = false;
+      if (securityInputs.length === 0) {
+        if (this.droppedByCancellation(eligibility.packageName)) return;
+        this.options.sink.postMessage({
+          status: 'upgrade-analysis-partial',
+          requestId,
+          package: eligibility.packageName,
+          section: { kind: 'security', security: null },
+        });
+        securityPosted = true;
       }
 
       const proposal: UpgradeProposal = {
@@ -414,35 +689,79 @@ export class UpgradeAssistantCoordinator {
         preflightProject.resolvedRegistry
       );
 
-      this.options.sink.postMessage({ status: 'upgrade-analyzing', package: eligibility.packageName, phase: 'compatibility' });
+      this.options.sink.postMessage({ status: 'upgrade-analyzing', package: eligibility.packageName, phase: 'compatibility', requestId });
       const endCompatibility = performance.start('compatibility preflight');
-      const analysis = await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title:
-            eligibilities.length === 1
-              ? `Checking compatibility for ${eligibility.packageName}@${eligibility.target}`
-              : `Checking compatibility for ${eligibilities.length} dependency upgrades`,
-          cancellable: true,
-        },
-        async (_progress, token) => {
-          const abort = new AbortController();
-          const cancellation = token.onCancellationRequested(() => abort.abort());
-          try {
-            return await analyzeCompatibility({
-              graph,
-              proposal,
-              metadataProvider,
-              policy: preflightProject.peerPolicy,
-              ...(resolverVerifier === undefined ? {} : { resolverVerifier }),
-              signal: abort.signal,
-            });
-          } finally {
-            cancellation.dispose();
-          }
-        }
+      const compatibilityTitle =
+        eligibilities.length === 1
+          ? `Checking compatibility for ${eligibility.packageName}@${eligibility.target}`
+          : `Checking compatibility for ${eligibilities.length} dependency upgrades`;
+      const analysis = await this.withCompatibilityProgress(compatibilityTitle, (signal) =>
+        analyzeCompatibility({
+          graph,
+          proposal,
+          metadataProvider,
+          policy: preflightProject.peerPolicy,
+          ...(resolverVerifier === undefined ? {} : { resolverVerifier }),
+          signal,
+        })
       );
       endCompatibility({ status: analysis.status });
+
+      if (this.droppedByCancellation(eligibility.packageName)) return;
+      this.options.sink.postMessage({
+        status: 'upgrade-analysis-partial',
+        requestId,
+        package: eligibility.packageName,
+        section: {
+          kind: 'compatibility',
+          compatibility: {
+            status: analysis.status,
+            completeness: analysis.completeness,
+            findings: analysis.findings,
+            ...(analysis.resolverVerification === undefined ? {} : { resolverVerification: analysis.resolverVerification }),
+          },
+        },
+      });
+
+      // --- security outcome (best-effort; never blocks the rest of the
+      // analysis) — relocated here, right after compatibility, since its
+      // only real data dependency is `analysis.status`, not the smart-plan
+      // search below. Skipped when the Stage-0 early-post above already
+      // answered this (no advisories to evaluate at all). ---
+      let security: SecurityOutcome | null = null;
+      if (!securityPosted) {
+        let after: Parameters<typeof evaluateSecurityOutcome>[0]['after'] = 'no-resolver-evidence';
+        if (analysis.status !== 'conflict' && resolverVerifier !== undefined) {
+          try {
+            const endSecurityResolver = performance.start('security graph materialization');
+            const materialized = await resolverVerifier.materializeResolvedGraph(proposal);
+            endSecurityResolver({ resolved: materialized.ok });
+            if (materialized.ok) {
+              after = { graph: materialized.graph, advisoriesByName: advisoriesByNameFromRows(rows) };
+            }
+          } catch {
+            // Left as 'no-resolver-evidence' — never a hard failure of the analysis.
+          }
+        }
+        security = combineSecurityOutcomes(
+          securityInputs.map(({ item, before }) =>
+            evaluateSecurityOutcome({
+              before,
+              targetVersion: item.target,
+              rootPackageName: item.packageName,
+              after,
+            })
+          )
+        );
+
+        if (this.droppedByCancellation(eligibility.packageName)) return;
+        this.options.sink.postMessage({
+          status: 'upgrade-analysis-partial',
+          requestId,
+          package: eligibility.packageName,
+          section: { kind: 'security', security },
+        });
+      }
 
       let smartPlan: UpgradeAnalysisSmartPlan | null = null;
       let smartPlanProposal: UpgradeProposal | null = null;
@@ -457,7 +776,7 @@ export class UpgradeAssistantCoordinator {
             classification: declared.optional ? ('optional' as const) : declared.dev ? ('dev' as const) : ('prod' as const),
           }];
         });
-        this.options.sink.postMessage({ status: 'upgrade-analyzing', package: eligibility.packageName, phase: 'smart-plan' });
+        this.options.sink.postMessage({ status: 'upgrade-analyzing', package: eligibility.packageName, phase: 'smart-plan', requestId });
         const endSmartPlan = performance.start('smart-plan search');
         const planned = await planSmartUpgrade({
           graph,
@@ -496,80 +815,48 @@ export class UpgradeAssistantCoordinator {
             reasonFindingIds: [...new Set(planned.plan.groups.flatMap((group) => group.reasonFindingIds))],
           };
         }
-      }
 
-      const ignoreScripts = vscode.workspace
-        .getConfiguration('dependencyDashboard')
-        .get<boolean>('upgrade.ignoreScripts', true);
-      const configuredVerification = vscode.workspace
-        .getConfiguration('dependencyDashboard')
-        .get<unknown[]>('upgrade.verificationScripts', []);
-      const verificationScripts = selectVerificationScripts(source.manifestText, configuredVerification);
-
-      // --- security outcome (best-effort; never blocks the rest of the analysis) ---
-      const rows = controller.lastResultRows();
-      let security: SecurityOutcome | null = null;
-      const securityInputs = eligibilities.flatMap((item) => {
-        const before = rows.find((row) => row.name === item.packageName)?.advisories ?? [];
-        return before.length === 0 ? [] : [{ item, before }];
-      });
-      if (securityInputs.length > 0) {
-        let after: Parameters<typeof evaluateSecurityOutcome>[0]['after'] = 'no-resolver-evidence';
-        if (analysis.status !== 'conflict' && resolverVerifier !== undefined) {
-          try {
-            const endSecurityResolver = performance.start('security graph materialization');
-            const materialized = await resolverVerifier.materializeResolvedGraph(proposal);
-            endSecurityResolver({ resolved: materialized.ok });
-            if (materialized.ok) {
-              after = { graph: materialized.graph, advisoriesByName: advisoriesByNameFromRows(rows) };
-            }
-          } catch {
-            // Left as 'no-resolver-evidence' — never a hard failure of the analysis.
-          }
-        }
-        security = combineSecurityOutcomes(
-          securityInputs.map(({ item, before }) =>
-            evaluateSecurityOutcome({
-              before,
-              targetVersion: item.target,
-              rootPackageName: item.packageName,
-              after,
-            })
-          )
-        );
+        if (this.droppedByCancellation(eligibility.packageName)) return;
+        this.options.sink.postMessage({
+          status: 'upgrade-analysis-partial',
+          requestId,
+          package: eligibility.packageName,
+          section: { kind: 'smart-plan', smartPlan },
+        });
       }
 
       // A cancel-upgrade with `analysisId: null` arrived while the above was
       // in flight — drop the result rather than storing/posting it, and let
-      // `finally` release the lock like any other unsuccessful exit.
-      if (this.cancelRequestedFor === eligibility.packageName) {
-        this.cancelRequestedFor = null;
-        return;
-      }
-
-      const manifestPath = path.join(controller.root, 'package.json');
-      const expectedLockfilePath =
-        source.lockfilePath ??
-        path.join(controller.root, source.packageManager === 'pnpm' ? 'pnpm-lock.yaml' : 'package-lock.json');
+      // `finally` release the lock like any other unsuccessful exit. Every
+      // partial post above already checked this at the moment its own data
+      // became ready; this is the last-line defense for the gap between the
+      // final partial and final assembly.
+      if (this.droppedByCancellation(eligibility.packageName)) return;
 
       const analysisId = randomBytes(16).toString('hex');
+      const analyzedAt = new Date().toISOString();
+      const expiresAt = Date.now() + UPGRADE_ANALYSIS_RETENTION_MS;
       this.analysis = {
         id: analysisId,
         requests: [...messages],
+        publishedTargetsByPackage,
         eligibility,
         snapshot: preflightProject,
         proposal,
         compatibilityStatus: analysis.status,
         smartPlanProposal,
-        ignoreScripts,
+        ignoreScripts: upgradeConfiguration.ignoreScripts,
         verificationScripts,
-        expiresAt: Date.now() + ANALYSIS_TTL_MS,
+        expiresAt,
       };
 
       this.options.sink.postMessage({
         status: 'upgrade-analysis',
+        requestId,
         analysis: buildUpgradeAnalysisPresentation({
           analysisId,
+          analyzedAt,
+          expiresAt: new Date(expiresAt).toISOString(),
           packageName: eligibility.packageName,
           currentVersion: eligibility.currentVersion,
           targetVersion: eligibility.target,
@@ -637,6 +924,48 @@ export class UpgradeAssistantCoordinator {
     if (this.analysis === undefined || this.analysis.id !== message.analysisId) return;
     this.session.release(this.analysis.eligibility.packageName);
     this.analysis = undefined;
+  }
+
+  /**
+   * Called (debounced, via dashboardPanel.ts's own file-watcher timer) after
+   * a manifest/lockfile/configuration change. If an analysis is currently
+   * open, re-reads disk with the same projectLoader used by the
+   * authoritative STALE_SOURCE recheck and compares against the exact same
+   * fields executeStoredAnalysis compares below — never a second, looser
+   * definition of "changed." A mismatch posts a lightweight,
+   * non-authoritative `upgrade-analysis-stale` hint; it never touches
+   * `this.analysis` or the lock, and never substitutes for the real
+   * STALE_SOURCE recheck confirm/use-smart-plan still run unconditionally.
+   *
+   * FileChangeCoordinator's own reload is deferred for exactly as long as
+   * `this.isBusy()` is true, which is true for the entire duration an
+   * analysis is open (the panel-wide lock is reserved across preflight and
+   * however long the review panel stays open) — so this is the one place
+   * that still checks disk during that window; detecting staleness of an
+   * *open* analysis is exactly the case the deferred reload cannot cover.
+   */
+  async checkOpenAnalysisFreshness(): Promise<void> {
+    const stored = this.analysis;
+    if (stored === undefined || this.options.isDisposed()) return;
+    const selected = this.options.getSelectedProject();
+    if (selected === undefined) return;
+    const disk = await this.projectLoader(selected);
+    // Re-check after the await: a confirm/cancel/TTL-reclaim may have
+    // superseded this exact stored analysis while disk was being re-read.
+    if (this.analysis !== stored || this.options.isDisposed()) return;
+    const matches =
+      disk.root === stored.snapshot.root &&
+      disk.manifestText === stored.snapshot.manifestText &&
+      disk.lockfileText === stored.snapshot.lockfileText &&
+      disk.lockfilePath === stored.snapshot.lockfilePath &&
+      disk.registry === stored.snapshot.registry &&
+      disk.packageManager === stored.snapshot.packageManager &&
+      disk.importerId === stored.snapshot.importerId &&
+      JSON.stringify(disk.peerPolicy) === JSON.stringify(stored.snapshot.peerPolicy) &&
+      JSON.stringify(disk.resolvedRegistry) === JSON.stringify(stored.snapshot.resolvedRegistry);
+    if (!matches) {
+      this.options.sink.postMessage({ status: 'upgrade-analysis-stale', analysisId: stored.id });
+    }
   }
 
   handleConfigureVerification(): void {
@@ -761,7 +1090,7 @@ export class UpgradeAssistantCoordinator {
         snapshot: preflightProject,
         ignoreScripts,
         verificationScripts,
-        expiresAt: Date.now() + ANALYSIS_TTL_MS,
+        expiresAt: Date.now() + REMOVAL_ANALYSIS_TTL_MS,
       };
 
       this.options.sink.postMessage({
@@ -1142,7 +1471,10 @@ export class UpgradeAssistantCoordinator {
         disk.importerId === stored.snapshot.importerId &&
         JSON.stringify(disk.peerPolicy) === JSON.stringify(stored.snapshot.peerPolicy) &&
         JSON.stringify(disk.resolvedRegistry) === JSON.stringify(stored.snapshot.resolvedRegistry);
-      const rechecked = controller.validateBulkUpgradeRequest(stored.requests);
+      const rechecked = controller.validateBulkUpgradeRequest(
+        stored.requests,
+        stored.publishedTargetsByPackage
+      );
       if (!sourceStillMatches || !rechecked.ok) {
         this.options.sink.postMessage({
           status: 'upgrade-error',
@@ -1265,17 +1597,94 @@ export class UpgradeAssistantCoordinator {
             }),
       });
 
-      // Reload the kept/restored/partial state while the coordinator still
-      // owns the project-wide mutation lock.
-      if (!this.options.isDisposed()) await this.options.reloadFinalState();
+      let finalProject: ResolvedProject | undefined;
+      let structurallyCurrent = false;
+      let appliedState: ReturnType<typeof inspectAppliedUpgradeState> = {
+        confirmed: false,
+        changes: proposal.changes.map((change) => ({
+          packageName: change.packageName,
+          previousVersion: change.currentVersion,
+          requestedVersion: change.targetVersion,
+          currentVersion: null,
+          declaredRange: null,
+          classification: null,
+        })),
+      };
+      try {
+        if (this.options.readAndApplyMutationLocalState === undefined) {
+          finalProject = await this.projectLoader(selected);
+        } else {
+          const localRead = await this.options.readAndApplyMutationLocalState();
+          finalProject = localRead?.project;
+          structurallyCurrent = localRead?.structurallyCurrent === true;
+        }
+        if (finalProject !== undefined) appliedState = inspectAppliedUpgradeState(finalProject, proposal.changes);
+      } catch {
+        // A successful task is not enough to claim the requested state was
+        // applied. Keep the explicit unconfirmed result and let the normal
+        // enrichment reload recover/display whatever can still be read.
+      }
+
+      const usedTargetedRefresh =
+        finalProject !== undefined &&
+        this.options.readAndApplyMutationLocalState !== undefined &&
+        this.options.refreshMutationEnrichmentInBackground !== undefined;
+      const refreshId = randomBytes(16).toString('hex');
+      if (this.options.isDisposed()) return;
+
+      const application: UpgradeResultPresentation['application'] = classifyUpgradeApplication(
+        transaction.completion,
+        structurallyCurrent,
+        appliedState.confirmed
+      );
+      const verification: UpgradeResultPresentation['verification'] =
+        transaction.verification.status === 'passed'
+          ? 'passed'
+          : transaction.verification.status === 'failed'
+            ? 'failed'
+            : transaction.verification.status === 'not-run' && transaction.verification.reason === 'not-configured'
+              ? 'not-configured'
+              : 'not-run';
+
+      if (transaction.install.status === 'succeeded' || application === 'rolled-back') {
+        this.options.sink.postMessage({
+          status: 'upgrade-result',
+          result: {
+            package: stored.eligibility.packageName,
+            refreshId,
+            install: transaction.install.status === 'succeeded' ? 'succeeded' : 'failed',
+            application,
+            verification,
+            changes: appliedState.changes,
+            refreshingDerivedData: usedTargetedRefresh,
+          },
+        });
+      }
+
+      if (usedTargetedRefresh) {
+        this.options.refreshMutationEnrichmentInBackground?.(
+          refreshId,
+          stored.eligibility.packageName,
+          structurallyCurrent
+        );
+      } else if (!this.options.isDisposed()) {
+        // Compatibility fallback for embedders/tests that have not supplied
+        // the targeted-refresh hooks. The result above is still surfaced
+        // before this potentially expensive scan.
+        await this.options.reloadFinalState();
+      }
       if (this.options.isDisposed()) return;
 
       const presentation = describeUpgradeTransactionOutcome(
         stored.eligibility.packageName,
         source.packageManager,
-        transaction
+        transaction,
+        structurallyCurrent && appliedState.confirmed
       );
-      if (presentation.kind === 'verified') {
+      if (
+        presentation.kind === 'verified' ||
+        (presentation.kind === 'unverified' && transaction.verification.status === 'not-run')
+      ) {
         void vscode.window.showInformationMessage(presentation.message);
       } else if (presentation.kind === 'error') {
         this.options.sink.postMessage({

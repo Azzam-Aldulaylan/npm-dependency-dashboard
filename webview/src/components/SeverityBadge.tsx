@@ -8,7 +8,13 @@ import { severityDisplay } from '../../../src/host/severityDisplay.js';
  * High, ... Safe) is what a screen reader or colour-blind user relies on;
  * the themed colour is a reinforcing cue, not the only signal.
  */
-export function SeverityBadge({ severity }: { severity: Severity | null }): ReactElement {
-  const { label, className } = severityDisplay(severity);
+export function SeverityBadge({
+  severity,
+  advisoriesAvailable = true,
+}: {
+  severity: Severity | null;
+  advisoriesAvailable?: boolean;
+}): ReactElement {
+  const { label, className } = severityDisplay(severity, advisoriesAvailable);
   return <span className={`severity severity--${className}`}>{label}</span>;
 }

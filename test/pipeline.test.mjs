@@ -151,6 +151,11 @@ test('a clean row and a vulnerable row are both fully populated', async () => {
   const result = await buildPackageRows(baseOptions(client, { auditRunner: runner }));
 
   assert.equal(result.rows.length, 2);
+  assert.deepEqual(result.availability, {
+    updates: 'complete',
+    advisories: 'complete',
+    unavailableUpdatePackages: [],
+  });
   assert.equal(result.advisoriesError, undefined);
   assert.equal(result.auditUnavailable, undefined);
   assert.deepEqual(runner.calls, [ROOT], 'audit runs against the project root');
@@ -230,6 +235,8 @@ test('a failed bulk fetch still returns rows, with advisories emptied', async ()
   );
 
   assert.equal(result.advisoriesError.code, 'REGISTRY_5XX');
+  assert.equal(result.availability.advisories, 'unavailable');
+  assert.equal(result.availability.updates, 'complete');
   assert.equal(result.advisoriesError.retryable, true);
   assert.equal(result.rows.length, 2, 'rows are still produced');
   for (const row of result.rows) {
@@ -250,6 +257,7 @@ test('unparseable bulk JSON is an advisoriesError, not a thrown pipeline', async
   const result = await buildPackageRows(baseOptions(client));
   assert.equal(result.advisoriesError.code, 'PARSE_ERROR');
   assert.equal(result.rows.length, 2);
+  assert.equal(result.availability.advisories, 'unavailable');
 });
 
 test('with no audit runner the self-computed fallback still finds a fix', async () => {
@@ -333,6 +341,11 @@ test("one package's version fetch failing does not disturb the other rows", asyn
   const result = await buildPackageRows(baseOptions(client));
 
   assert.equal(result.rows.length, 2);
+  assert.deepEqual(result.availability, {
+    updates: 'partial',
+    advisories: 'complete',
+    unavailableUpdatePackages: ['minimatch'],
+  });
   const failed = rowFor(result, 'minimatch');
   assert.equal(failed.current, '3.0.4', 'the lockfile-resolved version is still known');
   assert.equal(failed.wanted, null);

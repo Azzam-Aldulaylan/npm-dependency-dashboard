@@ -27,6 +27,7 @@ import type {
   RemovalAssessment,
   RemovalEvidence,
   RemovalEvidenceKind,
+  ScanDataAvailability,
 } from '../core/types.js';
 import type { DependencyFinding } from '../core/hygiene/types.js';
 import type { DependencyReference, DependencyUsageResult } from '../core/usage/types.js';
@@ -39,6 +40,7 @@ import {
   isPatchedVersionResult,
   isProtocolError,
   isRecord,
+  isScanDataAvailability,
 } from '../core/validation.js';
 import type { ProtocolError } from '../core/validation.js';
 import { MAX_BULK_REMOVE_CHANGES, MAX_BULK_UPGRADE_CHANGES } from '../core/upgrade/validate.js';
@@ -199,6 +201,10 @@ export interface UpgradeAnalysisCompatibility {
 
 export interface UpgradeAnalysisPresentation {
   analysisId: string;
+  /** ISO timestamp this analysis was produced — the basis for the Upgrade review panel's one-hour soft age hint. Structural staleness is signalled separately by `upgrade-analysis-stale`. */
+  analyzedAt: string;
+  /** Exact host retention deadline. At/after this instant execution is no longer available and the review must be re-analyzed. */
+  expiresAt: string;
   package: string;
   currentVersion: string;
   targetVersion: string;
@@ -212,6 +218,76 @@ export interface UpgradeAnalysisPresentation {
   verification: UpgradeAnalysisVerification;
   files: UpgradeAnalysisFiles;
 }
+
+/** One bounded, host-derived version choice for Manage's Upgrade review. */
+export interface UpgradeTargetOption {
+  version: string;
+  channel: 'stable' | 'prerelease';
+  labels: Array<'recommended' | 'lts' | 'latest'>;
+}
+
+export interface UpgradeTargetOptions {
+  recommendedVersion: string | null;
+  options: UpgradeTargetOption[];
+  truncated: boolean;
+}
+
+export interface UpgradeResultChange {
+  packageName: string;
+  previousVersion: string;
+  requestedVersion: string;
+  currentVersion: string | null;
+  declaredRange: string | null;
+  classification: DependencyClassification | null;
+}
+
+/**
+ * Evidence-backed result of a completed upgrade transaction. `install`
+ * reports the VS Code task process result; `application` is a separate fresh
+ * package.json/lockfile confirmation; `verification` only reports configured
+ * checks that actually ran. Derived registry/security data is intentionally
+ * absent and must be treated as refreshing until a new dashboard snapshot.
+ */
+export interface UpgradeResultPresentation {
+  package: string;
+  /** Host-minted correlation id for the exact targeted enrichment lifecycle following this result. */
+  refreshId: string;
+  install: 'succeeded' | 'failed';
+  application: 'applied' | 'unconfirmed' | 'rolled-back';
+  verification: 'passed' | 'not-configured' | 'failed' | 'not-run';
+  changes: UpgradeResultChange[];
+  refreshingDerivedData: boolean;
+}
+
+/**
+ * One stage of a progressive Upgrade review analysis — see
+ * upgradeAssistantCoordinator.ts's `handleAnalyzeUpgradeRequests`. Each kind
+ * is sent at most once per analysis attempt (correlated by the attempt's
+ * `requestId`, not `analysisId` — no `analysisId` exists yet while these are
+ * still arriving): `overview`, `compatibility`, and `security` are always
+ * sent exactly once on a successful attempt; `smart-plan` is sent at most
+ * once and never sent at all when `compatibility`'s own status isn't
+ * `'conflict'` — its absence is meaningful (there is nothing to plan), not
+ * an oversight the webview should keep waiting on. This type intentionally
+ * mirrors the field groupings already inside `UpgradeAnalysisPresentation`
+ * rather than inventing a second vocabulary — a section's payload is always
+ * exactly the same shape the final, complete presentation would carry for
+ * that field.
+ */
+export type UpgradeAnalysisPartialSection =
+  | {
+      kind: 'overview';
+      currentVersion: string;
+      targetVersion: string;
+      classification: DependencyClassification;
+      majorUpdate: boolean;
+      changes: UpgradeAnalysisChange[];
+      verification: UpgradeAnalysisVerification;
+      files: UpgradeAnalysisFiles;
+    }
+  | { kind: 'compatibility'; compatibility: UpgradeAnalysisCompatibility }
+  | { kind: 'security'; security: SecurityOutcome | null }
+  | { kind: 'smart-plan'; smartPlan: UpgradeAnalysisSmartPlan | null };
 
 export interface RemoveAnalysisChange {
   packageName: string;
@@ -284,6 +360,8 @@ export interface SelectedProjectInfo {
 /** Everything the table needs to render, JSON-safe end to end. */
 export interface DashboardData {
   rows: PackageRow[];
+  /** Whether update and advisory facts are complete for this snapshot. */
+  availability: ScanDataAvailability;
   /** ISO timestamp of the run that produced these rows. */
   generatedAt: string;
   project: SelectedProjectInfo;
@@ -318,6 +396,18 @@ export type HostToWebviewMessage =
   | { status: 'stale'; data: DashboardData }
   | { status: 'partial-error'; data: DashboardData }
   | { status: 'fatal-error'; error: ProtocolError }
+  | { status: 'upgrade-targets-loading'; package: string; requestId: string }
+  | { status: 'upgrade-targets'; package: string; requestId: string; targets: UpgradeTargetOptions }
+  | { status: 'upgrade-targets-error'; package: string; requestId: string; error: ProtocolError }
+  | { status: 'upgrade-result'; result: UpgradeResultPresentation }
+  /** Terminal state for only the targeted enrichment identified by `refreshId`; generic dashboard messages never complete it. */
+  | {
+      status: 'upgrade-enrichment-result';
+      refreshId: string;
+      package: string;
+      outcome: 'succeeded' | 'failed' | 'cancelled' | 'superseded';
+      error?: ProtocolError;
+    }
   /**
    * A specific package's upgrade could not run — rejected by host-side
    * validation, cancelled at the confirmation step, or the task itself
@@ -327,11 +417,30 @@ export type HostToWebviewMessage =
   | { status: 'upgrade-error'; package: string; error: ProtocolError }
   /**
    * One of the (at most two) genuinely-observable analysis phases has
-   * started — never a fabricated progress step. See spec §20.
+   * started — never a fabricated progress step. See spec §20. `requestId`
+   * correlates this to the attempt that started it — see
+   * UpgradeAnalysisPartialSection's own doc for why a request-scoped id is
+   * needed here rather than reusing `package`/`analysisId`.
    */
-  | { status: 'upgrade-analyzing'; package: string; phase: 'compatibility' | 'smart-plan' }
+  | { status: 'upgrade-analyzing'; package: string; phase: 'compatibility' | 'smart-plan'; requestId: string }
+  /**
+   * One real, already-computed section of an in-progress Upgrade review
+   * analysis, streamed as soon as it's ready rather than held back for the
+   * final `upgrade-analysis` message — see UpgradeAnalysisPartialSection.
+   */
+  | { status: 'upgrade-analysis-partial'; requestId: string; package: string; section: UpgradeAnalysisPartialSection }
   /** The host-owned Upgrade Analysis, ready for the modal to render. */
-  | { status: 'upgrade-analysis'; analysis: UpgradeAnalysisPresentation }
+  | { status: 'upgrade-analysis'; analysis: UpgradeAnalysisPresentation; requestId: string }
+  /**
+   * A non-authoritative hint that the currently-open/displayed analysis
+   * (`analysisId`) may no longer match what's on disk — the project's
+   * manifest/lockfile/config changed while the analysis was open. Never
+   * itself releases the panel-wide lock, clears the stored analysis, or
+   * substitutes for the real STALE_SOURCE recheck `confirm-upgrade`/
+   * `use-smart-plan` still run unconditionally — see
+   * UpgradeAssistantCoordinator.checkOpenAnalysisFreshness.
+   */
+  | { status: 'upgrade-analysis-stale'; analysisId: string }
   /** A bulk-remove request's impact check has started — see bulk-remove below. */
   | { status: 'remove-analyzing'; package: string }
   /** The host-owned removal analysis, ready for the review/confirm modal to render. */
@@ -409,8 +518,11 @@ export type WebviewToHostMessage =
   | { type: 'ready' }
   | { type: 'refresh' }
   | { type: 'change-project' }
-  | { type: 'upgrade'; package: string; target: string }
-  | { type: 'bulk-upgrade'; changes: Array<{ package: string; target: string }> }
+  /** On-demand, bounded published-version choices for one host-owned direct dependency. */
+  | { type: 'load-upgrade-targets'; package: string; requestId: string }
+  /** `requestId` is a client-minted correlation nonce for this analysis attempt — never trust/execution surface, never stored on the host's analysis, and never compared against anything. It exists only so the webview can tell which `upgrade-analyzing`/`upgrade-analysis-partial`/`upgrade-analysis` messages belong to this attempt versus a superseded one (e.g. re-analyzing the same package after Cancel). Distinct from `analysisId`, which is host-minted, execution-trusted, and doesn't exist until the analysis completes. */
+  | { type: 'upgrade'; package: string; target: string; requestId: string }
+  | { type: 'bulk-upgrade'; changes: Array<{ package: string; target: string }>; requestId: string }
   /** Coordinated removal of one or more declared direct dependencies — see src/core/upgrade/validate.ts's validateBulkRemoveRequest. */
   | { type: 'bulk-remove'; changes: Array<{ package: string }> }
   | { type: 'open-advisory'; package: string; advisoryId: string | number; path: string[] }
@@ -424,6 +536,8 @@ export type WebviewToHostMessage =
    */
   | { type: 'cancel-upgrade'; analysisId: string | null }
   | { type: 'use-smart-plan'; analysisId: string }
+  /** Retries only the most recent matching failed/cancelled targeted enrichment; the id is host-issued by `upgrade-result`. */
+  | { type: 'retry-upgrade-enrichment'; refreshId: string }
   /** Same analysisId-lookup discipline as confirm-upgrade/cancel-upgrade, targeting a stored removal analysis instead. */
   | { type: 'confirm-remove'; analysisId: string }
   | { type: 'cancel-remove'; analysisId: string | null }
@@ -494,6 +608,7 @@ function isDashboardData(value: unknown): value is DashboardData {
   return (
     Array.isArray(rows) &&
     rows.every(isPackageRow) &&
+    isScanDataAvailability(value['availability']) &&
     typeof value['generatedAt'] === 'string' &&
     isSelectedProjectInfo(value['project']) &&
     typeof value['canChangeProject'] === 'boolean' &&
@@ -502,7 +617,9 @@ function isDashboardData(value: unknown): value is DashboardData {
     Array.isArray(hygieneFindings) &&
     hygieneFindings.every(isDependencyFinding) &&
     typeof value['extensionVersion'] === 'string' &&
-    typeof value['builtAt'] === 'string'
+    typeof value['builtAt'] === 'string' &&
+    ((value['availability'] as ScanDataAvailability).advisories === 'unavailable') ===
+      (value['advisoriesError'] !== undefined)
   );
 }
 
@@ -528,17 +645,26 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (type === 'ready' || type === 'refresh' || type === 'change-project') {
     return hasOnlyKeys(value, ['type']);
   }
+  if (type === 'load-upgrade-targets') {
+    return (
+      hasOnlyKeys(value, ['type', 'package', 'requestId']) &&
+      isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['requestId'])
+    );
+  }
   if (type === 'upgrade') {
     return (
-      hasOnlyKeys(value, ['type', 'package', 'target']) &&
+      hasOnlyKeys(value, ['type', 'package', 'target', 'requestId']) &&
       isNonEmptyString(value['package']) &&
-      isNonEmptyString(value['target'])
+      isNonEmptyString(value['target']) &&
+      isNonEmptyString(value['requestId'])
     );
   }
   if (type === 'bulk-upgrade') {
     const changes = value['changes'];
     if (
-      !hasOnlyKeys(value, ['type', 'changes']) ||
+      !hasOnlyKeys(value, ['type', 'changes', 'requestId']) ||
+      !isNonEmptyString(value['requestId']) ||
       !Array.isArray(changes) ||
       changes.length === 0 ||
       changes.length > MAX_BULK_UPGRADE_CHANGES
@@ -600,6 +726,9 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   }
   if (type === 'confirm-upgrade' || type === 'use-smart-plan') {
     return hasOnlyKeys(value, ['type', 'analysisId']) && isNonEmptyString(value['analysisId']);
+  }
+  if (type === 'retry-upgrade-enrichment') {
+    return hasOnlyKeys(value, ['type', 'refreshId']) && isNonEmptyString(value['refreshId']);
   }
   if (type === 'cancel-upgrade') {
     const analysisId = value['analysisId'];
@@ -797,12 +926,84 @@ function isSecurityOutcome(value: unknown): value is SecurityOutcome {
   );
 }
 
+/** Shared with isUpgradeAnalysisPartialSection's own `compatibility` section — one field-check implementation for both the complete presentation and the streamed partial. */
+function isUpgradeAnalysisCompatibilityValue(value: unknown): value is UpgradeAnalysisCompatibility {
+  if (!isRecord(value)) return false;
+  const findings = value['findings'];
+  return (
+    hasOnlyKeys(value, ['status', 'completeness', 'findings', 'resolverVerification']) &&
+    typeof value['status'] === 'string' &&
+    COMPATIBILITY_STATUSES.has(value['status']) &&
+    isCompatibilityCompleteness(value['completeness']) &&
+    Array.isArray(findings) &&
+    findings.every(isCompatibilityFinding) &&
+    isAbsentOr(value['resolverVerification'], isResolverVerification)
+  );
+}
+
+/** Shared with isUpgradeAnalysisPartialSection's own `overview` section. */
+function isUpgradeAnalysisChangesValue(value: unknown): value is UpgradeAnalysisChange[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_BULK_UPGRADE_CHANGES) return false;
+  const changeNames = new Set<string>();
+  for (const change of value) {
+    if (
+      !isRecord(change) ||
+      !hasOnlyKeys(change, ['packageName', 'currentVersion', 'targetVersion', 'classification', 'majorUpdate']) ||
+      !isNonEmptyString(change['packageName']) ||
+      !isNonEmptyString(change['currentVersion']) ||
+      !isNonEmptyString(change['targetVersion']) ||
+      typeof change['classification'] !== 'string' ||
+      !CLASSIFICATIONS.has(change['classification']) ||
+      typeof change['majorUpdate'] !== 'boolean' ||
+      changeNames.has(change['packageName'])
+    ) {
+      return false;
+    }
+    changeNames.add(change['packageName']);
+  }
+  return true;
+}
+
+/** Shared with isUpgradeAnalysisPartialSection's own `smart-plan` section. */
+function isUpgradeAnalysisSmartPlanValue(value: unknown): value is UpgradeAnalysisSmartPlan | null {
+  if (value === null) return true;
+  if (!isRecord(value) || !hasOnlyKeys(value, ['changes', 'reasonFindingIds'])) return false;
+  const changes = value['changes'];
+  const reasonFindingIds = value['reasonFindingIds'];
+  return (
+    Array.isArray(changes) &&
+    changes.every(
+      (change) =>
+        isRecord(change) &&
+        hasOnlyKeys(change, ['packageName', 'currentVersion', 'targetVersion']) &&
+        typeof change['packageName'] === 'string' &&
+        typeof change['currentVersion'] === 'string' &&
+        typeof change['targetVersion'] === 'string'
+    ) &&
+    Array.isArray(reasonFindingIds) &&
+    reasonFindingIds.every((id) => typeof id === 'string')
+  );
+}
+
+/** Shared with isUpgradeAnalysisPartialSection's own `overview` section, and structurally identical to (but kept separate from) RemoveAnalysisFiles's own inline check. */
+function isUpgradeAnalysisFilesValue(value: unknown): value is UpgradeAnalysisFiles {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['manifestPath', 'lockfilePath', 'rollbackAvailable']) &&
+    typeof value['manifestPath'] === 'string' &&
+    typeof value['lockfilePath'] === 'string' &&
+    typeof value['rollbackAvailable'] === 'boolean'
+  );
+}
+
 function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysisPresentation {
   if (!isRecord(value)) return false;
 
   if (
     !hasOnlyKeys(value, [
       'analysisId',
+      'analyzedAt',
+      'expiresAt',
       'package',
       'currentVersion',
       'targetVersion',
@@ -819,78 +1020,31 @@ function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysis
     return false;
   }
 
-  const compatibility = value['compatibility'];
-  if (!isRecord(compatibility)) return false;
-  const findings = compatibility['findings'];
-  const compatibilityOk =
-    hasOnlyKeys(compatibility, ['status', 'completeness', 'findings', 'resolverVerification']) &&
-    typeof compatibility['status'] === 'string' &&
-    COMPATIBILITY_STATUSES.has(compatibility['status']) &&
-    isCompatibilityCompleteness(compatibility['completeness']) &&
-    Array.isArray(findings) &&
-    findings.every(isCompatibilityFinding) &&
-    isAbsentOr(compatibility['resolverVerification'], isResolverVerification);
-  if (!compatibilityOk) return false;
+  if (!isUpgradeAnalysisCompatibilityValue(value['compatibility'])) return false;
 
   const changes = value['changes'];
-  if (!Array.isArray(changes) || changes.length === 0 || changes.length > MAX_BULK_UPGRADE_CHANGES) return false;
-  const changeNames = new Set<string>();
-  for (const change of changes) {
-    if (
-      !isRecord(change) ||
-      !hasOnlyKeys(change, ['packageName', 'currentVersion', 'targetVersion', 'classification', 'majorUpdate']) ||
-      !isNonEmptyString(change['packageName']) ||
-      !isNonEmptyString(change['currentVersion']) ||
-      !isNonEmptyString(change['targetVersion']) ||
-      typeof change['classification'] !== 'string' ||
-      !CLASSIFICATIONS.has(change['classification']) ||
-      typeof change['majorUpdate'] !== 'boolean' ||
-      changeNames.has(change['packageName'])
-    ) {
-      return false;
-    }
-    changeNames.add(change['packageName']);
-  }
+  if (!isUpgradeAnalysisChangesValue(changes)) return false;
 
   const security = value['security'];
   if (security !== null && !isSecurityOutcome(security)) return false;
 
-  const smartPlan = value['smartPlan'];
-  if (smartPlan !== null) {
-    if (!isRecord(smartPlan) || !hasOnlyKeys(smartPlan, ['changes', 'reasonFindingIds'])) return false;
-    const changes = smartPlan['changes'];
-    const reasonFindingIds = smartPlan['reasonFindingIds'];
-    const smartPlanOk =
-      Array.isArray(changes) &&
-      changes.every(
-        (change) =>
-          isRecord(change) &&
-          hasOnlyKeys(change, ['packageName', 'currentVersion', 'targetVersion']) &&
-          typeof change['packageName'] === 'string' &&
-          typeof change['currentVersion'] === 'string' &&
-          typeof change['targetVersion'] === 'string'
-      ) &&
-      Array.isArray(reasonFindingIds) &&
-      reasonFindingIds.every((id) => typeof id === 'string');
-    if (!smartPlanOk) return false;
-  }
+  if (!isUpgradeAnalysisSmartPlanValue(value['smartPlan'])) return false;
 
   if (!isVerification(value['verification'])) return false;
 
-  const files = value['files'];
-  if (
-    !isRecord(files) ||
-    !hasOnlyKeys(files, ['manifestPath', 'lockfilePath', 'rollbackAvailable']) ||
-    typeof files['manifestPath'] !== 'string' ||
-    typeof files['lockfilePath'] !== 'string' ||
-    typeof files['rollbackAvailable'] !== 'boolean'
-  ) {
-    return false;
-  }
+  if (!isUpgradeAnalysisFilesValue(value['files'])) return false;
 
   const firstChange = changes[0];
+  if (typeof value['analyzedAt'] !== 'string' || typeof value['expiresAt'] !== 'string') return false;
+  const analyzedMs = Date.parse(value['analyzedAt']);
+  const expiresMs = Date.parse(value['expiresAt']);
   return (
     typeof value['analysisId'] === 'string' &&
+    Number.isFinite(analyzedMs) &&
+    Number.isFinite(expiresMs) &&
+    new Date(analyzedMs).toISOString() === value['analyzedAt'] &&
+    new Date(expiresMs).toISOString() === value['expiresAt'] &&
+    expiresMs > analyzedMs &&
     typeof value['package'] === 'string' &&
     typeof value['currentVersion'] === 'string' &&
     typeof value['targetVersion'] === 'string' &&
@@ -904,6 +1058,45 @@ function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysis
     firstChange['classification'] === value['classification'] &&
     firstChange['majorUpdate'] === value['majorUpdate']
   );
+}
+
+/** Validates one UpgradeAnalysisPartialSection — reuses the same per-field checks isUpgradeAnalysisPresentation uses for the equivalent complete field, so the two can never silently diverge. */
+function isUpgradeAnalysisPartialSection(value: unknown): value is UpgradeAnalysisPartialSection {
+  if (!isRecord(value)) return false;
+  const kind = value['kind'];
+  if (kind === 'overview') {
+    return (
+      hasOnlyKeys(value, [
+        'kind',
+        'currentVersion',
+        'targetVersion',
+        'classification',
+        'majorUpdate',
+        'changes',
+        'verification',
+        'files',
+      ]) &&
+      isNonEmptyString(value['currentVersion']) &&
+      isNonEmptyString(value['targetVersion']) &&
+      typeof value['classification'] === 'string' &&
+      CLASSIFICATIONS.has(value['classification']) &&
+      typeof value['majorUpdate'] === 'boolean' &&
+      isUpgradeAnalysisChangesValue(value['changes']) &&
+      isVerification(value['verification']) &&
+      isUpgradeAnalysisFilesValue(value['files'])
+    );
+  }
+  if (kind === 'compatibility') {
+    return hasOnlyKeys(value, ['kind', 'compatibility']) && isUpgradeAnalysisCompatibilityValue(value['compatibility']);
+  }
+  if (kind === 'security') {
+    const security = value['security'];
+    return hasOnlyKeys(value, ['kind', 'security']) && (security === null || isSecurityOutcome(security));
+  }
+  if (kind === 'smart-plan') {
+    return hasOnlyKeys(value, ['kind', 'smartPlan']) && isUpgradeAnalysisSmartPlanValue(value['smartPlan']);
+  }
+  return false;
 }
 
 function isVerification(value: unknown): value is UpgradeAnalysisVerification {
@@ -1047,6 +1240,34 @@ function isUsageAnalysisResult(value: unknown): value is UsageAnalysisResult {
   );
 }
 
+const UPGRADE_TARGET_LABELS: ReadonlySet<string> = new Set(['recommended', 'lts', 'latest']);
+
+function isUpgradeTargetOption(value: unknown): value is UpgradeTargetOption {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['version', 'channel', 'labels'])) return false;
+  const labels = value['labels'];
+  return (
+    isNonEmptyString(value['version']) &&
+    (value['channel'] === 'stable' || value['channel'] === 'prerelease') &&
+    Array.isArray(labels) &&
+    labels.every((label) => typeof label === 'string' && UPGRADE_TARGET_LABELS.has(label)) &&
+    new Set(labels).size === labels.length
+  );
+}
+
+function isUpgradeTargetOptions(value: unknown): value is UpgradeTargetOptions {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['recommendedVersion', 'options', 'truncated'])) return false;
+  const recommendedVersion = value['recommendedVersion'];
+  const options = value['options'];
+  return (
+    (recommendedVersion === null || isNonEmptyString(recommendedVersion)) &&
+    Array.isArray(options) &&
+    options.every(isUpgradeTargetOption) &&
+    new Set(options.map((option) => option.version)).size === options.length &&
+    typeof value['truncated'] === 'boolean' &&
+    (recommendedVersion === null || options.some((option) => option.version === recommendedVersion))
+  );
+}
+
 export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMessage {
   if (!isRecord(value)) return false;
 
@@ -1070,6 +1291,68 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   if (status === 'fatal-error') {
     return hasOnlyKeys(value, ['status', 'error']) && isProtocolError(value['error']);
   }
+  if (status === 'upgrade-targets-loading') {
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'requestId']) &&
+      isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['requestId'])
+    );
+  }
+  if (status === 'upgrade-targets') {
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'requestId', 'targets']) &&
+      isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['requestId']) &&
+      isUpgradeTargetOptions(value['targets'])
+    );
+  }
+  if (status === 'upgrade-targets-error') {
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'requestId', 'error']) &&
+      isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['requestId']) &&
+      isProtocolError(value['error'])
+    );
+  }
+  if (status === 'upgrade-result') {
+    const result = value['result'];
+    if (!isRecord(result) || !hasOnlyKeys(result, ['package', 'refreshId', 'install', 'application', 'verification', 'changes', 'refreshingDerivedData'])) {
+      return false;
+    }
+    const changes = result['changes'];
+    return (
+      isNonEmptyString(result['package']) &&
+      isNonEmptyString(result['refreshId']) &&
+      (result['install'] === 'succeeded' || result['install'] === 'failed') &&
+      (result['application'] === 'applied' || result['application'] === 'unconfirmed' || result['application'] === 'rolled-back') &&
+      (result['verification'] === 'passed' || result['verification'] === 'not-configured' || result['verification'] === 'failed' || result['verification'] === 'not-run') &&
+      Array.isArray(changes) &&
+      changes.length > 0 &&
+      new Set(changes.map((change) => isRecord(change) ? change['packageName'] : undefined)).size === changes.length &&
+      changes.every((change) =>
+        isRecord(change) &&
+        hasOnlyKeys(change, ['packageName', 'previousVersion', 'requestedVersion', 'currentVersion', 'declaredRange', 'classification']) &&
+        isNonEmptyString(change['packageName']) &&
+        isNonEmptyString(change['previousVersion']) &&
+        isNonEmptyString(change['requestedVersion']) &&
+        (change['currentVersion'] === null || isNonEmptyString(change['currentVersion'])) &&
+        (change['declaredRange'] === null || typeof change['declaredRange'] === 'string') &&
+        (change['classification'] === null || change['classification'] === 'prod' || change['classification'] === 'dev' || change['classification'] === 'optional')
+      ) &&
+      typeof result['refreshingDerivedData'] === 'boolean'
+    );
+  }
+  if (status === 'upgrade-enrichment-result') {
+    const outcome = value['outcome'];
+    const error = value['error'];
+    return (
+      hasOnlyKeys(value, ['status', 'refreshId', 'package', 'outcome', 'error']) &&
+      isNonEmptyString(value['refreshId']) &&
+      isNonEmptyString(value['package']) &&
+      (outcome === 'succeeded' || outcome === 'failed' || outcome === 'cancelled' || outcome === 'superseded') &&
+      (outcome === 'failed' ? isProtocolError(error) : error === undefined)
+    );
+  }
   if (status === 'upgrade-error') {
     return (
       hasOnlyKeys(value, ['status', 'package', 'error']) &&
@@ -1080,13 +1363,29 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   if (status === 'upgrade-analyzing') {
     const phase = value['phase'];
     return (
-      hasOnlyKeys(value, ['status', 'package', 'phase']) &&
+      hasOnlyKeys(value, ['status', 'package', 'phase', 'requestId']) &&
       isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['requestId']) &&
       (phase === 'compatibility' || phase === 'smart-plan')
     );
   }
+  if (status === 'upgrade-analysis-partial') {
+    return (
+      hasOnlyKeys(value, ['status', 'requestId', 'package', 'section']) &&
+      isNonEmptyString(value['requestId']) &&
+      isNonEmptyString(value['package']) &&
+      isUpgradeAnalysisPartialSection(value['section'])
+    );
+  }
   if (status === 'upgrade-analysis') {
-    return hasOnlyKeys(value, ['status', 'analysis']) && isUpgradeAnalysisPresentation(value['analysis']);
+    return (
+      hasOnlyKeys(value, ['status', 'analysis', 'requestId']) &&
+      isUpgradeAnalysisPresentation(value['analysis']) &&
+      isNonEmptyString(value['requestId'])
+    );
+  }
+  if (status === 'upgrade-analysis-stale') {
+    return hasOnlyKeys(value, ['status', 'analysisId']) && isNonEmptyString(value['analysisId']);
   }
   if (status === 'remove-analyzing') {
     return hasOnlyKeys(value, ['status', 'package']) && isNonEmptyString(value['package']);

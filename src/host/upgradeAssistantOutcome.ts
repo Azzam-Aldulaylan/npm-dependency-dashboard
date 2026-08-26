@@ -1,9 +1,37 @@
 import type { UpgradeTransactionResult } from './upgradeTransaction.js';
-import type { ProtocolError } from './webviewProtocol.js';
+import type { ProtocolError, UpgradeResultPresentation } from './webviewProtocol.js';
+
+/** The sole application-state gate: task success alone never authorizes "applied". */
+export function classifyUpgradeApplication(
+  completion: UpgradeTransactionResult['completion'],
+  structurallyCurrent: boolean,
+  locallyConfirmed: boolean
+): UpgradeResultPresentation['application'] {
+  if (completion === 'rolled-back') return 'rolled-back';
+  return completion === 'kept' && structurallyCurrent && locallyConfirmed ? 'applied' : 'unconfirmed';
+}
+
+/** A generation-raced snapshot may be displayed, but never enriched as current. */
+export function classifyMutationEnrichmentStart(
+  structurallyCurrent: boolean
+): 'start-targeted' | 'superseded' {
+  return structurallyCurrent ? 'start-targeted' : 'superseded';
+}
+
+export function canRetryMutationEnrichment(
+  current: { refreshId: string; state: string } | undefined,
+  requestedRefreshId: string
+): boolean {
+  return (
+    current?.refreshId === requestedRefreshId &&
+    (current.state === 'failed' || current.state === 'cancelled')
+  );
+}
 
 export type UpgradeCompletionPresentation =
   | { kind: 'verified'; message: string }
   | { kind: 'unverified'; message: string }
+  | { kind: 'unconfirmed'; message: string }
   | { kind: 'rolled-back'; message: string }
   | { kind: 'error'; error: ProtocolError };
 
@@ -15,7 +43,8 @@ export type UpgradeCompletionPresentation =
 export function describeUpgradeTransactionOutcome(
   packageName: string,
   packageManager: 'npm' | 'pnpm',
-  transaction: UpgradeTransactionResult
+  transaction: UpgradeTransactionResult,
+  appliedStateConfirmed = true
 ): UpgradeCompletionPresentation {
   // Rollback status takes precedence over completion. This avoids ever
   // overstating restoration if a malformed or future result combines an
@@ -63,13 +92,22 @@ export function describeUpgradeTransactionOutcome(
         };
   }
 
+  if (transaction.completion === 'kept' && !appliedStateConfirmed) {
+    return {
+      kind: 'unconfirmed',
+      message: 'Install completed, but the resulting dependency state could not be confirmed.',
+    };
+  }
   if (transaction.completion === 'kept' && transaction.reason === 'verified') {
-    return { kind: 'verified', message: `Upgraded ${packageName}; verification passed.` };
+    return { kind: 'verified', message: `Upgrade applied to ${packageName}; verification passed.` };
   }
   if (transaction.completion === 'kept') {
     return {
       kind: 'unverified',
-      message: `Upgraded ${packageName}, but the application upgrade is not verified.`,
+      message:
+        transaction.verification.status === 'failed'
+          ? `Upgrade applied to ${packageName}, but verification failed and the changes were kept.`
+          : `Upgrade applied to ${packageName}. Verification is not configured.`,
     };
   }
   if (transaction.completion === 'rolled-back') {

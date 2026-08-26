@@ -24,14 +24,16 @@
 import { isMajorUpgrade } from '../core/upgrade/plan.js';
 import type { DependencyClassification } from '../core/upgrade/plan.js';
 import type {
+  UpgradeAnalysisChange,
   UpgradeAnalysisCompatibility,
+  UpgradeAnalysisFiles,
   UpgradeAnalysisPresentation,
   UpgradeAnalysisSmartPlan,
+  UpgradeAnalysisVerification,
 } from './webviewProtocol.js';
 import type { SecurityOutcome } from './webviewProtocol.js';
 
-export interface BuildUpgradeAnalysisPresentationOptions {
-  analysisId: string;
+export interface BuildUpgradeAnalysisChangesOptions {
   packageName: string;
   currentVersion: string;
   targetVersion: string;
@@ -42,6 +44,52 @@ export interface BuildUpgradeAnalysisPresentationOptions {
     targetVersion: string;
     classification: DependencyClassification;
   }[];
+}
+
+/**
+ * Shared by the Stage-0 `overview` partial (upgradeAssistantCoordinator.ts)
+ * and the final buildUpgradeAnalysisPresentation below, so the two can never
+ * compute a different `changes` array for the same analysis.
+ */
+export function buildUpgradeAnalysisChanges(options: BuildUpgradeAnalysisChangesOptions): UpgradeAnalysisChange[] {
+  const changes = options.changes ?? [{
+    packageName: options.packageName,
+    currentVersion: options.currentVersion,
+    targetVersion: options.targetVersion,
+    classification: options.classification,
+  }];
+  return changes.map((change) => ({
+    ...change,
+    majorUpdate: isMajorUpgrade(change.currentVersion, change.targetVersion),
+  }));
+}
+
+/** Shared by the Stage-0 `overview` partial and buildUpgradeAnalysisPresentation below. */
+export function buildUpgradeAnalysisVerification(verificationScriptNames: readonly string[]): UpgradeAnalysisVerification {
+  return verificationScriptNames.length > 0
+    ? { configured: true, scriptNames: [...verificationScriptNames] }
+    : { configured: false };
+}
+
+/** Shared by the Stage-0 `overview` partial and buildUpgradeAnalysisPresentation below. */
+export function buildUpgradeAnalysisFiles(manifestPath: string, lockfilePath: string): UpgradeAnalysisFiles {
+  return {
+    manifestPath,
+    lockfilePath,
+    // The transaction system (upgradeTransaction.ts) always attempts a
+    // compare-and-swap restore of exactly these two allowlisted files on
+    // failure — there is no execution path that reaches this presentation
+    // without that guarantee applying.
+    rollbackAvailable: true,
+  };
+}
+
+export interface BuildUpgradeAnalysisPresentationOptions extends BuildUpgradeAnalysisChangesOptions {
+  analysisId: string;
+  /** ISO timestamp — computed once by the coordinator at final-assembly time, passed in rather than computed here so this builder stays deterministic/pure. */
+  analyzedAt: string;
+  /** ISO timestamp derived from the exact stored-analysis retention deadline. */
+  expiresAt: string;
   compatibility: UpgradeAnalysisCompatibility;
   security: SecurityOutcome | null;
   smartPlan: UpgradeAnalysisSmartPlan | null;
@@ -53,38 +101,21 @@ export interface BuildUpgradeAnalysisPresentationOptions {
 export function buildUpgradeAnalysisPresentation(
   options: BuildUpgradeAnalysisPresentationOptions
 ): UpgradeAnalysisPresentation {
-  const changes = options.changes ?? [{
-    packageName: options.packageName,
-    currentVersion: options.currentVersion,
-    targetVersion: options.targetVersion,
-    classification: options.classification,
-  }];
+  const changes = buildUpgradeAnalysisChanges(options);
   return {
     analysisId: options.analysisId,
+    analyzedAt: options.analyzedAt,
+    expiresAt: options.expiresAt,
     package: options.packageName,
     currentVersion: options.currentVersion,
     targetVersion: options.targetVersion,
     classification: options.classification,
     majorUpdate: isMajorUpgrade(options.currentVersion, options.targetVersion),
-    changes: changes.map((change) => ({
-      ...change,
-      majorUpdate: isMajorUpgrade(change.currentVersion, change.targetVersion),
-    })),
+    changes,
     compatibility: options.compatibility,
     security: options.security,
     smartPlan: options.smartPlan,
-    verification:
-      options.verificationScriptNames.length > 0
-        ? { configured: true, scriptNames: [...options.verificationScriptNames] }
-        : { configured: false },
-    files: {
-      manifestPath: options.manifestPath,
-      lockfilePath: options.lockfilePath,
-      // The transaction system (upgradeTransaction.ts) always attempts a
-      // compare-and-swap restore of exactly these two allowlisted files on
-      // failure — there is no execution path that reaches this presentation
-      // without that guarantee applying.
-      rollbackAvailable: true,
-    },
+    verification: buildUpgradeAnalysisVerification(options.verificationScriptNames),
+    files: buildUpgradeAnalysisFiles(options.manifestPath, options.lockfilePath),
   };
 }

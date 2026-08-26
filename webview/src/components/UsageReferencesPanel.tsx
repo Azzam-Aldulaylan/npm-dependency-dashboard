@@ -152,7 +152,7 @@ function WhereUsedCard({
             <IconAlertTriangle className="usage-status__icon" />
             {usage.message}
           </p>
-          <button type="button" className="button button--secondary" onClick={onReanalyze}>
+          <button type="button" className="button button--subtle" onClick={onReanalyze}>
             <IconRefresh />
             Re-analyze
           </button>
@@ -164,7 +164,7 @@ function WhereUsedCard({
               {analyzedAge(usage.result.scannedAt, now)}
               {usage.fromCache ? ' · cached' : ''}
             </p>
-            <button type="button" className="button button--secondary" onClick={onReanalyze}>
+            <button type="button" className="button button--subtle" onClick={onReanalyze}>
               <IconRefresh />
               Re-analyze
             </button>
@@ -403,6 +403,8 @@ export function UsageReferencesPanel({
   row,
   hygieneFindings,
   usage,
+  updateResolutionAvailable,
+  advisoriesAvailable,
   onReanalyzeUsage,
   onOpenUsageReference,
   onChangeTab,
@@ -411,6 +413,8 @@ export function UsageReferencesPanel({
   row: PackageRow;
   hygieneFindings: readonly DependencyFinding[];
   usage: UsageRequestState | undefined;
+  updateResolutionAvailable: boolean;
+  advisoriesAvailable: boolean;
   onReanalyzeUsage: (packageName: string) => void;
   onOpenUsageReference: (usageId: string, referenceIndex: number) => void;
   onChangeTab: (tab: ManageTabId) => void;
@@ -447,12 +451,14 @@ export function UsageReferencesPanel({
           </h3>
           <dl className="manage-glance">
             <GlanceRow label="Installed version">{row.current ?? row.range}</GlanceRow>
-            <GlanceRow label="Latest version">{row.latest ?? '—'}</GlanceRow>
+            <GlanceRow label="Latest version">{updateResolutionAvailable ? row.latest ?? '—' : 'Unavailable'}</GlanceRow>
             <GlanceRow label="Update available">
-              {row.upgradeTo === null ? 'None' : updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Yes'}
+              {!updateResolutionAvailable ? 'Unavailable' : row.upgradeTo === null ? 'None' : updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Yes'}
             </GlanceRow>
             <GlanceRow label="Vulnerabilities">
-              {row.advisories.length === 0 ? (
+              {!advisoriesAvailable ? (
+                'Unavailable'
+              ) : row.advisories.length === 0 ? (
                 'None'
               ) : (
                 <span className={`status-badge status-badge--${needsAttention ? 'warning' : 'neutral'}`}>
@@ -461,8 +467,8 @@ export function UsageReferencesPanel({
               )}
             </GlanceRow>
             <GlanceRow label="Status">
-              <span className={`status-badge status-badge--${needsAttention ? 'warning' : 'neutral'}`}>
-                {needsAttention ? 'Needs attention' : 'Looks fine'}
+              <span className={`status-badge status-badge--${needsAttention || !advisoriesAvailable ? 'warning' : 'neutral'}`}>
+                {!advisoriesAvailable ? 'Data incomplete' : needsAttention ? 'Needs attention' : 'Looks fine'}
               </span>
             </GlanceRow>
           </dl>

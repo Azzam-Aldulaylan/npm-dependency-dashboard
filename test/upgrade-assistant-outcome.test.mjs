@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { describeRemoveTransactionOutcome, describeUpgradeTransactionOutcome } from '../out/host/upgradeAssistantOutcome.js';
+import {
+  canRetryMutationEnrichment,
+  classifyMutationEnrichmentStart,
+  classifyUpgradeApplication,
+  describeRemoveTransactionOutcome,
+  describeUpgradeTransactionOutcome,
+} from '../out/host/upgradeAssistantOutcome.js';
 
 const succeededSnapshot = { status: 'succeeded', paths: ['/workspace/package.json'] };
 const succeededInstall = { status: 'succeeded' };
@@ -23,7 +29,7 @@ function result(overrides = {}) {
 test('verified and unverified kept upgrades remain clearly distinct', () => {
   assert.deepEqual(describeUpgradeTransactionOutcome('react', 'npm', result()), {
     kind: 'verified',
-    message: 'Upgraded react; verification passed.',
+    message: 'Upgrade applied to react; verification passed.',
   });
   assert.deepEqual(
     describeUpgradeTransactionOutcome(
@@ -36,9 +42,49 @@ test('verified and unverified kept upgrades remain clearly distinct', () => {
     ),
     {
       kind: 'unverified',
-      message: 'Upgraded react, but the application upgrade is not verified.',
+      message: 'Upgrade applied to react. Verification is not configured.',
     }
   );
+});
+
+test('task success without local applied-state confirmation is never described as a successful upgrade', () => {
+  assert.deepEqual(describeUpgradeTransactionOutcome('react', 'npm', result(), false), {
+    kind: 'unconfirmed',
+    message: 'Install completed, but the resulting dependency state could not be confirmed.',
+  });
+});
+
+test('application confirmation requires both an exact local match and a structurally current final read', () => {
+  assert.equal(classifyUpgradeApplication('kept', true, true), 'applied');
+  assert.equal(classifyUpgradeApplication('kept', false, true), 'unconfirmed');
+  assert.equal(classifyUpgradeApplication('kept', true, false), 'unconfirmed');
+  assert.equal(classifyUpgradeApplication('rolled-back', true, true), 'rolled-back');
+});
+
+test('a final read raced by a watcher cannot start targeted enrichment for that snapshot', () => {
+  assert.equal(classifyMutationEnrichmentStart(true), 'start-targeted');
+  assert.equal(classifyMutationEnrichmentStart(false), 'superseded');
+});
+
+test('targeted enrichment retry accepts only the exact failed or cancelled lifecycle', () => {
+  assert.equal(canRetryMutationEnrichment({ refreshId: 'r1', state: 'failed' }, 'r1'), true);
+  assert.equal(canRetryMutationEnrichment({ refreshId: 'r1', state: 'cancelled' }, 'r1'), true);
+  assert.equal(canRetryMutationEnrichment({ refreshId: 'r1', state: 'running' }, 'r1'), false);
+  assert.equal(canRetryMutationEnrichment({ refreshId: 'r1', state: 'superseded' }, 'r1'), false);
+  assert.equal(canRetryMutationEnrichment({ refreshId: 'r1', state: 'failed' }, 'r2'), false);
+  assert.equal(canRetryMutationEnrichment(undefined, 'r1'), false);
+});
+
+test('kept changes after failed verification distinguish applied state from verification failure', () => {
+  const presentation = describeUpgradeTransactionOutcome('react', 'npm', result({
+    reason: 'verification-failed',
+    verification: { status: 'failed', checks: [], message: 'tests failed' },
+    retentionDecision: 'keep',
+  }));
+  assert.deepEqual(presentation, {
+    kind: 'unverified',
+    message: 'Upgrade applied to react, but verification failed and the changes were kept.',
+  });
 });
 
 test('successful rollback says only dependency files were restored and gives the package-manager reconcile command', () => {

@@ -8,11 +8,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildUpgradeAnalysisPresentation } from '../out/host/upgradeAnalysisPresentation.js';
+import {
+  buildUpgradeAnalysisChanges,
+  buildUpgradeAnalysisFiles,
+  buildUpgradeAnalysisPresentation,
+  buildUpgradeAnalysisVerification,
+} from '../out/host/upgradeAnalysisPresentation.js';
 
 function baseOptions(overrides) {
   return {
     analysisId: 'abc123',
+    analyzedAt: '2026-08-26T12:00:00.000Z',
+    expiresAt: '2026-08-26T14:00:00.000Z',
     packageName: 'react-toastify',
     currentVersion: '10.0.6',
     targetVersion: '11.1.0',
@@ -115,4 +122,39 @@ test('coordinated changes are preserved and each computes its own major-update f
     { packageName: 'react-toastify', majorUpdate: true },
     { packageName: 'typescript', majorUpdate: false },
   ]);
+});
+
+test('analyzedAt passes through unchanged — the timestamp the coordinator computed once at final assembly', () => {
+  const result = buildUpgradeAnalysisPresentation(baseOptions({ analyzedAt: '2026-08-26T09:15:00.000Z' }));
+  assert.equal(result.analyzedAt, '2026-08-26T09:15:00.000Z');
+});
+
+test('expiresAt passes through unchanged from the exact stored-analysis deadline', () => {
+  const result = buildUpgradeAnalysisPresentation(baseOptions({ expiresAt: '2026-08-26T13:59:59.000Z' }));
+  assert.equal(result.expiresAt, '2026-08-26T13:59:59.000Z');
+});
+
+test('buildUpgradeAnalysisChanges produces the exact same shape buildUpgradeAnalysisPresentation embeds — the Stage-0 overview partial and the final object can never diverge', () => {
+  const options = {
+    packageName: 'react-toastify',
+    currentVersion: '10.0.6',
+    targetVersion: '11.1.0',
+    classification: 'prod',
+  };
+  const standalone = buildUpgradeAnalysisChanges(options);
+  const embedded = buildUpgradeAnalysisPresentation(baseOptions(options)).changes;
+  assert.deepEqual(standalone, embedded);
+});
+
+test('buildUpgradeAnalysisVerification matches buildUpgradeAnalysisPresentation.verification for both the configured and not-configured cases', () => {
+  assert.deepEqual(buildUpgradeAnalysisVerification([]), { configured: false });
+  assert.deepEqual(buildUpgradeAnalysisVerification(['test', 'build']), { configured: true, scriptNames: ['test', 'build'] });
+});
+
+test('buildUpgradeAnalysisFiles matches buildUpgradeAnalysisPresentation.files, including the always-true rollback guarantee', () => {
+  assert.deepEqual(buildUpgradeAnalysisFiles('/app/package.json', '/app/package-lock.json'), {
+    manifestPath: '/app/package.json',
+    lockfilePath: '/app/package-lock.json',
+    rollbackAvailable: true,
+  });
 });

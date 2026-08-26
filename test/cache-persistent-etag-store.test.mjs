@@ -6,7 +6,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { PersistentEtagStore, REGISTRY_CACHE_STORAGE_KEY } from '../out/core/cache/persistentEtagStore.js';
+import {
+  MAX_REGISTRY_CACHE_SERIALIZED_BYTES,
+  PersistentEtagStore,
+  REGISTRY_CACHE_STORAGE_KEY,
+  boundPersistedEtagEntries,
+  loadPersistedEtagEntries,
+  serializedEtagCacheBytes,
+} from '../out/core/cache/persistentEtagStore.js';
 
 function fakeKeyValueStore(initial) {
   const data = new Map(initial ? [[REGISTRY_CACHE_STORAGE_KEY, initial]] : []);
@@ -102,4 +109,96 @@ test('the store is bounded — entries beyond MAX_REGISTRY_CACHE_ENTRIES are evi
   assert.ok(persisted.entries.length <= 500, `expected at most 500 entries, got ${persisted.entries.length}`);
   assert.equal(store.get('https://registry.npmjs.org/pkg-0'), undefined);
   assert.notEqual(store.get('https://registry.npmjs.org/pkg-519'), undefined);
+});
+
+test('an individually oversized response is omitted from persistence without evicting otherwise valid entries', async () => {
+  const kv = fakeKeyValueStore();
+  const store = new PersistentEtagStore(kv);
+  const retainedUrl = 'https://registry.npmjs.org/small/latest';
+  const oversizedUrl = 'https://registry.npmjs.org/oversized';
+
+  store.set(retainedUrl, { etag: 'W/"small"', body: '{"version":"1.0.0"}' });
+  store.set(oversizedUrl, { etag: 'W/"large"', body: 'x'.repeat(MAX_REGISTRY_CACHE_SERIALIZED_BYTES) });
+  await flushed();
+
+  assert.equal(store.get(oversizedUrl)?.body.length, MAX_REGISTRY_CACHE_SERIALIZED_BYTES,
+    'the current session can still reuse the response');
+  const persisted = kv.raw.get(REGISTRY_CACHE_STORAGE_KEY);
+  assert.deepEqual(persisted.entries.map(([url]) => url), [retainedUrl]);
+  assert.ok(serializedEtagCacheBytes(persisted.entries) <= MAX_REGISTRY_CACHE_SERIALIZED_BYTES);
+});
+
+test('cumulative byte pressure evicts oldest writes deterministically', () => {
+  const entries = [
+    ['https://registry.npmjs.org/oldest', { etag: 'W/"1"', body: 'a'.repeat(80) }],
+    ['https://registry.npmjs.org/middle', { etag: 'W/"2"', body: 'b'.repeat(80) }],
+    ['https://registry.npmjs.org/newest', { etag: 'W/"3"', body: 'c'.repeat(80) }],
+  ];
+  const newestTwoBytes = serializedEtagCacheBytes(entries.slice(1));
+
+  const bounded = boundPersistedEtagEntries(entries, newestTwoBytes, 500);
+
+  assert.deepEqual(bounded.map(([url]) => url), entries.slice(1).map(([url]) => url));
+  assert.equal(serializedEtagCacheBytes(bounded), newestTwoBytes);
+});
+
+test('cumulative pressure does not backfill an older small entry past a newer admissible LRU boundary', () => {
+  const olderSmall = ['https://registry.npmjs.org/older-small', { etag: 'W/"1"', body: 'a' }];
+  const middleLarge = ['https://registry.npmjs.org/middle-large', { etag: 'W/"2"', body: 'b'.repeat(120) }];
+  const newest = ['https://registry.npmjs.org/newest', { etag: 'W/"3"', body: 'c'.repeat(40) }];
+  const singleEntryBudget = Math.max(
+    serializedEtagCacheBytes([newest]),
+    serializedEtagCacheBytes([middleLarge])
+  );
+
+  const bounded = boundPersistedEtagEntries(
+    [olderSmall, middleLarge, newest],
+    singleEntryBudget,
+    500
+  );
+
+  assert.deepEqual(bounded, [newest], 'LRU evicts the whole older tail once the next recent entry cannot fit');
+});
+
+test('rewriting an entry makes it freshest for byte-bound eviction', () => {
+  const originalA = ['https://registry.npmjs.org/a', { etag: 'W/"old-a"', body: 'a'.repeat(80) }];
+  const entryB = ['https://registry.npmjs.org/b', { etag: 'W/"b"', body: 'b'.repeat(80) }];
+  const freshA = ['https://registry.npmjs.org/a', { etag: 'W/"fresh-a"', body: 'A'.repeat(80) }];
+  const entryC = ['https://registry.npmjs.org/c', { etag: 'W/"c"', body: 'c'.repeat(80) }];
+  const freshestTwoBytes = serializedEtagCacheBytes([freshA, entryC]);
+
+  const bounded = boundPersistedEtagEntries([originalA, entryB, freshA, entryC], freshestTwoBytes, 500);
+
+  assert.deepEqual(bounded, [freshA, entryC]);
+});
+
+test('schema-v2 loading remains compatible, applies the byte bound, and heals oversized persistence', async () => {
+  const valid = ['https://registry.npmjs.org/valid/latest', { etag: 'W/"valid"', body: '{}' }];
+  const oversized = [
+    'https://registry.npmjs.org/oversized',
+    { etag: 'W/"large"', body: 'x'.repeat(MAX_REGISTRY_CACHE_SERIALIZED_BYTES) },
+  ];
+  const kv = fakeKeyValueStore({ schemaVersion: 2, entries: [valid, oversized] });
+
+  assert.deepEqual(loadPersistedEtagEntries(kv), [valid]);
+  const store = new PersistentEtagStore(kv);
+  assert.deepEqual(store.get(valid[0]), valid[1]);
+  assert.equal(store.get(oversized[0]), undefined);
+  await flushed();
+  assert.deepEqual(kv.raw.get(REGISTRY_CACHE_STORAGE_KEY), { schemaVersion: 2, entries: [valid] });
+});
+
+test('credential filtering and the byte bound are applied before every safe persisted snapshot', async () => {
+  const kv = fakeKeyValueStore();
+  const store = new PersistentEtagStore(kv);
+  store.set('https://user:secret@registry.example/private', { etag: 'W/"secret"', body: 'x'.repeat(100) });
+  for (let i = 0; i < 30; i += 1) {
+    store.set(`https://registry.npmjs.org/safe-${i}`, { etag: `W/"${i}"`, body: 'x'.repeat(200_000) });
+  }
+  await flushed();
+
+  const persisted = kv.raw.get(REGISTRY_CACHE_STORAGE_KEY);
+  assert.ok(serializedEtagCacheBytes(persisted.entries) <= MAX_REGISTRY_CACHE_SERIALIZED_BYTES);
+  assert.ok(persisted.entries.every(([url]) => !url.includes('@')));
+  assert.equal(persisted.entries.at(-1)[0], 'https://registry.npmjs.org/safe-29');
 });

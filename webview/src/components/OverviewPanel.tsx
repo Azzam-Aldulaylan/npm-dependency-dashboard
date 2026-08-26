@@ -140,7 +140,7 @@ function UpgradeCard({
         </p>
         <button
           type="button"
-          className="button manage-action-card__cta"
+          className="button button--primary manage-action-card__cta"
           disabled={actionsDisabled}
           title={actionsDisabled ? 'Another dependency operation is already in progress.' : state.tooltip}
           onClick={() => onStartUpgradeReview(state.target)}
@@ -249,7 +249,7 @@ function RemoveCard({
       ) : (
         <button
           type="button"
-          className="button manage-action-card__cta"
+          className="button button--primary manage-action-card__cta"
           disabled={actionsDisabled}
           onClick={entry !== undefined ? () => onChangeTab('removal') : onStartRemovalReview}
         >
@@ -299,7 +299,7 @@ function TransitiveFixCard({
         <code>{subject}</code> is introduced through <code>{introducedThrough}</code>.
       </p>
       {remediation === undefined ? (
-        <button type="button" className="button manage-action-card__cta" disabled={actionsDisabled} onClick={onAnalyzeRemediation}>
+        <button type="button" className="button button--primary manage-action-card__cta" disabled={actionsDisabled} onClick={onAnalyzeRemediation}>
           Check transitive fixes →
         </button>
       ) : remediation.phase === 'analyzing' ? (
@@ -354,11 +354,24 @@ const MAX_COMPACT_VULNERABILITIES = 2;
  */
 function VulnerabilitySummary({
   row,
+  advisoriesAvailable,
   onChangeTab,
 }: {
   row: PackageRow;
+  advisoriesAvailable: boolean;
   onChangeTab: (tab: ManageTabId) => void;
 }): ReactElement | null {
+  if (!advisoriesAvailable) {
+    return (
+      <section className="manage-vulnerabilities" aria-labelledby="manage-vulnerabilities-heading">
+        <h3 className="manage-vulnerabilities__heading" id="manage-vulnerabilities-heading">
+          <IconShield className="manage-vulnerabilities__heading-icon" />
+          Vulnerabilities
+        </h3>
+        <p className="manage-vulnerabilities__more">Advisory data is unavailable. Refresh the dashboard to check this package.</p>
+      </section>
+    );
+  }
   if (row.advisories.length === 0) return null;
   const sorted = sortAdvisoriesBySeverity(row.advisories);
   const shown = sorted.slice(0, MAX_COMPACT_VULNERABILITIES);
@@ -421,6 +434,9 @@ export function OverviewPanel({
   removalImpact,
   usage,
   actionsDisabled,
+  upgradeDisabled,
+  updateResolutionAvailable,
+  advisoriesAvailable,
   onStartUpgradeReview,
   onStartRemovalReview,
   onAnalyzeRemediation,
@@ -431,6 +447,9 @@ export function OverviewPanel({
   removalImpact: RemovalImpactState;
   usage: UsageRequestState | undefined;
   actionsDisabled: boolean;
+  upgradeDisabled: boolean;
+  updateResolutionAvailable: boolean;
+  advisoriesAvailable: boolean;
   onStartUpgradeReview: (packageName: string, target: string) => void;
   onStartRemovalReview: (packageName: string) => void;
   onAnalyzeRemediation: (packageName: string) => void;
@@ -463,18 +482,18 @@ export function OverviewPanel({
           </h3>
           <dl className="manage-glance">
             <GlanceRow label="Installed version">{row.current ?? row.range}</GlanceRow>
-            <GlanceRow label="Latest version">{row.latest ?? '—'}</GlanceRow>
+            <GlanceRow label="Latest version">{updateResolutionAvailable ? row.latest ?? '—' : 'Unavailable'}</GlanceRow>
             <GlanceRow label="Update available">
-              {row.upgradeTo === null ? 'None' : updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Yes'}
+              {!updateResolutionAvailable ? 'Unavailable' : row.upgradeTo === null ? 'None' : updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Yes'}
             </GlanceRow>
             <GlanceRow label="Vulnerabilities">
-              {row.advisories.length === 0 ? 'None' : <SeverityBadge severity={row.worstSeverity} />}
+              {!advisoriesAvailable ? 'Unavailable' : row.advisories.length === 0 ? 'None' : <SeverityBadge severity={row.worstSeverity} />}
             </GlanceRow>
             <GlanceRow label="Usage analysis">{usageChecking ? <UsageCheckingStatus /> : usageAnalysisLabel(usage)}</GlanceRow>
           </dl>
         </section>
 
-        <VulnerabilitySummary row={row} onChangeTab={onChangeTab} />
+        <VulnerabilitySummary row={row} advisoriesAvailable={advisoriesAvailable} onChangeTab={onChangeTab} />
       </div>
 
       <div className="overview-panel__actions">
@@ -483,7 +502,7 @@ export function OverviewPanel({
           <UpgradeCard
             row={row}
             remediation={remediation}
-            actionsDisabled={actionsDisabled}
+            actionsDisabled={upgradeDisabled}
             onStartUpgradeReview={(target) => onStartUpgradeReview(row.name, target)}
           />
           <RemoveCard
@@ -498,7 +517,7 @@ export function OverviewPanel({
             <TransitiveFixCard
               row={row}
               remediation={remediation}
-              actionsDisabled={actionsDisabled}
+              actionsDisabled={upgradeDisabled}
               onAnalyzeRemediation={() => onAnalyzeRemediation(row.name)}
             />
           ) : null}

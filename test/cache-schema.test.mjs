@@ -34,6 +34,7 @@ const VALID_FINGERPRINT = { manifestHash: 'h-manifest', lockfileHash: 'h-lockfil
 
 const VALID_ENTRY = {
   rows: [ROW],
+  availability: { updates: 'complete', advisories: 'complete', unavailableUpdatePackages: [] },
   generatedAt: '2026-08-01T12:00:00.000Z',
   lockfilePath: '/tmp/project/package-lock.json',
   sourceFingerprint: VALID_FINGERPRINT,
@@ -64,6 +65,43 @@ test('isPersistedProjectCache rejects a malformed generatedAt, missing lockfileP
   assert.equal(isPersistedProjectCache(null), false);
   assert.equal(isPersistedProjectCache('a string'), false);
   assert.equal(isPersistedProjectCache([VALID_ENTRY]), false, 'an array is not a record');
+});
+
+test('isPersistedProjectCache requires internally consistent core-data availability', () => {
+  const { availability: _availability, ...withoutAvailability } = VALID_ENTRY;
+  assert.equal(isPersistedProjectCache(withoutAvailability), false);
+  assert.equal(
+    isPersistedProjectCache({
+      ...VALID_ENTRY,
+      availability: { updates: 'complete', advisories: 'complete', unavailableUpdatePackages: ['pkg'] },
+    }),
+    false,
+    'complete updates cannot name unavailable packages'
+  );
+  assert.equal(
+    isPersistedProjectCache({
+      ...VALID_ENTRY,
+      availability: { updates: 'partial', advisories: 'complete', unavailableUpdatePackages: [] },
+    }),
+    false,
+    'partial updates must name at least one unavailable package'
+  );
+  assert.equal(
+    isPersistedProjectCache({
+      ...VALID_ENTRY,
+      availability: { updates: 'complete', advisories: 'unavailable', unavailableUpdatePackages: [] },
+    }),
+    false,
+    'unavailable advisories require the persisted advisory error'
+  );
+  assert.equal(
+    isPersistedProjectCache({
+      ...VALID_ENTRY,
+      availability: { updates: 'complete', advisories: 'unavailable', unavailableUpdatePackages: [] },
+      advisoriesError: { code: 'NETWORK', message: 'offline' },
+    }),
+    true
+  );
 });
 
 test('isPersistedProjectCacheCollection rejects an old or future schema version outright — no migration attempted', () => {

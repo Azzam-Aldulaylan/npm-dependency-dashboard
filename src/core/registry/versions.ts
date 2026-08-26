@@ -148,6 +148,30 @@ export interface PackumentDoc {
 }
 
 /**
+ * GET the registry's small dist-tags document without downloading every
+ * published manifest. This is the fallback for packages whose abbreviated
+ * packument is still too large for the extension-host response budget.
+ */
+export async function fetchDistTags(
+  client: HttpClient,
+  store: EtagStore,
+  registry: string,
+  name: string,
+  signal?: AbortSignal
+): Promise<Record<string, string>> {
+  const url = joinUrl(registry, `-/package/${encodePackageName(name)}/dist-tags`);
+  const { body } = await getConditional(client, store, url, 'application/json', signal);
+  const json = parseJson(body, url);
+  const distTags: Record<string, string> = {};
+  for (const [tag, value] of Object.entries(json)) {
+    if (tag !== '__proto__' && tag !== 'constructor' && tag !== 'prototype' && typeof value === 'string') {
+      distTags[tag] = value;
+    }
+  }
+  return distTags;
+}
+
+/**
  * The small, resolver-relevant subset of one published package manifest.
  *
  * This is deliberately separate from `VersionInfo`: the dashboard's normal
@@ -320,8 +344,21 @@ export async function fetchVersionInfo(
     return info;
   }
 
-  const packument = await (options.packumentLoader?.(req.name, signal) ??
-    fetchPackument(client, store, registry, req.name, signal));
+  let packument: PackumentDoc;
+  try {
+    packument = await (options.packumentLoader?.(req.name, signal) ??
+      fetchPackument(client, store, registry, req.name, signal));
+  } catch (cause) {
+    if (!(cause instanceof FetchError) || cause.code !== 'TOO_LARGE') throw cause;
+    const distTags = await fetchDistTags(client, store, registry, req.name, signal);
+    const taggedVersions = new Set(Object.values(distTags));
+    // The installed version is host-owned lockfile evidence and supplies a
+    // truthful in-range floor when the registry exposes no maintained-line
+    // tag for the declared range. `latest` still comes from the maintainer's
+    // own dist-tag; this fallback never invents a release.
+    if (req.installed !== null) taggedVersions.add(req.installed);
+    packument = { versions: [...taggedVersions], distTags };
+  }
 
   // Delegate to the existing selection rules — do not reimplement them here.
   const info: VersionInfo = {

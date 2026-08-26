@@ -171,7 +171,7 @@ function RecommendedActionCard({
         {message}
       </p>
       {cta !== null ? (
-        <button type="button" className="button button--secondary vuln-recommended__cta" disabled={actionsDisabled} onClick={cta.onClick}>
+        <button type="button" className="button button--primary vuln-recommended__cta" disabled={actionsDisabled} onClick={cta.onClick}>
           {cta.label} →
         </button>
       ) : null}
@@ -191,6 +191,8 @@ export function VulnerabilitiesPanel({
   row,
   remediation,
   actionsDisabled,
+  updateResolutionAvailable,
+  advisoriesAvailable,
   onOpenAdvisory,
   onStartUpgradeReview,
   onStartTransitiveCheck,
@@ -198,11 +200,22 @@ export function VulnerabilitiesPanel({
   row: PackageRow;
   remediation: TransitiveRemediationUiState | undefined;
   actionsDisabled: boolean;
+  updateResolutionAvailable: boolean;
+  advisoriesAvailable: boolean;
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
   onStartUpgradeReview: (target: string) => void;
   onStartTransitiveCheck: () => void;
 }): ReactElement {
   const [filter, setFilter] = useState<SeverityFilter>('all');
+
+  if (!advisoriesAvailable) {
+    return (
+      <div className="manage-panel-empty">
+        <IconShield className="manage-panel-empty__icon" />
+        <p>Vulnerability data is unavailable for {row.name}. Refresh the dashboard to try again.</p>
+      </div>
+    );
+  }
 
   if (row.advisories.length === 0) {
     return (
@@ -254,9 +267,9 @@ export function VulnerabilitiesPanel({
           </h3>
           <dl className="manage-glance">
             <GlanceRow label="Installed version">{row.current ?? row.range}</GlanceRow>
-            <GlanceRow label="Latest version">{row.latest ?? '—'}</GlanceRow>
+            <GlanceRow label="Latest version">{updateResolutionAvailable ? row.latest ?? '—' : 'Unavailable'}</GlanceRow>
             <GlanceRow label="Update available">
-              {row.upgradeTo === null ? 'None' : updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Yes'}
+              {!updateResolutionAvailable ? 'Unavailable' : row.upgradeTo === null ? 'None' : updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Yes'}
             </GlanceRow>
             <GlanceRow label="Status">
               <span className={`status-badge status-badge--${needsAttention ? 'warning' : 'neutral'}`}>

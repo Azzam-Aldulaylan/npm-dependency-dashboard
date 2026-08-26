@@ -16,6 +16,7 @@ import type {
   Advisory,
   PackageRow,
   PatchedVersionResult,
+  ScanDataAvailability,
   Severity,
   UnresolvableReason,
 } from './types.js';
@@ -135,6 +136,18 @@ export function isPackageRow(value: unknown): value is PackageRow {
       (v) => typeof v === 'string' && UNRESOLVABLE_REASONS.has(v)
     )
   );
+}
+
+export function isScanDataAvailability(value: unknown): value is ScanDataAvailability {
+  if (!isRecord(value)) return false;
+  const updates = value['updates'];
+  const advisories = value['advisories'];
+  const unavailable = value['unavailableUpdatePackages'];
+  if (updates !== 'complete' && updates !== 'partial') return false;
+  if (advisories !== 'complete' && advisories !== 'unavailable') return false;
+  if (!Array.isArray(unavailable) || !unavailable.every((name) => typeof name === 'string' && name !== '')) return false;
+  if (new Set(unavailable).size !== unavailable.length) return false;
+  return updates === 'complete' ? unavailable.length === 0 : unavailable.length > 0;
 }
 
 // ------------------------------------------------------- hygiene findings

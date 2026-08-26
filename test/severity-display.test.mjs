@@ -23,6 +23,10 @@ test('null severity reads as Safe', () => {
   assert.deepEqual(severityDisplay(null), { label: 'Safe', className: 'none' });
 });
 
+test('an unavailable advisory scan never labels a null severity Safe', () => {
+  assert.deepEqual(severityDisplay(null, false), { label: 'Unavailable', className: 'info' });
+});
+
 test('each known severity gets a capitalized label and a matching class', () => {
   assert.deepEqual(severityDisplay('low'), { label: 'Low', className: 'low' });
   assert.deepEqual(severityDisplay('moderate'), { label: 'Moderate', className: 'moderate' });

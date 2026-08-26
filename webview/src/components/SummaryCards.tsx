@@ -2,21 +2,25 @@ import type { ReactElement, ReactNode } from 'react';
 
 import type { SummaryFilterId, SummaryMetrics } from '../../../src/host/summaryMetrics.js';
 import {
-  attentionCardSubtitle,
-  updatesCardSubtitle,
-  vulnerabilitiesCardSubtitle,
+  attentionCardValue,
+  updatesCardValue,
+  vulnerabilitiesCardValue,
 } from '../../../src/host/summaryMetrics.js';
+import type { ScanDataAvailability } from '../../../src/core/types.js';
 import { IconAlertTriangle, IconPackage, IconShield, IconTrendUp } from '../icons.js';
 
 interface CardSpec {
   id: SummaryFilterId;
   label: string;
   icon: ReactNode;
-  count: number;
+  count: number | string;
   subtitle: string;
 }
 
-function buildCards(metrics: SummaryMetrics): CardSpec[] {
+function buildCards(metrics: SummaryMetrics, availability: ScanDataAvailability): CardSpec[] {
+  const updates = updatesCardValue(metrics, availability);
+  const vulnerabilities = vulnerabilitiesCardValue(metrics, availability);
+  const attention = attentionCardValue(metrics, availability);
   return [
     {
       id: 'all',
@@ -29,22 +33,22 @@ function buildCards(metrics: SummaryMetrics): CardSpec[] {
       id: 'updates',
       label: 'Updates Available',
       icon: <IconTrendUp />,
-      count: metrics.updatesAvailable,
-      subtitle: updatesCardSubtitle(metrics),
+      count: updates.count,
+      subtitle: updates.subtitle,
     },
     {
       id: 'vulnerabilities',
       label: 'Vulnerabilities',
       icon: <IconShield />,
-      count: metrics.vulnerable,
-      subtitle: vulnerabilitiesCardSubtitle(metrics),
+      count: vulnerabilities.count,
+      subtitle: vulnerabilities.subtitle,
     },
     {
       id: 'attention',
       label: 'Needs Attention',
       icon: <IconAlertTriangle />,
-      count: metrics.needsAttention,
-      subtitle: attentionCardSubtitle(metrics),
+      count: attention.count,
+      subtitle: attention.subtitle,
     },
   ];
 }
@@ -81,14 +85,16 @@ function SummaryCard({
 
 export function SummaryCards({
   metrics,
+  availability,
   selected,
   onSelect,
 }: {
   metrics: SummaryMetrics;
+  availability: ScanDataAvailability;
   selected: SummaryFilterId;
   onSelect: (id: SummaryFilterId) => void;
 }): ReactElement {
-  const cards = buildCards(metrics);
+  const cards = buildCards(metrics, availability);
   return (
     <div className="summary-cards" role="group" aria-label="Filter dependencies by category">
       {cards.map((card) => (

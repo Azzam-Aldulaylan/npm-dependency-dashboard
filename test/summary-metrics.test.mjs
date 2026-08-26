@@ -17,7 +17,12 @@ import {
   updatesCardSubtitle,
   vulnerabilitiesCardSubtitle,
   attentionCardSubtitle,
+  updatesCardValue,
+  vulnerabilitiesCardValue,
+  attentionCardValue,
 } from '../out/host/summaryMetrics.js';
+
+const COMPLETE_AVAILABILITY = { updates: 'complete', advisories: 'complete', unavailableUpdatePackages: [] };
 
 function row(overrides = {}) {
   return {
@@ -212,4 +217,42 @@ test('attention subtitle: combines urgent and deprecated counts, worded distinct
     row({ name: 'c', deprecated: 'old' }),
   ];
   assert.equal(attentionCardSubtitle(summaryMetrics(rows)), '1 urgent · 2 deprecated');
+});
+
+test('unavailable update checks never present a zero count or claim packages are up to date', () => {
+  const metrics = summaryMetrics([row({ wanted: null, latest: null })]);
+  assert.deepEqual(
+    updatesCardValue(metrics, {
+      updates: 'partial',
+      advisories: 'complete',
+      unavailableUpdatePackages: ['pkg'],
+    }),
+    { count: '—', subtitle: '1 package update check unavailable' }
+  );
+  assert.deepEqual(updatesCardValue(metrics, COMPLETE_AVAILABILITY), { count: 0, subtitle: 'Up to date' });
+});
+
+test('known update counts become lower bounds when other package checks are unavailable', () => {
+  const metrics = summaryMetrics([row({ wanted: '1.1.0', latest: '1.1.0' }), row({ name: 'unknown', wanted: null, latest: null })]);
+  assert.deepEqual(
+    updatesCardValue(metrics, {
+      updates: 'partial',
+      advisories: 'complete',
+      unavailableUpdatePackages: ['unknown'],
+    }),
+    { count: '≥1', subtitle: '1 package update check unavailable' }
+  );
+});
+
+test('unavailable advisories never present zero vulnerabilities or a complete attention count', () => {
+  const unavailable = { updates: 'complete', advisories: 'unavailable', unavailableUpdatePackages: [] };
+  const metrics = summaryMetrics([row()]);
+  assert.deepEqual(vulnerabilitiesCardValue(metrics, unavailable), {
+    count: '—',
+    subtitle: 'Advisory data unavailable',
+  });
+  assert.deepEqual(attentionCardValue(metrics, unavailable), {
+    count: '—',
+    subtitle: 'Advisory data unavailable',
+  });
 });

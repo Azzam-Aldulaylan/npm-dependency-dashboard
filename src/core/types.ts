@@ -80,6 +80,19 @@ export interface VersionInfo {
   license?: string;
 }
 
+/**
+ * Whether the two network-backed facts needed for a trustworthy dashboard
+ * were resolved by this scan. Update metadata fails per package, so its
+ * unavailable names are retained instead of collapsing them into null
+ * versions that look "up to date". The bulk advisory request is all-or-
+ * nothing, hence its scan-wide status.
+ */
+export interface ScanDataAvailability {
+  updates: 'complete' | 'partial';
+  advisories: 'complete' | 'unavailable';
+  unavailableUpdatePackages: string[];
+}
+
 export interface Advisory {
   id: number | string;
   severity: Severity;

@@ -31,6 +31,7 @@ async function flushed() {
 const FINGERPRINT = { manifestHash: 'h-manifest', lockfileHash: 'h-lockfile', lockfilePath: null };
 const entry = (rows, lockfilePath = null) => ({
   rows,
+  availability: { updates: 'complete', advisories: 'complete', unavailableUpdatePackages: [] },
   generatedAt: '2026-08-01T12:00:00.000Z',
   lockfilePath,
   sourceFingerprint: FINGERPRINT,

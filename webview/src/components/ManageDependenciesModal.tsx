@@ -12,6 +12,7 @@ import type {
   TypeCriterion,
   UpdateCriterion,
 } from '../../../src/host/dependencyCriteria.js';
+import { bulkRemovalAction, semanticButtonClassName } from '../../../src/host/actionButtonSemantics.js';
 import {
   criteriaCounts,
   criteriaPredicate,
@@ -310,6 +311,7 @@ export function ManageDependenciesModal({
   // already-analyzed row keeps its assessment regardless of check state.
   const removalImpactCoversReview =
     removalImpact.phase === 'done' && reviewRows.length > 0 && reviewRows.every((row) => removalImpact.assessments.has(row.name));
+  const removalAction = bulkRemovalAction(reviewRows.length, removalImpactCoversReview);
   const removalImpactCounts = useMemo(() => {
     if (removalImpact.phase !== 'done') return null;
     let analyzed = 0;
@@ -430,7 +432,7 @@ export function ManageDependenciesModal({
                 headerAction={
                   <button
                     type="button"
-                    className="button button--secondary criteria-group__recheck"
+                    className="button button--subtle criteria-group__recheck"
                     onClick={onRecheckHealth}
                     disabled={cleanupBusy}
                   >
@@ -548,7 +550,7 @@ export function ManageDependenciesModal({
                 {removalImpactCounts.unknown > 0 ? ` · ${removalImpactCounts.unknown} unknown` : ''}
                 <button
                   type="button"
-                  className="button button--secondary button--small"
+                  className="button button--subtle button--small"
                   onClick={() => onAnalyzeRemovalImpact(reviewRows.slice(0, MAX_BULK_REMOVE_CHANGES).map((row) => row.name))}
                   disabled={reviewRows.length === 0}
                 >
@@ -601,7 +603,7 @@ export function ManageDependenciesModal({
 
         <footer className={`modal__footer${step === 'review' ? ' modal__footer--split' : ''}`}>
           {step === 'select' ? (
-            <button type="button" className="button" onClick={() => setStep('review')} disabled={matched.length === 0}>
+            <button type="button" className="button button--primary" onClick={() => setStep('review')} disabled={matched.length === 0}>
               Review {matched.length > 0 ? `${matched.length} ` : ''}dependencies →
             </button>
           ) : (
@@ -612,7 +614,7 @@ export function ManageDependenciesModal({
               <div className="bulk-modal__step-actions">
                 <button
                   type="button"
-                  className="button button--secondary"
+                  className="button button--primary"
                   onClick={submitRemediation}
                   disabled={remediationNames.length === 0}
                 >
@@ -621,17 +623,15 @@ export function ManageDependenciesModal({
                 </button>
                 <button
                   type="button"
-                  className="button button--danger"
+                  className={semanticButtonClassName(removalAction.variant)}
                   onClick={handleRemoveClick}
                   disabled={reviewRows.length === 0 || removalImpact.phase === 'analyzing'}
                 >
-                  {removalImpactCoversReview
-                    ? `Remove ${reviewRows.length}`
-                    : `Analyze removal impact${reviewRows.length > 0 ? ` (${reviewRows.length})` : ''}`}
+                  {removalAction.label}
                 </button>
                 <button
                   type="button"
-                  className="button"
+                  className="button button--primary"
                   onClick={submitUpgrade}
                   disabled={upgradeCandidates.length === 0}
                 >

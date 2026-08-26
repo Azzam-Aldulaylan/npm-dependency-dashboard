@@ -27,6 +27,7 @@ import type {
   RemovalAssessment,
   RemovalEvidence,
   RemovalEvidenceKind,
+  ScanDataAvailability,
 } from '../core/types.js';
 import type { DependencyFinding } from '../core/hygiene/types.js';
 import type { DependencyReference, DependencyUsageResult } from '../core/usage/types.js';
@@ -39,6 +40,7 @@ import {
   isPatchedVersionResult,
   isProtocolError,
   isRecord,
+  isScanDataAvailability,
 } from '../core/validation.js';
 import type { ProtocolError } from '../core/validation.js';
 import { MAX_BULK_REMOVE_CHANGES, MAX_BULK_UPGRADE_CHANGES } from '../core/upgrade/validate.js';
@@ -215,6 +217,19 @@ export interface UpgradeAnalysisPresentation {
   files: UpgradeAnalysisFiles;
 }
 
+/** One bounded, host-derived version choice for Manage's Upgrade review. */
+export interface UpgradeTargetOption {
+  version: string;
+  channel: 'stable' | 'prerelease';
+  labels: Array<'recommended' | 'lts' | 'latest'>;
+}
+
+export interface UpgradeTargetOptions {
+  recommendedVersion: string | null;
+  options: UpgradeTargetOption[];
+  truncated: boolean;
+}
+
 /**
  * One stage of a progressive Upgrade review analysis — see
  * upgradeAssistantCoordinator.ts's `handleAnalyzeUpgradeRequests`. Each kind
@@ -316,6 +331,8 @@ export interface SelectedProjectInfo {
 /** Everything the table needs to render, JSON-safe end to end. */
 export interface DashboardData {
   rows: PackageRow[];
+  /** Whether update and advisory facts are complete for this snapshot. */
+  availability: ScanDataAvailability;
   /** ISO timestamp of the run that produced these rows. */
   generatedAt: string;
   project: SelectedProjectInfo;
@@ -350,6 +367,9 @@ export type HostToWebviewMessage =
   | { status: 'stale'; data: DashboardData }
   | { status: 'partial-error'; data: DashboardData }
   | { status: 'fatal-error'; error: ProtocolError }
+  | { status: 'upgrade-targets-loading'; package: string; requestId: string }
+  | { status: 'upgrade-targets'; package: string; requestId: string; targets: UpgradeTargetOptions }
+  | { status: 'upgrade-targets-error'; package: string; requestId: string; error: ProtocolError }
   /**
    * A specific package's upgrade could not run — rejected by host-side
    * validation, cancelled at the confirmation step, or the task itself
@@ -460,6 +480,8 @@ export type WebviewToHostMessage =
   | { type: 'ready' }
   | { type: 'refresh' }
   | { type: 'change-project' }
+  /** On-demand, bounded published-version choices for one host-owned direct dependency. */
+  | { type: 'load-upgrade-targets'; package: string; requestId: string }
   /** `requestId` is a client-minted correlation nonce for this analysis attempt — never trust/execution surface, never stored on the host's analysis, and never compared against anything. It exists only so the webview can tell which `upgrade-analyzing`/`upgrade-analysis-partial`/`upgrade-analysis` messages belong to this attempt versus a superseded one (e.g. re-analyzing the same package after Cancel). Distinct from `analysisId`, which is host-minted, execution-trusted, and doesn't exist until the analysis completes. */
   | { type: 'upgrade'; package: string; target: string; requestId: string }
   | { type: 'bulk-upgrade'; changes: Array<{ package: string; target: string }>; requestId: string }
@@ -546,6 +568,7 @@ function isDashboardData(value: unknown): value is DashboardData {
   return (
     Array.isArray(rows) &&
     rows.every(isPackageRow) &&
+    isScanDataAvailability(value['availability']) &&
     typeof value['generatedAt'] === 'string' &&
     isSelectedProjectInfo(value['project']) &&
     typeof value['canChangeProject'] === 'boolean' &&
@@ -554,7 +577,9 @@ function isDashboardData(value: unknown): value is DashboardData {
     Array.isArray(hygieneFindings) &&
     hygieneFindings.every(isDependencyFinding) &&
     typeof value['extensionVersion'] === 'string' &&
-    typeof value['builtAt'] === 'string'
+    typeof value['builtAt'] === 'string' &&
+    ((value['availability'] as ScanDataAvailability).advisories === 'unavailable') ===
+      (value['advisoriesError'] !== undefined)
   );
 }
 
@@ -579,6 +604,13 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   const type = value['type'];
   if (type === 'ready' || type === 'refresh' || type === 'change-project') {
     return hasOnlyKeys(value, ['type']);
+  }
+  if (type === 'load-upgrade-targets') {
+    return (
+      hasOnlyKeys(value, ['type', 'package', 'requestId']) &&
+      isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['requestId'])
+    );
   }
   if (type === 'upgrade') {
     return (
@@ -1157,6 +1189,34 @@ function isUsageAnalysisResult(value: unknown): value is UsageAnalysisResult {
   );
 }
 
+const UPGRADE_TARGET_LABELS: ReadonlySet<string> = new Set(['recommended', 'lts', 'latest']);
+
+function isUpgradeTargetOption(value: unknown): value is UpgradeTargetOption {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['version', 'channel', 'labels'])) return false;
+  const labels = value['labels'];
+  return (
+    isNonEmptyString(value['version']) &&
+    (value['channel'] === 'stable' || value['channel'] === 'prerelease') &&
+    Array.isArray(labels) &&
+    labels.every((label) => typeof label === 'string' && UPGRADE_TARGET_LABELS.has(label)) &&
+    new Set(labels).size === labels.length
+  );
+}
+
+function isUpgradeTargetOptions(value: unknown): value is UpgradeTargetOptions {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['recommendedVersion', 'options', 'truncated'])) return false;
+  const recommendedVersion = value['recommendedVersion'];
+  const options = value['options'];
+  return (
+    (recommendedVersion === null || isNonEmptyString(recommendedVersion)) &&
+    Array.isArray(options) &&
+    options.every(isUpgradeTargetOption) &&
+    new Set(options.map((option) => option.version)).size === options.length &&
+    typeof value['truncated'] === 'boolean' &&
+    (recommendedVersion === null || options.some((option) => option.version === recommendedVersion))
+  );
+}
+
 export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMessage {
   if (!isRecord(value)) return false;
 
@@ -1179,6 +1239,29 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   }
   if (status === 'fatal-error') {
     return hasOnlyKeys(value, ['status', 'error']) && isProtocolError(value['error']);
+  }
+  if (status === 'upgrade-targets-loading') {
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'requestId']) &&
+      isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['requestId'])
+    );
+  }
+  if (status === 'upgrade-targets') {
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'requestId', 'targets']) &&
+      isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['requestId']) &&
+      isUpgradeTargetOptions(value['targets'])
+    );
+  }
+  if (status === 'upgrade-targets-error') {
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'requestId', 'error']) &&
+      isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['requestId']) &&
+      isProtocolError(value['error'])
+    );
   }
   if (status === 'upgrade-error') {
     return (

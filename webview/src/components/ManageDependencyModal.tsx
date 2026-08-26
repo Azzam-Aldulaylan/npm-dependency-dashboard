@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import type { MouseEvent as ReactMouseEvent, ReactElement, ReactNode } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactElement, ReactNode } from 'react';
 
 import type { PackageRow, Severity } from '../../../src/core/types.js';
 import type { DependencyFinding } from '../../../src/core/hygiene/types.js';
@@ -14,6 +14,7 @@ import { PackageIcon } from './PackageIcon.js';
 import { RemovalReviewPanel } from './RemovalReviewPanel.js';
 import { StatusBadge } from './StatusBadge.js';
 import { UpgradeReviewPanel } from './UpgradeReviewPanel.js';
+import type { UpgradeTargetLoadState } from './UpgradeTargetSelector.js';
 import { UsageReferencesPanel } from './UsageReferencesPanel.js';
 import type { UsageRequestState } from './UsageReferencesPanel.js';
 import { VulnerabilitiesPanel } from './VulnerabilitiesPanel.js';
@@ -26,6 +27,7 @@ const FOCUSABLE_SELECTOR =
 interface UpgradeReviewState {
   /** The upgrade target this row currently offers, or null when none. */
   targetVersion: string | null;
+  targetState: UpgradeTargetLoadState;
   /** True exactly when this row's own upgrade is the one App.tsx currently has loaded. */
   active: boolean;
   analyzingPhase: 'compatibility' | 'smart-plan' | null;
@@ -35,7 +37,9 @@ interface UpgradeReviewState {
   /** True when the host has flagged `analysis` as structurally stale (manifest/lockfile changed since it ran) — a non-authoritative UX hint that blocks Confirm/Use-smart-plan until Refresh. */
   hardStale: boolean;
   busy: boolean;
+  error: string | null;
   onAnalyze: (target: string) => void;
+  onTargetChange: (target: string) => void;
   onConfirm: () => void;
   onUseSmartPlan: () => void;
   onCancel: () => void;
@@ -70,13 +74,39 @@ function TabButton({
   dotTone?: 'neutral' | 'active' | Severity | undefined;
   onSelect: (id: ManageTabId) => void;
 }): ReactElement {
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>): void => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    const tabList = event.currentTarget.closest<HTMLElement>('[role="tablist"]');
+    if (tabList === null) return;
+    const tabs = Array.from(tabList.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+    const currentIndex = tabs.indexOf(event.currentTarget);
+    if (currentIndex < 0) return;
+
+    let nextIndex: number;
+    if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = tabs.length - 1;
+    else if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % tabs.length;
+    else nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+
+    const nextTab = tabs[nextIndex];
+    if (nextTab === undefined) return;
+    event.preventDefault();
+    nextTab.focus();
+    nextTab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    nextTab.click();
+  };
+
   return (
     <button
+      id={`manage-tab-${id}`}
       type="button"
       className={`manage-tabs__tab${active ? ' manage-tabs__tab--active' : ''}`}
       role="tab"
+      aria-controls="manage-panel"
       aria-selected={active}
+      tabIndex={active ? 0 : -1}
       onClick={() => onSelect(id)}
+      onKeyDown={onKeyDown}
     >
       <span className="manage-tabs__icon" aria-hidden="true">
         {icon}
@@ -119,6 +149,9 @@ export function ManageDependencyModal({
   activeTab,
   onChangeTab,
   actionsDisabled,
+  upgradeDisabled,
+  updateResolutionAvailable,
+  advisoriesAvailable,
   blockClose,
   upgrade,
   removal,
@@ -138,6 +171,10 @@ export function ManageDependencyModal({
   onChangeTab: (tab: ManageTabId) => void;
   /** True while another upgrade/removal/remediation holds the panel-wide lock elsewhere — disables mutating CTAs, never the modal itself (opening Manage is always fast). */
   actionsDisabled: boolean;
+  /** Upgrade-only gate for incomplete Stage-1 update/advisory data. */
+  upgradeDisabled: boolean;
+  updateResolutionAvailable: boolean;
+  advisoriesAvailable: boolean;
   /** True only while a protected, hard-to-reverse operation this modal itself started is actually running (a file-mutating install/removal, or the removal-impact scan) — X/Escape refuse to close until it settles, same discipline the modal already had. */
   blockClose: boolean;
   upgrade: UpgradeReviewState;
@@ -155,7 +192,13 @@ export function ManageDependencyModal({
 
   useEffect(() => {
     previouslyFocused.current = document.activeElement;
-    closeButtonRef.current?.focus();
+    const closeButton = closeButtonRef.current;
+    if (closeButton !== null && !closeButton.disabled) closeButton.focus();
+    else {
+      const activeTabButton = dialogRef.current?.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]');
+      if (activeTabButton !== undefined && activeTabButton !== null) activeTabButton.focus();
+      else dialogRef.current?.focus();
+    }
     return () => {
       if (previouslyFocused.current instanceof HTMLElement) previouslyFocused.current.focus();
     };
@@ -194,8 +237,10 @@ export function ManageDependencyModal({
     if (event.target === event.currentTarget && !blockClose) onClose();
   };
 
-  const startUpgradeReview = (_packageName: string, target: string): void => {
-    upgrade.onAnalyze(target);
+  const startUpgradeReview = (_packageName: string, _target: string): void => {
+    // Target choice is now an explicit step inside Upgrade review. Overview
+    // and Vulnerabilities navigate there without silently starting analysis
+    // against the row's former one-size-fits-all target.
     onChangeTab('upgrade');
   };
   const startRemovalReview = (_packageName: string): void => {
@@ -220,6 +265,9 @@ export function ManageDependencyModal({
         removalImpact={removalImpact}
         usage={usage}
         actionsDisabled={actionsDisabled}
+        upgradeDisabled={upgradeDisabled}
+        updateResolutionAvailable={updateResolutionAvailable}
+        advisoriesAvailable={advisoriesAvailable}
         onStartUpgradeReview={startUpgradeReview}
         onStartRemovalReview={startRemovalReview}
         onAnalyzeRemediation={onAnalyzeRemediation}
@@ -231,7 +279,9 @@ export function ManageDependencyModal({
       <VulnerabilitiesPanel
         row={row}
         remediation={remediation}
-        actionsDisabled={actionsDisabled}
+        actionsDisabled={upgradeDisabled}
+        updateResolutionAvailable={updateResolutionAvailable}
+        advisoriesAvailable={advisoriesAvailable}
         onOpenAdvisory={onOpenAdvisory}
         onStartUpgradeReview={(target) => startUpgradeReview(row.name, target)}
         onStartTransitiveCheck={startTransitiveCheckFromVulnerabilities}
@@ -243,6 +293,8 @@ export function ManageDependencyModal({
         row={row}
         hygieneFindings={hygieneFindings}
         usage={usage}
+        updateResolutionAvailable={updateResolutionAvailable}
+        advisoriesAvailable={advisoriesAvailable}
         onReanalyzeUsage={onReanalyzeUsage}
         onOpenUsageReference={onOpenUsageReference}
         onChangeTab={onChangeTab}
@@ -255,14 +307,19 @@ export function ManageDependencyModal({
         row={row}
         active={upgrade.active}
         targetVersion={upgrade.targetVersion}
+        targetState={upgrade.targetState}
         analyzingPhase={upgrade.analyzingPhase}
         analysis={upgrade.analysis}
         sections={upgrade.sections}
         hardStale={upgrade.hardStale}
         now={now}
         busy={upgrade.busy}
+        error={upgrade.error}
+        disabled={upgradeDisabled}
         usage={usage}
+        advisoriesAvailable={advisoriesAvailable}
         onAnalyzeUpgrade={upgrade.onAnalyze}
+        onTargetChange={upgrade.onTargetChange}
         onConfirm={upgrade.onConfirm}
         onUseSmartPlan={upgrade.onUseSmartPlan}
         onCancel={cancelUpgradeReview}
@@ -280,6 +337,7 @@ export function ManageDependencyModal({
         busy={removal.busy}
         removalImpact={removalImpact}
         usage={usage}
+        advisoriesAvailable={advisoriesAvailable}
         onAnalyzeRemoval={removal.onAnalyze}
         onConfirm={removal.onConfirm}
         onViewReferences={() => onChangeTab('usage')}
@@ -292,12 +350,13 @@ export function ManageDependencyModal({
   const usageChecking = usage === undefined || usage.phase === 'analyzing';
 
   return (
-    <div className="modal-overlay" onClick={onOverlayClick}>
+    <div className="modal-overlay modal-overlay--manage" onClick={onOverlayClick}>
       <div
         className={`modal manage-modal${activeTab === 'upgrade' || activeTab === 'removal' ? ' manage-modal--decision-review' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="manage-dependency-title"
+        tabIndex={-1}
         ref={dialogRef}
       >
         <header className="modal__header">
@@ -326,7 +385,7 @@ export function ManageDependencyModal({
           </button>
         </header>
 
-        <nav className="manage-tabs" role="tablist" aria-label="Manage dependency sections">
+        <nav className="manage-tabs" role="tablist" aria-label="Manage dependency sections" aria-orientation="horizontal">
           <TabButton id="overview" label="Overview" icon={<IconInfo />} active={activeTab === 'overview'} onSelect={onChangeTab} />
           <TabButton
             id="vulnerabilities"
@@ -362,7 +421,12 @@ export function ManageDependencyModal({
           />
         </nav>
 
-        <div className="manage-modal__body" role="tabpanel">
+        <div
+          className="manage-modal__body"
+          id="manage-panel"
+          role="tabpanel"
+          aria-labelledby={`manage-tab-${activeTab}`}
+        >
           {content}
         </div>
 

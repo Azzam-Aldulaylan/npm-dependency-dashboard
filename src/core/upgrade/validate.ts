@@ -1,15 +1,17 @@
 /**
  * Pure eligibility check for an upgrade request. This is the actual security
  * boundary between a webview message and a running task: it only ever trusts
- * `rows` and `declaredDependencies` (both host-owned, derived from the last
- * completed scan), and uses the incoming request's `package`/`target` purely
- * as lookup keys to compare against that host truth — never as values that
- * themselves flow into the eventual npm command. A caller that gets `ok:
+ * `rows`, `declaredDependencies`, and (for a Manage selector) an optional set
+ * of versions from a host-fetched packument. The incoming `package`/`target`
+ * are lookup keys only: the returned target is emitted only after an exact
+ * match against one of those host-owned sources. A caller that gets `ok:
  * true` back is expected to build the actual task from the returned
  * `packageName`/`target`/`classification`, not from the original request.
  *
  * Nothing here may import 'vscode' — see types.ts.
  */
+
+import semver from 'semver';
 
 import type { DeclaredDependency } from '../manifest/parse.js';
 import type { PackageRow } from '../types.js';
@@ -102,35 +104,34 @@ function classify(declared: DeclaredDependency): DependencyClassification {
 export function validateUpgradeRequest(
   rows: readonly PackageRow[] | undefined,
   declaredDependencies: readonly DeclaredDependency[],
-  request: UpgradeRequestInput
+  request: UpgradeRequestInput,
+  /** Additional targets proven by the host to be published for this package. */
+  publishedTargets: ReadonlySet<string> = new Set()
 ): UpgradeEligibility {
   if (rows === undefined) return { ok: false, reason: 'no-scan-result' };
 
   const row = rows.find((r) => r.name === request.package);
   if (row === undefined) return { ok: false, reason: 'unknown-package' };
-  if (row.upgradeTo === null) return { ok: false, reason: 'no-eligible-upgrade' };
-  // The requested target must exactly equal the host's own cached upgradeTo —
-  // a mismatch means the webview's copy of the row is stale (e.g. a refresh
-  // landed between render and click) and must be refused, not "corrected".
-  if (row.upgradeTo !== request.target) return { ok: false, reason: 'stale-target' };
-  // resolveUpgradeTarget's isSafeUpgradeTarget guard (src/core/version/resolve.ts)
-  // never returns non-null when `installed` isn't a valid semver string, so
-  // row.current is guaranteed non-null here — this check exists to satisfy the
-  // type system honestly rather than assert/cast past it.
+  const targetIsDefault = row.upgradeTo === request.target;
+  const targetIsPublishedSelection = publishedTargets.has(request.target);
+  if (!targetIsDefault && !targetIsPublishedSelection) {
+    return { ok: false, reason: row.upgradeTo === null ? 'no-eligible-upgrade' : 'stale-target' };
+  }
   if (row.current === null) return { ok: false, reason: 'no-eligible-upgrade' };
 
   const declared = declaredDependencies.find((d) => d.name === row.name);
   if (declared === undefined) return { ok: false, reason: 'not-declared' };
 
-  if (!isSafeNpmPackageName(row.name) || !isSafeSemverVersion(row.upgradeTo)) {
+  if (!isSafeNpmPackageName(row.name) || !isSafeSemverVersion(request.target)) {
     return { ok: false, reason: 'unsafe-identifier' };
   }
+  if (!semver.gt(request.target, row.current)) return { ok: false, reason: 'no-eligible-upgrade' };
 
   return {
     ok: true,
     packageName: row.name,
     currentVersion: row.current,
-    target: row.upgradeTo,
+    target: request.target,
     classification: classify(declared),
   };
 }
@@ -139,7 +140,8 @@ export function validateUpgradeRequest(
 export function validateBulkUpgradeRequest(
   rows: readonly PackageRow[] | undefined,
   declaredDependencies: readonly DeclaredDependency[],
-  requests: readonly UpgradeRequestInput[]
+  requests: readonly UpgradeRequestInput[],
+  publishedTargetsByPackage: ReadonlyMap<string, ReadonlySet<string>> = new Map()
 ): BulkUpgradeEligibility {
   if (requests.length === 0) return { ok: false, reason: 'empty-batch' };
   if (requests.length > MAX_BULK_UPGRADE_CHANGES) return { ok: false, reason: 'too-many-changes' };
@@ -151,7 +153,12 @@ export function validateBulkUpgradeRequest(
       return { ok: false, reason: 'duplicate-package', packageName: request.package };
     }
     seen.add(request.package);
-    const result = validateUpgradeRequest(rows, declaredDependencies, request);
+    const result = validateUpgradeRequest(
+      rows,
+      declaredDependencies,
+      request,
+      publishedTargetsByPackage.get(request.package) ?? new Set()
+    );
     if (!result.ok) {
       return {
         ok: false,

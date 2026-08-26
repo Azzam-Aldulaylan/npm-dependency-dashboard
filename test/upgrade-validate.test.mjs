@@ -118,6 +118,57 @@ test('a forged request cannot pick an arbitrary version even for a real, eligibl
   assert.equal(result.ok, false);
 });
 
+test('a host-proven published target may differ from the dashboard default', () => {
+  const result = validateUpgradeRequest(
+    [row({ current: '1.0.0', upgradeTo: '3.0.0' })],
+    [declared()],
+    { package: 'left-pad', target: '2.0.0' },
+    new Set(['2.0.0', '3.0.0'])
+  );
+  assert.deepEqual(result, {
+    ok: true,
+    packageName: 'left-pad',
+    currentVersion: '1.0.0',
+    target: '2.0.0',
+    classification: 'prod',
+  });
+});
+
+test('a selectable target still requires host proof and safe semver', () => {
+  assert.equal(
+    validateUpgradeRequest(
+      [row({ upgradeTo: '3.0.0' })],
+      [declared()],
+      { package: 'left-pad', target: '2.0.0' },
+      new Set(['2.1.0'])
+    ).reason,
+    'stale-target'
+  );
+  assert.equal(
+    validateUpgradeRequest(
+      [row({ upgradeTo: '3.0.0' })],
+      [declared()],
+      { package: 'left-pad', target: 'latest' },
+      new Set(['latest'])
+    ).reason,
+    'unsafe-identifier'
+  );
+});
+
+test('host publication proof can never authorize a downgrade or no-op target', () => {
+  for (const target of ['1.0.0', '0.9.0']) {
+    assert.deepEqual(
+      validateUpgradeRequest(
+        [row({ current: '1.0.0', upgradeTo: '3.0.0' })],
+        [declared()],
+        { package: 'left-pad', target },
+        new Set([target])
+      ),
+      { ok: false, reason: 'no-eligible-upgrade' }
+    );
+  }
+});
+
 test('a row with no matching declared dependency is rejected defensively', () => {
   const result = validateUpgradeRequest([row()], [declared({ name: 'other-package' })], {
     package: 'left-pad',

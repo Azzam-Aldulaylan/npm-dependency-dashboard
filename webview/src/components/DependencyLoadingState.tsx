@@ -3,14 +3,7 @@ import type { ScanProgressStage } from '../../../src/host/webviewProtocol.js';
 
 import { IconPackage } from '../icons.js';
 
-/**
- * Optional, forward-looking only — nothing in the current host->webview
- * protocol (`HostToWebviewMessage`'s bare `{ status: 'loading' }`) carries a
- * completed/total count today, and this task does not touch the scanning
- * pipeline to add one (that is the separate performance task's job). This
- * prop exists purely so a future host change can hand real numbers to an
- * already-built component; nothing currently passes it.
- */
+/** Real pipeline progress when a scan stage has a meaningful item count. */
 export interface LoadingProgress {
   completed: number;
   total: number;

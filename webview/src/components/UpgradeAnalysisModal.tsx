@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { ReactElement } from 'react';
 
+import { semanticButtonClassName, upgradeConfirmationAction } from '../../../src/host/actionButtonSemantics.js';
 import type { UpgradeAnalysisPresentation } from '../../../src/host/webviewProtocol.js';
 import { compatibilityOutcomeDisplay } from '../../../src/host/outcomeCopy.js';
 import { IconX } from '../icons.js';
@@ -14,25 +15,6 @@ import { VerificationSection } from './VerificationSection.js';
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-export function primaryAction(
-  analysis: UpgradeAnalysisPresentation
-): { label: string; onClick: 'confirm' | 'use-smart-plan' } | null {
-  if (analysis.compatibility.status === 'conflict') {
-    return analysis.smartPlan !== null ? { label: 'Use coordinated upgrade', onClick: 'use-smart-plan' } : null;
-  }
-  return {
-    label:
-      analysis.changes.length > 1
-        ? analysis.compatibility.status === 'compatible'
-          ? `Upgrade ${analysis.changes.length} dependencies`
-          : `Upgrade ${analysis.changes.length} anyway`
-        : analysis.compatibility.status === 'compatible'
-          ? `Upgrade to ${analysis.targetVersion}`
-          : 'Upgrade anyway',
-    onClick: 'confirm',
-  };
-}
 
 /**
  * The one headline the whole modal commits to — everything else (the
@@ -224,7 +206,7 @@ export function UpgradeAnalysisModal({
     return () => node.removeEventListener('keydown', onKeyDown);
   }, [busy, onCancel]);
 
-  const action = analysis !== null ? primaryAction(analysis) : null;
+  const action = analysis !== null ? upgradeConfirmationAction(analysis) : null;
   const displayedChanges = analysis?.changes ?? pendingChanges ?? [{ packageName, targetVersion }];
   const bulk = displayedChanges.length > 1;
   const majorCount = analysis?.changes.filter((change) => change.majorUpdate).length ?? 0;
@@ -292,7 +274,7 @@ export function UpgradeAnalysisModal({
           {action !== null ? (
             <button
               type="button"
-              className={`button${analysis?.compatibility.status === 'warning' || analysis?.compatibility.status === 'unknown' ? ' button--subtle' : ''}`}
+              className={semanticButtonClassName(action.variant)}
               onClick={action.onClick === 'confirm' ? onConfirm : onUseSmartPlan}
               disabled={busy || analysis === null}
             >

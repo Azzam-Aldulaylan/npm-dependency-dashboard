@@ -29,7 +29,8 @@ const LABELS: Record<Severity, string> = {
  * than left blank, so the column is readable without inferring meaning from
  * an empty cell.
  */
-export function severityDisplay(severity: Severity | null): SeverityDisplay {
+export function severityDisplay(severity: Severity | null, advisoriesAvailable = true): SeverityDisplay {
+  if (!advisoriesAvailable) return { label: 'Unavailable', className: 'info' };
   if (severity === null) return { label: 'Safe', className: 'none' };
   return { label: LABELS[severity], className: severity };
 }

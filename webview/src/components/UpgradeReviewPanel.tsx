@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react';
 
 import type { PackageRow, Severity } from '../../../src/core/types.js';
+import { semanticButtonClassName, upgradeConfirmationAction } from '../../../src/host/actionButtonSemantics.js';
 import type { UpgradeAnalysisPresentation } from '../../../src/host/webviewProtocol.js';
 import type { UpgradeAnalysisSections as UpgradeAnalysisSectionsState } from '../../../src/host/upgradeAnalysisSections.js';
 import { isUpgradeAnalysisSoftStale } from '../../../src/host/upgradeFreshness.js';
@@ -8,7 +9,7 @@ import { compatibilityOutcomeDisplay, upgradeSafetyHeadline } from '../../../src
 import { classifyUpdate } from '../../../src/host/updateClassification.js';
 import { severityDisplay } from '../../../src/host/severityDisplay.js';
 import { summarizeUpgradeSecurity } from '../../../src/host/upgradeSecuritySummary.js';
-import { IconHistory, IconRefresh, IconTrendUp } from '../icons.js';
+import { IconAlertTriangle, IconHistory, IconRefresh, IconTrendUp } from '../icons.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
 import { SmartPlanSection } from './SmartPlanSection.js';
@@ -20,7 +21,8 @@ import {
   VerificationStepsCard,
 } from './UpgradeAnalysisCards.js';
 import { UpgradeAnalysisSections } from './UpgradeAnalysisSections.js';
-import { primaryAction } from './UpgradeAnalysisModal.js';
+import { UpgradeTargetSelector } from './UpgradeTargetSelector.js';
+import type { UpgradeTargetLoadState } from './UpgradeTargetSelector.js';
 import type { UsageRequestState } from './UsageReferencesPanel.js';
 
 const UPDATE_KIND_LABEL: Record<'major' | 'minor' | 'patch', string> = {
@@ -106,10 +108,12 @@ function AtAGlanceCard({
   row,
   analysis,
   usage,
+  advisoriesAvailable,
 }: {
   row: PackageRow;
   analysis: UpgradeAnalysisPresentation;
   usage: UsageRequestState | undefined;
+  advisoriesAvailable: boolean;
 }): ReactElement {
   const needsAttention = row.worstSeverity === 'critical' || row.worstSeverity === 'high';
 
@@ -120,7 +124,9 @@ function AtAGlanceCard({
       </h3>
       <dl className="manage-glance">
         <GlanceRow label="Vulnerabilities">
-          {row.advisories.length === 0 ? (
+          {!advisoriesAvailable ? (
+            'Unavailable'
+          ) : row.advisories.length === 0 ? (
             'None'
           ) : (
             <span className={`status-badge status-badge--${needsAttention ? 'warning' : 'neutral'}`}>
@@ -130,8 +136,8 @@ function AtAGlanceCard({
         </GlanceRow>
         <GlanceRow label="Usage">{usageAnalysisLabel(usage)}</GlanceRow>
         <GlanceRow label="Status">
-          <span className={`status-badge status-badge--${needsAttention ? 'warning' : 'neutral'}`}>
-            {needsAttention ? 'Needs attention' : 'Looks fine'}
+          <span className={`status-badge status-badge--${needsAttention || !advisoriesAvailable ? 'warning' : 'neutral'}`}>
+            {!advisoriesAvailable ? 'Data incomplete' : needsAttention ? 'Needs attention' : 'Looks fine'}
           </span>
         </GlanceRow>
       </dl>
@@ -155,7 +161,7 @@ function RecommendedActionCard({
   onConfirm: () => void;
   onUseSmartPlan: () => void;
 }): ReactElement {
-  const action = primaryAction(analysis);
+  const action = upgradeConfirmationAction(analysis);
   const compatDetail = compatibilityOutcomeDisplay(analysis.compatibility.status).label;
   const security = analysis.security;
   const resolvedCount = security?.resolvedAdvisories.length ?? 0;
@@ -194,11 +200,11 @@ function RecommendedActionCard({
       {action !== null ? (
         <button
           type="button"
-          className="button vuln-recommended__cta upgrade-recommended__cta"
+          className={semanticButtonClassName(action.variant, 'vuln-recommended__cta upgrade-recommended__cta')}
           disabled={busy}
           onClick={action.onClick === 'confirm' ? onConfirm : onUseSmartPlan}
         >
-          Proceed with upgrade →
+          {action.label} →
         </button>
       ) : null}
     </section>
@@ -292,14 +298,19 @@ export function UpgradeReviewPanel({
   row,
   active,
   targetVersion,
+  targetState,
   analyzingPhase,
   analysis,
   sections,
   hardStale,
   now,
   busy,
+  error,
+  disabled,
   usage,
+  advisoriesAvailable,
   onAnalyzeUpgrade,
+  onTargetChange,
   onConfirm,
   onUseSmartPlan,
   onCancel,
@@ -311,6 +322,7 @@ export function UpgradeReviewPanel({
   active: boolean;
   /** The upgrade target this row currently offers, or null when none is available. */
   targetVersion: string | null;
+  targetState: UpgradeTargetLoadState;
   analyzingPhase: 'compatibility' | 'smart-plan' | null;
   analysis: UpgradeAnalysisPresentation | null;
   /** Per-section progressive state, rendered while `analysis` is still null — see src/host/upgradeAnalysisSections.ts. */
@@ -319,8 +331,12 @@ export function UpgradeReviewPanel({
   hardStale: boolean;
   now: number;
   busy: boolean;
+  error: string | null;
+  disabled: boolean;
   usage: UsageRequestState | undefined;
+  advisoriesAvailable: boolean;
   onAnalyzeUpgrade: (target: string) => void;
+  onTargetChange: (target: string) => void;
   onConfirm: () => void;
   onUseSmartPlan: () => void;
   onCancel: () => void;
@@ -328,15 +344,44 @@ export function UpgradeReviewPanel({
   onRefresh: () => void;
   onChangeTab: (tab: ManageTabId) => void;
 }): ReactElement {
-  if (!active || targetVersion === null) {
-    if (targetVersion === null) {
-      return (
+  const targetSelector = row.upgradeTo === null ? null : (
+    <UpgradeTargetSelector
+      state={targetState}
+      selectedVersion={targetVersion}
+      fallbackVersion={row.upgradeTo}
+      disabled={busy || disabled}
+      onChange={onTargetChange}
+    />
+  );
+  const withTargetSelector = (content: ReactElement): ReactElement => (
+    <div className="upgrade-review-stack">
+      {targetSelector}
+      {error !== null ? (
+        <div className="banner banner--error upgrade-review__error" role="alert">
+          <IconAlertTriangle className="banner__icon" />
+          <p className="banner__text">{error}</p>
+        </div>
+      ) : null}
+      {content}
+    </div>
+  );
+
+  if (!active) {
+    if (row.upgradeTo === null) {
+      return withTargetSelector(
         <div className="manage-panel-empty">
           <p>No upgrade is currently available for {row.name}.</p>
         </div>
       );
     }
-    return (
+    if (targetVersion === null) {
+      return withTargetSelector(
+        <div className="manage-panel-empty">
+          <p>Choose a target version to continue.</p>
+        </div>
+      );
+    }
+    return withTargetSelector(
       <div className="review-panel__empty review-panel__empty--upgrade">
         <span className="review-panel__empty-icon" aria-hidden="true">
           <IconTrendUp />
@@ -348,15 +393,30 @@ export function UpgradeReviewPanel({
           {targetVersion}
         </p>
         <p className="review-panel__empty-status">Not analyzed yet</p>
-        <button type="button" className="button review-panel__empty-cta" onClick={() => onAnalyzeUpgrade(targetVersion)}>
+        <button
+          type="button"
+          className="button button--primary review-panel__empty-cta"
+          disabled={busy || disabled || targetState.phase === 'loading'}
+          onClick={() => onAnalyzeUpgrade(targetVersion)}
+        >
           Analyze upgrade →
         </button>
       </div>
     );
   }
 
+  // An active request always records a concrete target before posting to the
+  // host. This branch is defensive for an impossible state transition.
+  if (targetVersion === null) {
+    return withTargetSelector(
+      <div className="manage-panel-empty">
+        <p>Choose a target version and analyze again.</p>
+      </div>
+    );
+  }
+
   if (analysis === null) {
-    return (
+    return withTargetSelector(
       <div className="review-panel">
         <UpgradeAnalysisSections
           row={row}
@@ -369,15 +429,15 @@ export function UpgradeReviewPanel({
     );
   }
 
-  const action = primaryAction(analysis);
+  const action = upgradeConfirmationAction(analysis);
 
-  return (
+  return withTargetSelector(
     <div className="review-panel">
       <UpgradeFreshnessBar analyzedAt={analysis.analyzedAt} hardStale={hardStale} now={now} onRefresh={onRefresh} />
       <div className="upgrade-tab">
         <div className="upgrade-tab__summary">
           <UpgradeSummaryCard analysis={analysis} />
-          <AtAGlanceCard row={row} analysis={analysis} usage={usage} />
+          <AtAGlanceCard row={row} analysis={analysis} usage={usage} advisoriesAvailable={advisoriesAvailable} />
           <RecommendedActionCard analysis={analysis} busy={busy} onConfirm={onConfirm} onUseSmartPlan={onUseSmartPlan} />
         </div>
         <div className="upgrade-tab__details">
@@ -405,7 +465,7 @@ export function UpgradeReviewPanel({
         {action !== null ? (
           <button
             type="button"
-            className={`button${analysis.compatibility.status === 'warning' || analysis.compatibility.status === 'unknown' ? ' button--subtle' : ''}`}
+            className={semanticButtonClassName(action.variant)}
             onClick={action.onClick === 'confirm' ? onConfirm : onUseSmartPlan}
             disabled={busy || hardStale}
           >

@@ -9,6 +9,8 @@ import assert from 'node:assert/strict';
 
 import {
   manageRemovalReplacesUpgradeReview,
+  targetChangeInvalidatesManageAnalysis,
+  upgradeAnalysisMessageMatchesRequest,
   upgradeAnalysisRequestIsAllowed,
   upgradeErrorClearsActiveState,
   upgradeErrorIsUserVisible,
@@ -19,6 +21,28 @@ import {
 test('an upgrade analysis can start only when no analysis is already active', () => {
   assert.equal(upgradeAnalysisRequestIsAllowed(null), true);
   assert.equal(upgradeAnalysisRequestIsAllowed('react'), false);
+});
+
+test('progressive results from a superseded target request are ignored', () => {
+  assert.equal(upgradeAnalysisMessageMatchesRequest('target-b', 'target-a'), false);
+  assert.equal(upgradeAnalysisMessageMatchesRequest(null, 'target-a'), false);
+  assert.equal(upgradeAnalysisMessageMatchesRequest('target-b', 'target-b'), true);
+});
+
+test('changing target invalidates only the same Manage analysis', () => {
+  assert.equal(
+    targetChangeInvalidatesManageAnalysis('react', '18.3.1', '19.0.0', 'react', 'manage-dependency'),
+    true
+  );
+  assert.equal(
+    targetChangeInvalidatesManageAnalysis('react', '18.3.1', '18.3.1', 'react', 'manage-dependency'),
+    false
+  );
+  assert.equal(targetChangeInvalidatesManageAnalysis('react', '18.3.1', '19.0.0', 'react', 'dashboard'), false);
+  assert.equal(
+    targetChangeInvalidatesManageAnalysis('react', '18.3.1', '19.0.0', 'lodash', 'manage-dependency'),
+    false
+  );
 });
 
 test('starting removal replaces only the same package embedded upgrade review', () => {

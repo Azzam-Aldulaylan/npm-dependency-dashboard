@@ -10,7 +10,7 @@
  * on every render of the currently loaded rows.
  */
 
-import type { PackageRow, Severity } from '../core/types.js';
+import type { PackageRow, ScanDataAvailability, Severity } from '../core/types.js';
 import { classifyRowUpdate } from './updateClassification.js';
 
 export type SummaryFilterId = 'all' | 'updates' | 'vulnerabilities' | 'attention';
@@ -27,6 +27,11 @@ export interface SummaryMetrics {
   infoVulnerabilities: number;
   needsAttention: number;
   deprecatedCount: number;
+}
+
+export interface SummaryCardValue {
+  count: number | string;
+  subtitle: string;
 }
 
 /**
@@ -132,6 +137,21 @@ export function updatesCardSubtitle(metrics: SummaryMetrics): string {
   return `${percent}% of dependencies`;
 }
 
+function incompleteCount(known: number): string {
+  return known === 0 ? '—' : `≥${known}`;
+}
+
+export function updatesCardValue(metrics: SummaryMetrics, availability: ScanDataAvailability): SummaryCardValue {
+  if (availability.updates === 'complete') {
+    return { count: metrics.updatesAvailable, subtitle: updatesCardSubtitle(metrics) };
+  }
+  const unavailable = availability.unavailableUpdatePackages.length;
+  return {
+    count: incompleteCount(metrics.updatesAvailable),
+    subtitle: `${unavailable} package update check${unavailable === 1 ? '' : 's'} unavailable`,
+  };
+}
+
 const SEVERITY_LABELS: Record<Severity, string> = {
   critical: 'critical',
   high: 'high',
@@ -156,6 +176,16 @@ export function vulnerabilitiesCardSubtitle(metrics: SummaryMetrics): string {
     .join(' · ');
 }
 
+export function vulnerabilitiesCardValue(
+  metrics: SummaryMetrics,
+  availability: ScanDataAvailability
+): SummaryCardValue {
+  if (availability.advisories === 'complete') {
+    return { count: metrics.vulnerable, subtitle: vulnerabilitiesCardSubtitle(metrics) };
+  }
+  return { count: '—', subtitle: 'Advisory data unavailable' };
+}
+
 /**
  * Deliberately different vocabulary from vulnerabilitiesCardSubtitle's own
  * "N critical · N high" — Needs Attention and Vulnerabilities overlap in
@@ -172,4 +202,11 @@ export function attentionCardSubtitle(metrics: SummaryMetrics): string {
   if (urgent > 0) parts.push(`${urgent} urgent`);
   if (metrics.deprecatedCount > 0) parts.push(`${metrics.deprecatedCount} deprecated`);
   return parts.join(' · ');
+}
+
+export function attentionCardValue(metrics: SummaryMetrics, availability: ScanDataAvailability): SummaryCardValue {
+  if (availability.advisories === 'complete') {
+    return { count: metrics.needsAttention, subtitle: attentionCardSubtitle(metrics) };
+  }
+  return { count: incompleteCount(metrics.needsAttention), subtitle: 'Advisory data unavailable' };
 }

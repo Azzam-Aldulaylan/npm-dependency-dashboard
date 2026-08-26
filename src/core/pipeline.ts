@@ -31,7 +31,7 @@ import { fetchAllVersions, fetchPackument } from './registry/versions.js';
 import type { PackumentDoc } from './registry/versions.js';
 import { DEFAULT_CONCURRENCY, runPool } from './registry/pool.js';
 import { resolveUpgradeCandidate } from './upgrade/candidate.js';
-import type { Advisory, AttributedAdvisory, FixAvailable, PackageRow, VersionInfo } from './types.js';
+import type { Advisory, AttributedAdvisory, FixAvailable, PackageRow, ScanDataAvailability, VersionInfo } from './types.js';
 import type { PackageManagerKind } from './types.js';
 
 export interface BuildPackageRowsOptions {
@@ -73,6 +73,8 @@ export interface ScanProgress {
 
 export interface BuildPackageRowsResult {
   rows: PackageRow[];
+  /** Completeness of the update/advisory facts represented by these rows. */
+  availability: ScanDataAvailability;
   /** Set when the bulk fetch failed outright; rows are still returned, without advisory data. */
   advisoriesError?: FetchError;
   /** True when no runner was given, or audit failed / returned unparseable output. */
@@ -254,11 +256,13 @@ export async function buildPackageRows(
   const settled = await fetchAllVersions(fetchOptions, requests);
   endVersions({ requests: requests.length });
   const versionsByName = new Map<string, VersionInfo>();
+  const unavailableUpdatePackages: string[] = [];
   requests.forEach((req, i) => {
     const result = settled[i];
     // A per-package failure is simply an absent entry — that row renders with
     // null wanted/latest and doesn't disturb any other row.
     if (result?.ok === true) versionsByName.set(req.name, result.value);
+    else unavailableUpdatePackages.push(req.name);
   });
   throwIfAborted(signal);
 
@@ -391,7 +395,12 @@ export async function buildPackageRows(
   const hygieneFindings = computeGraphHygieneFindings(rows, graph, manifest.dependencies);
   endRows({ rows: rows.length, 'hygiene findings': hygieneFindings.length });
 
-  const result: BuildPackageRowsResult = { rows, hygieneFindings };
+  const availability: ScanDataAvailability = {
+    updates: unavailableUpdatePackages.length === 0 ? 'complete' : 'partial',
+    advisories: advisoriesError === undefined ? 'complete' : 'unavailable',
+    unavailableUpdatePackages,
+  };
+  const result: BuildPackageRowsResult = { rows, availability, hygieneFindings };
   if (advisoriesError !== undefined) result.advisoriesError = advisoriesError;
   if (auditUnavailable) result.auditUnavailable = true;
   return result;

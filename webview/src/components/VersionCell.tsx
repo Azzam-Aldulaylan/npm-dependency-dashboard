@@ -57,7 +57,8 @@ export function CurrentVersionCell({ row }: { row: PackageRow }): ReactElement {
  * that a user is never told "you're behind" when a plain install already
  * gets them nothing more.
  */
-export function AvailableVersionCell({ row }: { row: PackageRow }): ReactElement {
+export function AvailableVersionCell({ row, resolutionAvailable = true }: { row: PackageRow; resolutionAvailable?: boolean }): ReactElement {
+  if (!resolutionAvailable) return <span className="version-cell__caption">Unavailable</span>;
   const display = availableVersionDisplay(row.current, row.wanted, row.latest);
 
   if (display.kind === 'dash') return <span aria-hidden="true">—</span>;

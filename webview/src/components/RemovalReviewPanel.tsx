@@ -101,10 +101,12 @@ function RemovalSummaryCard({
   row,
   analysis,
   assessment,
+  advisoriesAvailable,
 }: {
   row: PackageRow;
   analysis: RemoveAnalysisPresentation;
   assessment: RemovalAssessment | undefined;
+  advisoriesAvailable: boolean;
 }): ReactElement {
   const status = statusCopy(assessment);
   const change = analysis.changes.find((candidate) => candidate.packageName === row.name) ?? analysis.changes[0];
@@ -119,7 +121,11 @@ function RemovalSummaryCard({
       <dl className="manage-glance removal-summary__facts">
         <GlanceRow label="Version">{row.current ?? row.range}</GlanceRow>
         <GlanceRow label="Required by">{`${requiredBy} package${requiredBy === 1 ? '' : 's'}`}</GlanceRow>
-        {row.advisories.length > 0 ? <GlanceRow label="Vulnerabilities">{String(row.advisories.length)}</GlanceRow> : null}
+        {!advisoriesAvailable ? (
+          <GlanceRow label="Vulnerabilities">Unavailable</GlanceRow>
+        ) : row.advisories.length > 0 ? (
+          <GlanceRow label="Vulnerabilities">{String(row.advisories.length)}</GlanceRow>
+        ) : null}
       </dl>
     </section>
   );
@@ -130,11 +136,13 @@ function AtAGlanceCard({
   analysis,
   assessment,
   usage,
+  advisoriesAvailable,
 }: {
   row: PackageRow;
   analysis: RemoveAnalysisPresentation;
   assessment: RemovalAssessment | undefined;
   usage: UsageRequestState | undefined;
+  advisoriesAvailable: boolean;
 }): ReactElement {
   const change = analysis.changes.find((candidate) => candidate.packageName === row.name) ?? analysis.changes[0];
   const requiredBy = change?.stillRequiredBy.length ?? 0;
@@ -154,7 +162,7 @@ function AtAGlanceCard({
         <GlanceRow label="Installed version">{row.current ?? row.range}</GlanceRow>
         <GlanceRow label="Required by">{`${requiredBy} package${requiredBy === 1 ? '' : 's'}`}</GlanceRow>
         <GlanceRow label="Used in code">{usedInCode}</GlanceRow>
-        <GlanceRow label="Vulnerabilities">{String(row.advisories.length)}</GlanceRow>
+        <GlanceRow label="Vulnerabilities">{advisoriesAvailable ? String(row.advisories.length) : 'Unavailable'}</GlanceRow>
         <GlanceRow label="Package type">{CLASSIFICATION_LABEL[change?.classification ?? classificationOf(row)]}</GlanceRow>
       </dl>
     </section>
@@ -446,6 +454,7 @@ export function RemovalReviewPanel({
   busy,
   removalImpact,
   usage,
+  advisoriesAvailable,
   onAnalyzeRemoval,
   onConfirm,
   onViewReferences,
@@ -457,6 +466,7 @@ export function RemovalReviewPanel({
   busy: boolean;
   removalImpact: RemovalImpactState;
   usage: UsageRequestState | undefined;
+  advisoriesAvailable: boolean;
   onAnalyzeRemoval: () => void;
   onConfirm: () => void;
   onViewReferences: () => void;
@@ -470,7 +480,7 @@ export function RemovalReviewPanel({
         </span>
         <h3 className="review-panel__empty-heading">Removal review</h3>
         <p className="review-panel__empty-status">Not analyzed yet</p>
-        <button type="button" className="button review-panel__empty-cta" onClick={onAnalyzeRemoval}>
+        <button type="button" className="button button--primary review-panel__empty-cta" onClick={onAnalyzeRemoval}>
           Analyze removal →
         </button>
       </div>
@@ -490,7 +500,7 @@ export function RemovalReviewPanel({
             className="unknown"
             detail={removalImpact.message}
           />
-          <button type="button" className="button button--secondary" onClick={onAnalyzeRemoval}>
+          <button type="button" className="button button--subtle" onClick={onAnalyzeRemoval}>
             <IconRefresh />
             Re-run analysis
           </button>
@@ -522,8 +532,8 @@ export function RemovalReviewPanel({
     <div className="review-panel removal-review">
       <div className="removal-tab">
         <div className="removal-tab__summary">
-          <RemovalSummaryCard row={row} analysis={analysis} assessment={assessment} />
-          <AtAGlanceCard row={row} analysis={analysis} assessment={assessment} usage={usage} />
+          <RemovalSummaryCard row={row} analysis={analysis} assessment={assessment} advisoriesAvailable={advisoriesAvailable} />
+          <AtAGlanceCard row={row} analysis={analysis} assessment={assessment} usage={usage} advisoriesAvailable={advisoriesAvailable} />
           <RecommendedActionCard
             row={row}
             assessment={assessment}

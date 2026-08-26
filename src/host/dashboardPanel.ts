@@ -316,6 +316,10 @@ export class DashboardPanel {
   }
 
   private async handle(message: WebviewToHostMessage): Promise<void> {
+    if (message.type === 'load-upgrade-targets') {
+      await this.upgradeCoordinator.handleLoadUpgradeTargets(message);
+      return;
+    }
     if (message.type === 'upgrade') {
       await this.upgradeCoordinator.handleAnalyzeUpgrade(message);
       return;
@@ -819,6 +823,7 @@ export class DashboardPanel {
       importerId: project.importerId,
       lockfileName: project.lockfileName,
       registry: project.registry,
+      resolvedRegistry: project.resolvedRegistry,
       httpClient: this.httpClient,
       etagStore: this.etagStore,
       auditRunner: this.auditRunner,

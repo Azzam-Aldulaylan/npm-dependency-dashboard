@@ -7,11 +7,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { FetchError } from '../out/core/registry/http.js';
 
 import {
   fetchVersionInfo,
   fetchAllVersions,
   fetchLatest,
+  fetchDistTags,
   needsPackument,
   encodePackageName,
   MemoryEtagStore,
@@ -102,6 +104,35 @@ test('escalates to the abbreviated packument when latest leaves the range', asyn
   assert.equal(info.latest, '19.0.0', 'highest stable overall');
 });
 
+test('an oversized packument resolves from compact tags instead of making the row unavailable', async () => {
+  const client = fakeClient({
+    [`${REGISTRY}/next/latest`]: json({ version: '16.3.3' }),
+    [`${REGISTRY}/next`]: () => {
+      throw new FetchError('TOO_LARGE', 'response exceeded the safety budget');
+    },
+    [`${REGISTRY}/-/package/next/dist-tags`]: json({
+      'next-14': '14.2.35',
+      'next-15-3': '15.3.9',
+      backport: '15.5.24',
+      latest: '16.3.3',
+      canary: '16.4.0-canary.8',
+    }),
+  });
+
+  const info = await fetchVersionInfo(
+    { client, store: new MemoryEtagStore(), registry: REGISTRY },
+    { name: 'next', range: '^14.2.35', installed: '14.2.35' }
+  );
+
+  assert.equal(info.wanted, '14.2.35');
+  assert.equal(info.latest, '16.3.3');
+  assert.deepEqual(client.calls.map((call) => call.url), [
+    `${REGISTRY}/next/latest`,
+    `${REGISTRY}/next`,
+    `${REGISTRY}/-/package/next/dist-tags`,
+  ]);
+});
+
 test('the canary rule still holds through the escalation path', async () => {
   const client = fakeClient({
     [`${REGISTRY}/pkg/latest`]: json({ version: '19.2.8' }),
@@ -146,6 +177,19 @@ test('scoped names are URL-encoded', async () => {
     { name: '@types/node', range: '^20.0.0', installed: '20.0.0' }
   );
   assert.equal(info.latest, '20.0.0');
+});
+
+test('dist-tags use the compact registry endpoint and preserve safe string tags', async () => {
+  const client = fakeClient({
+    [`${REGISTRY}/-/package/@scope%2fpkg/dist-tags`]: json({
+      latest: '3.0.0',
+      legacy: '2.5.0',
+      __proto__: 'ignored',
+    }),
+  });
+  const tags = await fetchDistTags(client, new MemoryEtagStore(), REGISTRY, '@scope/pkg');
+  assert.deepEqual(tags, { latest: '3.0.0', legacy: '2.5.0' });
+  assert.equal(client.calls[0].headers.accept, 'application/json');
 });
 
 // ----------------------------------------------------------------- ETags

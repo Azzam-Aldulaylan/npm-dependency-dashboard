@@ -159,6 +159,8 @@ function ManageButton({ row, onOpenManage }: { row: PackageRow; onOpenManage: (p
 
 export function PackageTable({
   rows,
+  unavailableUpdatePackages,
+  advisoriesAvailable,
   sortState,
   onSort,
   onOpenAdvisory,
@@ -166,6 +168,8 @@ export function PackageTable({
   onOpenManage,
 }: {
   rows: readonly PackageRow[];
+  unavailableUpdatePackages: ReadonlySet<string>;
+  advisoriesAvailable: boolean;
   sortState: TableSortState;
   onSort: (column: SortColumn) => void;
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
@@ -299,10 +303,10 @@ export function PackageTable({
                   <CurrentVersionCell row={row} />
                 </td>
                 <td className="packages__wrap">
-                  <AvailableVersionCell row={row} />
+                  <AvailableVersionCell row={row} resolutionAvailable={!unavailableUpdatePackages.has(row.name)} />
                 </td>
                 <td>
-                  <SeverityBadge severity={row.worstSeverity} />
+                  <SeverityBadge severity={row.worstSeverity} advisoriesAvailable={advisoriesAvailable} />
                 </td>
                 <td className="packages__action-cell">
                   <div className="packages__actions">

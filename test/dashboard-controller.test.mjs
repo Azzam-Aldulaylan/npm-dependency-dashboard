@@ -123,6 +123,7 @@ const CACHED_ROW = {
   upgradeTo: null,
   upgradeReason: null,
 };
+const COMPLETE_AVAILABILITY = { updates: 'complete', advisories: 'complete', unavailableUpdatePackages: [] };
 
 /**
  * `makeController`'s defaults are `manifestText: MANIFEST, lockfileText:
@@ -196,6 +197,29 @@ test('handleReady with a cold cache posts loading, then the fresh result', async
   assert.deepEqual(sink.statuses, ['loading', 'partial-error']);
   assert.equal(latestOf(sink.posted[1]), '1.0.1');
   assert.equal(sink.posted[1].data.auditUnavailable, true);
+});
+
+test('a cold scan exposes only loading and real progress until the atomic core snapshot is complete', async () => {
+  const controller = makeController(generationalClient({ versions: ['1.0.1'], delayMs: { 0: 40 } }), {
+    progressEnabled: true,
+  });
+  const sink = recordingSink();
+
+  const pending = controller.handleReady(sink);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  assert.equal(sink.statuses[0], 'loading');
+  assert.ok(sink.statuses.includes('scan-progress'));
+  assert.equal(
+    sink.posted.some((message) => 'data' in message),
+    false,
+    'no dashboard rows are published while update/advisory work is pending'
+  );
+
+  await pending;
+  assert.equal(sink.statuses.at(-1), 'partial-error');
+  assert.equal(sink.posted.at(-1).data.availability.updates, 'complete');
+  assert.equal(sink.posted.at(-1).data.availability.advisories, 'complete');
 });
 
 test('handleReady with a warm cache replays it as stale, then posts fresh data', async () => {
@@ -295,6 +319,41 @@ test('a superseded run never posts its result', async () => {
   const results = sink.posted.filter((m) => m.status !== 'loading');
   assert.equal(results.length, 1, `expected exactly one result, got ${sink.statuses.join(', ')}`);
   assert.equal(latestOf(results[0]), '1.0.2', 'the newer run is the one that lands');
+});
+
+test('a repeated ready during a cold scan supersedes the older attempt without publishing its late snapshot', async () => {
+  const controller = makeController(
+    generationalClient({ versions: ['1.0.1', '1.0.2'], delayMs: { 0: 60 } })
+  );
+  const firstSink = recordingSink();
+  const secondSink = recordingSink();
+
+  const first = controller.handleReady(firstSink);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const second = controller.handleReady(secondSink);
+  await Promise.all([first, second]);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  assert.deepEqual(firstSink.statuses, ['loading'], 'the superseded ready never posts dashboard data');
+  assert.equal(secondSink.statuses[0], 'loading');
+  assert.equal(secondSink.statuses.at(-1), 'partial-error');
+  assert.equal(latestOf(secondSink.posted.at(-1)), '1.0.2');
+});
+
+test('a completed core-incomplete scan remains ineligible for upgrade until a complete revalidation succeeds', async () => {
+  const controller = makeController(throwingClient);
+  const sink = recordingSink();
+
+  await controller.handleReady(sink);
+
+  assert.equal(sink.statuses.at(-1), 'partial-error');
+  assert.equal(sink.posted.at(-1).data.availability.updates, 'partial');
+  assert.equal(sink.posted.at(-1).data.availability.advisories, 'unavailable');
+  assert.deepEqual(
+    controller.validateUpgradeRequest({ package: 'clean-pkg', target: '1.0.1' }),
+    { ok: false, reason: 'revalidating' }
+  );
+  assert.equal(controller.needsBackgroundRefresh(), true, 'core-incomplete results remain eligible for retry regardless of TTL');
 });
 
 test('two overlapping background-triggered runs each announce their own stale start, but only the winner posts a final result', async () => {
@@ -733,6 +792,7 @@ test('a fresh persisted cache renders as ready with no pipeline/network run at a
   const now = Date.now();
   projectCacheStore.set('cache-key-fresh', {
     rows: [CACHED_ROW],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: new Date(now).toISOString(),
     lockfilePath: null,
     sourceFingerprint: SOURCE_FINGERPRINT,
@@ -757,6 +817,7 @@ test('a stale persisted cache renders immediately as stale, then a real revalida
   const oldTimestamp = new Date(Date.now() - 60 * 60_000).toISOString();
   projectCacheStore.set('cache-key-stale', {
     rows: [CACHED_ROW],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: oldTimestamp,
     lockfilePath: null,
     sourceFingerprint: SOURCE_FINGERPRINT,
@@ -776,11 +837,76 @@ test('a stale persisted cache renders immediately as stale, then a real revalida
   assert.equal(latestOf(sink.posted[1]), '1.0.1', 'a real scan still follows');
 });
 
+test('a fresh core-incomplete persisted snapshot is replayed as stale and immediately revalidated instead of receiving the TTL shortcut', async () => {
+  const projectCacheStore = new PersistentProjectCacheStore(fakeKeyValueStore());
+  const now = Date.now();
+  const degradedAvailability = {
+    updates: 'partial',
+    advisories: 'unavailable',
+    unavailableUpdatePackages: ['clean-pkg'],
+  };
+  projectCacheStore.set('cache-key-fresh-degraded', {
+    rows: [{ ...CACHED_ROW, wanted: null, latest: null }],
+    availability: degradedAvailability,
+    advisoriesError: { code: 'NETWORK', message: 'offline' },
+    generatedAt: new Date(now).toISOString(),
+    lockfilePath: null,
+    sourceFingerprint: SOURCE_FINGERPRINT,
+  });
+  const controller = makeController(generationalClient({ versions: ['1.0.1'], delayMs: { 0: 40 } }), {
+    projectCacheStore,
+    cacheKey: 'cache-key-fresh-degraded',
+    ttlMinutesProvider: () => 30,
+    now: () => now,
+  });
+  const sink = recordingSink();
+
+  const pending = controller.handleReady(sink);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  assert.deepEqual(sink.statuses, ['stale'], 'the degraded cache is visible while its mandatory retry is pending');
+  assert.deepEqual(sink.posted[0].data.availability, degradedAvailability);
+  assert.equal(sink.posted[0].data.advisoriesError.code, 'NETWORK');
+
+  await pending;
+  assert.equal(sink.statuses.at(-1), 'partial-error');
+  assert.equal(sink.posted.at(-1).data.availability.updates, 'complete');
+  assert.equal(sink.posted.at(-1).data.availability.advisories, 'complete');
+});
+
+test('a stale degraded persisted snapshot preserves both freshness and availability facts during revalidation', async () => {
+  const projectCacheStore = new PersistentProjectCacheStore(fakeKeyValueStore());
+  projectCacheStore.set('cache-key-stale-degraded', {
+    rows: [{ ...CACHED_ROW, wanted: null, latest: null }],
+    availability: { updates: 'complete', advisories: 'unavailable', unavailableUpdatePackages: [] },
+    advisoriesError: { code: 'RATE_LIMITED', message: 'try later' },
+    generatedAt: new Date(Date.now() - 60 * 60_000).toISOString(),
+    lockfilePath: null,
+    sourceFingerprint: SOURCE_FINGERPRINT,
+  });
+  const controller = makeController(generationalClient({ versions: ['1.0.1'], delayMs: { 0: 40 } }), {
+    projectCacheStore,
+    cacheKey: 'cache-key-stale-degraded',
+    ttlMinutesProvider: () => 30,
+  });
+  const sink = recordingSink();
+
+  const pending = controller.handleReady(sink);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  assert.equal(sink.posted[0].status, 'stale');
+  assert.equal(sink.posted[0].data.availability.advisories, 'unavailable');
+  assert.equal(sink.posted[0].data.advisoriesError.code, 'RATE_LIMITED');
+
+  await pending;
+});
+
 test('handleRefresh bypasses a fresh persisted cache — it never short-circuits, unlike handleReady', async () => {
   const projectCacheStore = new PersistentProjectCacheStore(fakeKeyValueStore());
   const now = Date.now();
   projectCacheStore.set('cache-key-fresh-refresh', {
     rows: [CACHED_ROW],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: new Date(now).toISOString(),
     lockfilePath: null,
   });
@@ -806,6 +932,7 @@ test('TTL boundary at the controller level: exactly at the limit revalidates, ju
   const atBoundaryStore = new PersistentProjectCacheStore(fakeKeyValueStore());
   atBoundaryStore.set('boundary', {
     rows: [CACHED_ROW],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: new Date(now - ttlMinutes * 60_000).toISOString(),
     lockfilePath: null,
     sourceFingerprint: SOURCE_FINGERPRINT,
@@ -823,6 +950,7 @@ test('TTL boundary at the controller level: exactly at the limit revalidates, ju
   const underBoundaryStore = new PersistentProjectCacheStore(fakeKeyValueStore());
   underBoundaryStore.set('under-boundary', {
     rows: [CACHED_ROW],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: new Date(now - ttlMinutes * 60_000 + 1).toISOString(),
     lockfilePath: null,
     sourceFingerprint: SOURCE_FINGERPRINT,
@@ -843,6 +971,7 @@ test('ttlMinutesProvider returning 0 always revalidates, even for a snapshot gen
   const projectCacheStore = new PersistentProjectCacheStore(fakeKeyValueStore());
   projectCacheStore.set('zero-ttl', {
     rows: [CACHED_ROW],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: new Date(now).toISOString(),
     lockfilePath: null,
     sourceFingerprint: SOURCE_FINGERPRINT,
@@ -947,12 +1076,14 @@ test('cache entries are isolated by S6 project identity — the same relative ma
   const now = Date.now();
   projectCacheStore.set(keyOne, {
     rows: [{ ...CACHED_ROW, name: 'folder-one-pkg' }],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: new Date(now).toISOString(),
     lockfilePath: null,
     sourceFingerprint: SOURCE_FINGERPRINT,
   });
   projectCacheStore.set(keyTwo, {
     rows: [{ ...CACHED_ROW, name: 'folder-two-pkg' }],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: new Date(now).toISOString(),
     lockfilePath: null,
     sourceFingerprint: SOURCE_FINGERPRINT,
@@ -982,8 +1113,8 @@ test('cache entries are isolated by S6 project identity — the same relative ma
 test('invalidateCache drops only this controller’s own persisted entry, leaving other projects alone', async () => {
   const projectCacheStore = new PersistentProjectCacheStore(fakeKeyValueStore());
   const now = Date.now();
-  projectCacheStore.set('project-a', { rows: [CACHED_ROW], generatedAt: new Date(now).toISOString(), lockfilePath: null });
-  projectCacheStore.set('project-b', { rows: [CACHED_ROW], generatedAt: new Date(now).toISOString(), lockfilePath: null });
+  projectCacheStore.set('project-a', { rows: [CACHED_ROW], availability: COMPLETE_AVAILABILITY, generatedAt: new Date(now).toISOString(), lockfilePath: null });
+  projectCacheStore.set('project-b', { rows: [CACHED_ROW], availability: COMPLETE_AVAILABILITY, generatedAt: new Date(now).toISOString(), lockfilePath: null });
 
   const controller = makeController(staticClient('1.0.1'), {
     projectCacheStore,
@@ -1006,6 +1137,7 @@ test('a successful handleRefresh always overwrites the persisted snapshot with t
   const projectCacheStore = new PersistentProjectCacheStore(fakeKeyValueStore());
   projectCacheStore.set('project-a', {
     rows: [{ ...CACHED_ROW, current: 'stale-version' }],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: new Date(0).toISOString(),
     lockfilePath: null,
   });
@@ -1091,6 +1223,7 @@ test('needsBackgroundRefresh becomes true once the last scan falls outside the c
   });
   projectCacheStore.set('bg-stale', {
     rows: [CACHED_ROW],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: new Date(now - 60 * 60_000).toISOString(),
     lockfilePath: null,
   });
@@ -1414,6 +1547,7 @@ test('a cold controller cannot be hydrated into eligibility if a watcher event b
   const now = Date.now();
   projectCacheStore.set('cold-hydration-race', {
     rows: [{ ...CACHED_ROW, current: '1.0.0' }],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: new Date(now).toISOString(),
     lockfilePath: null,
     sourceFingerprint: SOURCE_FINGERPRINT,
@@ -1507,6 +1641,7 @@ test('fresh, fingerprint-matching persisted data may authorize an Upgrade purely
   const now = Date.now();
   projectCacheStore.set('cache-key-fresh-eligible', {
     rows: [{ ...CACHED_ROW, current: '1.0.0' }],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: new Date(now).toISOString(),
     lockfilePath: null,
     sourceFingerprint: SOURCE_FINGERPRINT,
@@ -1534,6 +1669,7 @@ test('TTL-stale persisted data — even with a matching fingerprint — never gr
   const oldTimestamp = new Date(Date.now() - 60 * 60_000).toISOString();
   projectCacheStore.set('cache-key-stale-ineligible', {
     rows: [{ ...CACHED_ROW, current: '1.0.0' }],
+    availability: COMPLETE_AVAILABILITY,
     generatedAt: oldTimestamp,
     lockfilePath: null,
     sourceFingerprint: SOURCE_FINGERPRINT,

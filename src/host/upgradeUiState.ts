@@ -16,6 +16,32 @@ export function upgradeAnalysisRequestIsAllowed(activePackage: string | null): b
   return activePackage === null;
 }
 
+/** Late progressive messages are accepted only for the still-active attempt. */
+export function upgradeAnalysisMessageMatchesRequest(
+  activeRequestId: string | null,
+  incomingRequestId: string
+): boolean {
+  return activeRequestId !== null && activeRequestId === incomingRequestId;
+}
+
+/**
+ * Changing a selected target invalidates an analysis for that same Manage
+ * dependency, but never touches a dashboard/bulk flow or another package.
+ */
+export function targetChangeInvalidatesManageAnalysis(
+  packageName: string,
+  previousTarget: string | null,
+  nextTarget: string,
+  activeUpgrade: string | null,
+  upgradeOrigin: 'dashboard' | 'manage-dependency' | null
+): boolean {
+  return (
+    previousTarget !== nextTarget &&
+    upgradeOrigin === 'manage-dependency' &&
+    activeUpgrade === packageName
+  );
+}
+
 /**
  * Whether a removal decision targets the same active upgrade review opened
  * inside Manage. Once that review has produced an analysis id, the caller

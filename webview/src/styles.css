@@ -170,14 +170,25 @@ button {
 .button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 0.4rem;
+  min-height: 1.75rem;
   padding: 0.35rem 0.9rem;
   border: 1px solid var(--vscode-button-border, transparent);
   border-radius: 3px;
   color: var(--vscode-button-foreground);
   background: var(--vscode-button-background);
+  font-family: inherit;
   font-size: inherit;
+  line-height: 1.2;
+  text-align: center;
   cursor: pointer;
+}
+
+.button--primary {
+  border-color: var(--vscode-button-border, transparent);
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
 }
 
 .button:hover:not(:disabled) {
@@ -210,13 +221,28 @@ button {
 }
 
 .button--subtle {
-  border-color: var(--vscode-button-background);
-  color: var(--vscode-button-background);
+  border-color: transparent;
+  color: var(--vscode-foreground);
   background: transparent;
 }
 
 .button--subtle:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--vscode-button-background) 14%, transparent);
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+/* Risky-but-allowed — visually related to every other button, with only its semantic tone changed. */
+.button--caution {
+  border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground));
+  color: var(--vscode-inputValidation-warningForeground, var(--vscode-editorWarning-foreground));
+  background: var(--vscode-inputValidation-warningBackground, transparent);
+}
+
+.button--caution:hover:not(:disabled) {
+  background: color-mix(
+    in srgb,
+    var(--vscode-editorWarning-foreground) 14%,
+    var(--vscode-inputValidation-warningBackground, transparent)
+  );
 }
 
 /* Remove — same restrained outline treatment as VS Code's own Extensions-view Uninstall, never a filled danger block. */
@@ -228,6 +254,12 @@ button {
 
 .button--danger:hover:not(:disabled) {
   background: color-mix(in srgb, var(--vscode-editorError-foreground) 14%, transparent);
+}
+
+.button > svg {
+  flex-shrink: 0;
+  width: 1em;
+  height: 1em;
 }
 
 /* ------------------------------------------------------------- summary cards */
@@ -2357,30 +2389,6 @@ button {
   align-self: flex-end;
 }
 
-/* Upgrade — the one direct-commit CTA here, filled in the card's own accent rather than the generic button blue. */
-.manage-action-card--upgrade .manage-action-card__cta {
-  border-color: var(--manage-card-accent);
-  background: var(--manage-card-accent);
-  color: var(--vscode-button-foreground, #ffffff);
-}
-
-.manage-action-card--upgrade .manage-action-card__cta:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--manage-card-accent) 82%, black);
-}
-
-/* Remove / Check transitive fixes — both start an analysis, not a direct commit, so both stay outlined in the card's own accent instead of a filled block. */
-.manage-action-card--remove .manage-action-card__cta,
-.manage-action-card--transitive .manage-action-card__cta {
-  border-color: var(--manage-card-accent);
-  background: transparent;
-  color: var(--manage-card-accent);
-}
-
-.manage-action-card--remove .manage-action-card__cta:hover:not(:disabled),
-.manage-action-card--transitive .manage-action-card__cta:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--manage-card-accent) 14%, transparent);
-}
-
 /*
  * The Remove card's three compact status boxes — Usage analysis / Peer
  * requirements / Removal risk — replacing a plain label/value list so the
@@ -2622,12 +2630,6 @@ button {
 
 .vuln-recommended__cta {
   align-self: flex-start;
-  color: var(--accent-total);
-  border-color: var(--accent-total);
-}
-
-.vuln-recommended__cta:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent-total) 14%, transparent);
 }
 
 .vuln-filters {
@@ -3213,26 +3215,6 @@ button {
   font-size: 0.85em;
 }
 
-.review-panel__empty--upgrade .review-panel__empty-cta {
-  border-color: var(--review-empty-accent);
-  background: var(--review-empty-accent);
-  color: var(--vscode-button-foreground, #ffffff);
-}
-
-.review-panel__empty--upgrade .review-panel__empty-cta:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--review-empty-accent) 82%, black);
-}
-
-.review-panel__empty--remove .review-panel__empty-cta {
-  border-color: var(--review-empty-accent);
-  background: transparent;
-  color: var(--review-empty-accent);
-}
-
-.review-panel__empty--remove .review-panel__empty-cta:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--review-empty-accent) 14%, transparent);
-}
-
 .review-panel {
   display: flex;
   flex-direction: column;
@@ -3338,7 +3320,6 @@ button {
 .upgrade-tab .upgrade-recommended__cta {
   align-self: stretch;
   justify-content: center;
-  padding-block: 0.3rem;
 }
 
 /* ------------------------------------------------------- removal review */
@@ -3583,13 +3564,6 @@ button {
   flex-shrink: 0;
   min-width: 10.5rem;
   justify-content: center;
-  border-color: var(--vscode-editorError-foreground);
-  color: var(--vscode-button-foreground, #ffffff);
-  background: var(--vscode-editorError-foreground);
-}
-
-.removal-review__footer-action:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--vscode-editorError-foreground) 85%, black);
 }
 
 .removal-review__loading-icon {
@@ -3616,16 +3590,6 @@ button {
   align-items: center;
   gap: 0.3rem;
   font-variant-numeric: tabular-nums;
-}
-
-.upgrade-recommended__cta {
-  background: var(--accent-total);
-  border-color: var(--accent-total);
-  color: var(--vscode-button-foreground, #ffffff);
-}
-
-.upgrade-recommended__cta:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent-total) 85%, black);
 }
 
 .upgrade-preview__versions {
@@ -4582,6 +4546,418 @@ button {
   .modal {
     max-height: 92vh;
     border-radius: 6px 6px 0 0;
+  }
+}
+
+/* ------------------------------------------------ upgrade target selection */
+
+.upgrade-review-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.upgrade-target-picker {
+  display: grid;
+  grid-template-columns: minmax(10rem, 0.42fr) minmax(14rem, 1fr);
+  gap: 0.85rem 1.25rem;
+  align-items: center;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--vscode-panel-border);
+  border-left: 3px solid var(--vscode-focusBorder);
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.upgrade-target-picker__copy,
+.upgrade-target-picker__control {
+  min-width: 0;
+}
+
+.upgrade-target-picker__label {
+  display: block;
+  color: var(--vscode-foreground);
+  font-size: 0.85rem;
+  font-weight: 650;
+}
+
+.upgrade-target-picker__hint,
+.upgrade-target-picker__meta {
+  margin: 0.2rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.upgrade-target-picker__control {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.upgrade-target-picker__select {
+  width: 100%;
+  min-height: 2rem;
+  padding: 0.3rem 1.9rem 0.3rem 0.55rem;
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border));
+  border-radius: 3px;
+  outline: none;
+  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.upgrade-target-picker__select:focus-visible {
+  border-color: var(--vscode-focusBorder);
+  box-shadow: 0 0 0 1px var(--vscode-focusBorder);
+}
+
+.upgrade-target-picker__select:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.upgrade-target-picker__meta--warning {
+  color: var(--vscode-inputValidation-warningForeground, var(--vscode-editorWarning-foreground));
+}
+
+.upgrade-target-picker__manual-toggle {
+  justify-self: start;
+  min-height: 1.75rem;
+  padding-inline: 0;
+}
+
+.upgrade-target-picker__manual {
+  display: grid;
+  gap: 0.35rem;
+  padding-top: 0.25rem;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+.upgrade-target-picker__manual-label {
+  color: var(--vscode-foreground);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.upgrade-target-picker__manual-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.upgrade-target-picker__manual-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+  padding: 0.45rem 0.55rem;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.8125rem;
+}
+
+.upgrade-target-picker__manual-input:focus {
+  border-color: var(--vscode-focusBorder);
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* -------------------------------------- Manage dependency responsive pass */
+
+/* Keep ordinary content inside the workspace fluid. Horizontal scrolling is
+   deliberately reserved for the editor-style tab strip and code snippets. */
+.manage-modal__body > *,
+.review-panel,
+.manage-action-card__head > :last-child,
+.manage-action-card__progress > span,
+.smart-plan__package,
+.verification-steps__item > :first-child {
+  min-width: 0;
+}
+
+.manage-modal__identity-name,
+.manage-action-card__version,
+.manage-action-card__progress > span,
+.smart-plan__package,
+.verification-steps__item > :first-child,
+.verification-steps__item code,
+.removal-package__identity strong {
+  overflow-wrap: anywhere;
+}
+
+.manage-action-card__versions,
+.usage-card__head,
+.usage-card__meta,
+.stale-status,
+.upgrade-summary__before-after,
+.smart-plan__change,
+.upgrade-files-list__item,
+.verification-steps__item {
+  flex-wrap: wrap;
+}
+
+.usage-path {
+  flex-wrap: wrap;
+}
+
+.usage-path__node {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.usage-dup-table {
+  table-layout: fixed;
+}
+
+.usage-dup-table th,
+.usage-dup-table code {
+  overflow-wrap: anywhere;
+}
+
+.upgrade-files-list__item .usage-ref__path {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+
+/* Below the wide 18rem-rail composition, cards may use the full stacked
+   column without inheriting an intrinsic width from a long label or path. */
+@media (max-width: 63.99rem) {
+  .overview-panel__summary,
+  .overview-panel__actions,
+  .vuln-tab__summary,
+  .vuln-tab__details,
+  .usage-tab__summary,
+  .usage-tab__details,
+  .upgrade-tab__summary,
+  .upgrade-tab__details,
+  .removal-tab__summary,
+  .removal-tab__details {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
+/* At a narrow editor width the modal becomes the editor surface: no desktop
+   gutter, shadow, or rounded floating shell competing with decision content. */
+@media (max-width: 38rem) {
+  .modal-overlay--manage {
+    align-items: stretch;
+    padding: 0;
+  }
+
+  .modal-overlay--manage .manage-modal {
+    width: 100%;
+    max-width: none;
+    height: 100vh;
+    height: 100dvh;
+    max-height: 100vh;
+    max-height: 100dvh;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .manage-modal .modal__header {
+    gap: 0.5rem;
+    padding: 0.65rem 0.7rem 0.6rem;
+  }
+
+  .manage-modal .manage-modal__header-icon {
+    width: 1.75rem;
+    height: 1.75rem;
+    margin-right: 0.5rem;
+  }
+
+  .manage-modal__identity {
+    gap: 0.3rem;
+  }
+
+  .manage-modal__identity-name {
+    max-width: 100%;
+  }
+
+  .manage-modal .manage-tabs {
+    padding-inline: 0.35rem;
+    overscroll-behavior-inline: contain;
+    scroll-padding-inline: 0.35rem;
+    scrollbar-width: thin;
+  }
+
+  .manage-modal .manage-tabs__tab {
+    min-height: 2.35rem;
+    padding-inline: 0.6rem;
+  }
+
+  .manage-modal .manage-modal__body {
+    padding: 0.7rem;
+    overscroll-behavior: contain;
+  }
+
+  .upgrade-target-picker {
+    grid-template-columns: 1fr;
+    gap: 0.55rem;
+    padding: 0.75rem;
+  }
+
+  .manage-modal > .modal__footer,
+  .review-panel__footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .manage-modal > .modal__footer {
+    padding: 0.6rem 0.7rem;
+  }
+
+  .manage-modal > .modal__footer > .button,
+  .review-panel__footer > .button,
+  .manage-action-card__cta,
+  .vuln-recommended__cta,
+  .review-panel__empty-cta,
+  .verification__configure,
+  .removal-review__footer-action {
+    align-self: stretch;
+    width: 100%;
+  }
+
+  .manage-modal__footer-note {
+    align-items: flex-start;
+    flex: 0 1 auto;
+    width: 100%;
+  }
+
+  .manage-modal--decision-review .review-panel__footer {
+    bottom: -0.7rem;
+    margin: 0 -0.7rem -0.7rem;
+    padding: 0.65rem 0.7rem;
+  }
+
+  .removal-review__footer-action {
+    min-width: 0;
+  }
+
+  .stale-status__action {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+
+  .usage-card__head,
+  .usage-card__meta {
+    align-items: flex-start;
+  }
+
+  .usage-ref__button {
+    align-items: flex-start;
+  }
+
+  .usage-path {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .usage-path > .usage-path__arrow {
+    align-self: center;
+    transform: rotate(90deg);
+  }
+
+  .vuln-card__title {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .security-outcome {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .security-outcome > .usage-path__arrow {
+    align-self: center;
+    transform: rotate(90deg);
+  }
+
+  .removal-impact__item,
+  .removal-impact__item:first-child,
+  .removal-impact__item:last-child {
+    padding-left: 0.65rem;
+  }
+
+  .removal-impact__item:last-child {
+    border-top: none;
+  }
+
+  .review-panel__empty,
+  .manage-panel-empty {
+    padding: 1.6rem 0.7rem;
+  }
+}
+
+/* Extremely narrow editor groups need label/value pairs and secondary
+   controls to become vertical; the information order remains unchanged. */
+@media (max-width: 26rem) {
+  .upgrade-target-picker__manual-row {
+    flex-direction: column;
+  }
+
+  .upgrade-target-picker__manual-row .button {
+    width: 100%;
+  }
+
+  .manage-glance__row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.15rem;
+  }
+
+  .manage-glance__row dd {
+    width: 100%;
+    text-align: left;
+  }
+
+  .manage-removal-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .usage-card__head,
+  .usage-card__meta {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .usage-card__head > .button,
+  .usage-card__meta > .button,
+  .usage-card__error > .button,
+  .stale-status__action {
+    width: 100%;
+  }
+
+  .vuln-card__source {
+    margin-left: 0;
+  }
+
+  .review-panel__empty-versions {
+    overflow-wrap: anywhere;
+  }
+
+  .verification-steps__item {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .upgrade-files-list__item .status-badge {
+    margin-left: 0;
+  }
+}
+
+@media (max-height: 36rem) {
+  .manage-modal .review-panel__empty,
+  .manage-modal .manage-panel-empty,
+  .manage-modal .analysis-loading:not(.analysis-loading--compact) {
+    padding-block: 1.1rem;
   }
 }
 

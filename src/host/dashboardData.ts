@@ -40,6 +40,7 @@ export function toDashboardData(
 ): DashboardData {
   const data: DashboardData = {
     rows: result.rows,
+    availability: result.availability,
     generatedAt,
     project,
     canChangeProject,
@@ -78,7 +79,12 @@ export function toHostToWebviewMessage(
   const data = toDashboardData(result, project, canChangeProject, buildInfo, generatedAt);
   if (options.isEmpty) return { status: 'empty', data };
   if (options.isStale) return { status: 'stale', data };
-  if (result.advisoriesError !== undefined || result.auditUnavailable === true) {
+  if (
+    result.availability.updates === 'partial' ||
+    result.availability.advisories === 'unavailable' ||
+    result.advisoriesError !== undefined ||
+    result.auditUnavailable === true
+  ) {
     return { status: 'partial-error', data };
   }
   return { status: 'ready', data };

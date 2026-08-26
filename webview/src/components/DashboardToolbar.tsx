@@ -39,7 +39,7 @@ export function DashboardToolbar({
             Change project
           </button>
         ) : null}
-        <button className="button button--secondary" type="button" onClick={onRefresh} disabled={disabled}>
+        <button className="button button--subtle" type="button" onClick={onRefresh} disabled={disabled}>
           <IconRefresh className={refreshing ? 'banner__icon--spin' : undefined} />
           Refresh
         </button>

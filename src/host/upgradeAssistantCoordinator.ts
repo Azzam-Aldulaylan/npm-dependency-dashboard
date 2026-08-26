@@ -42,12 +42,14 @@ import { parseManifest } from '../core/manifest/parse.js';
 import { analyzeCompatibility, CompatibilityCancelledError } from '../core/compatibility/preflight.js';
 import type { CompatibilityStatus, UpgradeProposal } from '../core/compatibility/types.js';
 import { RegistryPackageMetadataProvider, registryForPackage } from '../core/compatibility/registryMetadataProvider.js';
+import { FetchError } from '../core/registry/http.js';
 import type { HttpClient } from '../core/registry/http.js';
 import { fetchPackument } from '../core/registry/versions.js';
 import type { EtagStore } from '../core/registry/versions.js';
 import type { PerformanceRecorder } from '../core/performance/measurement.js';
 import { createPerformanceSession } from '../core/performance/measurement.js';
 import { planSmartUpgrade } from '../core/upgrade/smartPlan.js';
+import { loadUpgradeTargets, publishedUpgradeTargetsForRequest } from '../core/upgrade/targets.js';
 import { buildStagedManifest, buildStagedManifestForRemoval } from '../core/upgrade/stagedManifest.js';
 import { isMajorUpgrade, requiresManifestReconciliation } from '../core/upgrade/plan.js';
 import { stillRequiredBy } from '../core/upgrade/removeImpact.js';
@@ -94,6 +96,11 @@ export interface UpgradeChangeRequest {
 
 export interface UpgradeMessage extends UpgradeChangeRequest {
   /** Client-minted correlation nonce for this analysis attempt — see webviewProtocol.ts's own doc on `WebviewToHostMessage`'s `requestId`. Never trust/execution surface; echoed back verbatim on every message belonging to this attempt, never stored on StoredAnalysis. */
+  requestId: string;
+}
+
+export interface LoadUpgradeTargetsMessage {
+  package: string;
   requestId: string;
 }
 
@@ -182,6 +189,7 @@ function defaultGetUpgradeConfiguration(): { ignoreScripts: boolean; verificatio
 }
 
 function toProtocolError(cause: unknown): ProtocolError {
+  if (cause instanceof FetchError) return { code: cause.code, message: cause.message };
   if (cause instanceof Error) return { code: cause.name, message: cause.message };
   return { code: 'UNKNOWN', message: String(cause) };
 }
@@ -225,6 +233,8 @@ interface StoredAnalysis {
   id: string;
   /** Original lookup keys — every item is re-validated fresh at confirm time. */
   requests: UpgradeChangeRequest[];
+  /** Host-proven selectable targets used when a request differs from row.upgradeTo. */
+  publishedTargetsByPackage: ReadonlyMap<string, ReadonlySet<string>>;
   eligibility: EligibleUpgrade;
   /** The disk snapshot preflight ran against — the baseline the post-confirm recheck below compares fresh disk reads to. */
   snapshot: ResolvedProject;
@@ -324,6 +334,117 @@ export class UpgradeAssistantCoordinator {
   }
 
   /**
+   * Load one package's bounded, host-derived upgrade choices on demand.
+   * This is deliberately outside the dashboard's Stage-1 scan: opening the
+   * Manage workspace for one dependency is the point at which a full
+   * packument becomes useful enough to justify its parse cost.
+   */
+  async handleLoadUpgradeTargets(message: LoadUpgradeTargetsMessage): Promise<void> {
+    const controller = await this.options.ensureController();
+    if (controller === undefined) return;
+
+    const row = controller.lastResultRows().find((candidate) => candidate.name === message.package);
+    if (row === undefined || row.current === null || row.upgradeTo === null) {
+      this.options.sink.postMessage({
+        status: 'upgrade-targets-error',
+        package: message.package,
+        requestId: message.requestId,
+        error: { code: 'NO_ELIGIBLE_UPGRADE', message: 'No upgrade is currently available for this package.' },
+      });
+      return;
+    }
+
+    // Reuse the existing default-target eligibility gate before doing any
+    // network work. This proves the package is declared, safe, and backed by
+    // a current trusted scan without adding a weaker read-only side door.
+    const eligibility = controller.validateUpgradeRequest({ package: row.name, target: row.upgradeTo });
+    if (!eligibility.ok) {
+      this.options.sink.postMessage({
+        status: 'upgrade-targets-error',
+        package: message.package,
+        requestId: message.requestId,
+        error: describeBulkRejection({
+          ok: false,
+          reason: 'change-rejected',
+          packageName: message.package,
+          changeReason: eligibility.reason,
+        }),
+      });
+      return;
+    }
+
+    this.options.sink.postMessage({
+      status: 'upgrade-targets-loading',
+      package: message.package,
+      requestId: message.requestId,
+    });
+    try {
+      const source = controller.upgradeSource;
+      const targets = await loadUpgradeTargets(
+        this.options.httpClient,
+        this.options.etagStore,
+        registryForPackage(source.resolvedRegistry, row.name),
+        row.name,
+        row.current,
+        row.upgradeTo
+      );
+      const stillEligible = controller.validateUpgradeRequest({ package: row.name, target: row.upgradeTo });
+      if (!stillEligible.ok) {
+        this.options.sink.postMessage({
+          status: 'upgrade-targets-error',
+          package: message.package,
+          requestId: message.requestId,
+          error: describeBulkRejection({
+            ok: false,
+            reason: 'change-rejected',
+            packageName: message.package,
+            changeReason: stillEligible.reason,
+          }),
+        });
+        return;
+      }
+      this.options.sink.postMessage({
+        status: 'upgrade-targets',
+        package: message.package,
+        requestId: message.requestId,
+        targets,
+      });
+    } catch (cause) {
+      if (this.options.isDisposed()) return;
+      this.options.sink.postMessage({
+        status: 'upgrade-targets-error',
+        package: message.package,
+        requestId: message.requestId,
+        error: toProtocolError(cause),
+      });
+    }
+  }
+
+  private async publishedTargetsFor(
+    controller: DashboardController,
+    requests: readonly UpgradeChangeRequest[]
+  ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
+    const source = controller.upgradeSource;
+    const entries = await Promise.all(
+      requests.map(async (request): Promise<readonly [string, ReadonlySet<string>]> => {
+        const row = controller.lastResultRows().find((candidate) => candidate.name === request.package);
+        if (row === undefined || row.current === null) return [request.package, new Set()];
+        const published = await publishedUpgradeTargetsForRequest(
+          this.options.httpClient,
+          this.options.etagStore,
+          registryForPackage(source.resolvedRegistry, row.name),
+          row.name,
+          row.current,
+          row.upgradeTo,
+          request.target
+        );
+        return [row.name, published];
+      })
+    );
+    return new Map(entries);
+  }
+
+  /**
    * Phase 1: eligibility, lock, preflight, smart-plan search, security
    * outcome. Ends by storing the analysis and posting it — never by
    * executing anything.
@@ -352,7 +473,21 @@ export class UpgradeAssistantCoordinator {
     const controller = await this.options.ensureController();
     if (controller === undefined) return;
 
-    const batch = controller.validateBulkUpgradeRequest(messages);
+    let publishedTargetsByPackage: ReadonlyMap<string, ReadonlySet<string>> = new Map();
+    let batch = controller.validateBulkUpgradeRequest(messages);
+    if (!batch.ok && batch.reason === 'change-rejected' && batch.changeReason === 'stale-target') {
+      try {
+        publishedTargetsByPackage = await this.publishedTargetsFor(controller, messages);
+      } catch (cause) {
+        this.options.sink.postMessage({
+          status: 'upgrade-error',
+          package: batch.packageName ?? messages[0]?.package ?? 'unknown',
+          error: toProtocolError(cause),
+        });
+        return;
+      }
+      batch = controller.validateBulkUpgradeRequest(messages, publishedTargetsByPackage);
+    }
     if (!batch.ok) {
       this.options.sink.postMessage({
         status: 'upgrade-error',
@@ -686,6 +821,7 @@ export class UpgradeAssistantCoordinator {
       this.analysis = {
         id: analysisId,
         requests: [...messages],
+        publishedTargetsByPackage,
         eligibility,
         snapshot: preflightProject,
         proposal,
@@ -1316,7 +1452,10 @@ export class UpgradeAssistantCoordinator {
         disk.importerId === stored.snapshot.importerId &&
         JSON.stringify(disk.peerPolicy) === JSON.stringify(stored.snapshot.peerPolicy) &&
         JSON.stringify(disk.resolvedRegistry) === JSON.stringify(stored.snapshot.resolvedRegistry);
-      const rechecked = controller.validateBulkUpgradeRequest(stored.requests);
+      const rechecked = controller.validateBulkUpgradeRequest(
+        stored.requests,
+        stored.publishedTargetsByPackage
+      );
       if (!sourceStillMatches || !rechecked.ok) {
         this.options.sink.postMessage({
           status: 'upgrade-error',

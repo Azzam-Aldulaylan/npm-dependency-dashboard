@@ -40,7 +40,7 @@ import type {
   UpgradeEligibility,
   UpgradeRequestInput,
 } from '../core/upgrade/validate.js';
-import type { PackageManagerKind, PackageRow } from '../core/types.js';
+import type { PackageManagerKind, PackageRow, ResolvedRegistry } from '../core/types.js';
 import { validateBulkRemoveRequest, validateBulkUpgradeRequest, validateUpgradeRequest } from '../core/upgrade/validate.js';
 import type { BuildInfo } from './dashboardData.js';
 import { toHostToWebviewMessage } from './dashboardData.js';
@@ -62,6 +62,8 @@ export interface DashboardControllerOptions {
   lockfileName?: 'package-lock.json' | 'npm-shrinkwrap.json' | 'pnpm-lock.yaml' | null;
   /** Already resolved by the caller via resolveRegistry. */
   registry: string;
+  /** Full registry routing, including scoped overrides, for on-demand package metadata. */
+  resolvedRegistry?: ResolvedRegistry;
   httpClient: HttpClient;
   etagStore: EtagStore;
   /** Omit to skip the optional `npm audit` enrichment. */
@@ -104,17 +106,22 @@ function toProtocolError(cause: unknown): ProtocolError {
  */
 function toScanSnapshot(result: {
   rows: ScanSnapshot['rows'];
+  availability: ScanSnapshot['availability'];
   advisoriesError?: ProtocolError;
   auditUnavailable?: boolean;
   hygieneFindings?: ScanSnapshot['hygieneFindings'];
 }): ScanSnapshot {
-  const snapshot: ScanSnapshot = { rows: result.rows };
+  const snapshot: ScanSnapshot = { rows: result.rows, availability: result.availability };
   if (result.advisoriesError !== undefined) {
     snapshot.advisoriesError = { code: result.advisoriesError.code, message: result.advisoriesError.message };
   }
   if (result.auditUnavailable === true) snapshot.auditUnavailable = true;
   if (result.hygieneFindings !== undefined) snapshot.hygieneFindings = result.hygieneFindings;
   return snapshot;
+}
+
+function hasCompleteCoreData(snapshot: ScanSnapshot): boolean {
+  return snapshot.availability.updates === 'complete' && snapshot.availability.advisories === 'complete';
 }
 
 /** The project-specific slice of options that a reload replaces — everything but the fetch machinery. */
@@ -128,6 +135,7 @@ export type ProjectSnapshot = Pick<
   | 'importerId'
   | 'lockfileName'
   | 'registry'
+  | 'resolvedRegistry'
   | 'projectInfo'
   | 'canChangeProject'
   | 'cacheKey'
@@ -231,6 +239,7 @@ export class DashboardController {
     lockfileText: string | null;
     lockfilePath: string | null;
     registry: string;
+    resolvedRegistry: ResolvedRegistry;
     packageManager: PackageManagerKind;
     importerId: string;
     lockfileName: 'package-lock.json' | 'npm-shrinkwrap.json' | 'pnpm-lock.yaml' | null;
@@ -240,6 +249,11 @@ export class DashboardController {
       lockfileText: this.options.lockfileText,
       lockfilePath: this.options.lockfilePath,
       registry: this.options.registry,
+      resolvedRegistry: this.options.resolvedRegistry ?? {
+        url: this.options.registry,
+        source: 'default',
+        scoped: {},
+      },
       packageManager: this.options.packageManager ?? 'npm',
       importerId: this.options.importerId ?? '.',
       lockfileName: this.options.lockfileName ?? null,
@@ -425,14 +439,22 @@ export class DashboardController {
   }
 
   /** Same freshness gate as a single upgrade, applied atomically to every requested change. */
-  validateBulkUpgradeRequest(requests: readonly UpgradeRequestInput[]): BulkUpgradeEligibility {
+  validateBulkUpgradeRequest(
+    requests: readonly UpgradeRequestInput[],
+    publishedTargetsByPackage: ReadonlyMap<string, ReadonlySet<string>> = new Map()
+  ): BulkUpgradeEligibility {
     if (this.lastResult === undefined) {
       return { ok: false, reason: 'change-rejected', changeReason: 'no-scan-result' };
     }
     if (!this.isEligible()) {
       return { ok: false, reason: 'change-rejected', changeReason: 'revalidating' };
     }
-    return validateBulkUpgradeRequest(this.lastResult.rows, this.declaredDependencies, requests);
+    return validateBulkUpgradeRequest(
+      this.lastResult.rows,
+      this.declaredDependencies,
+      requests,
+      publishedTargetsByPackage
+    );
   }
 
   /** Same freshness gate as a bulk upgrade, applied atomically to every requested removal. */
@@ -578,7 +600,7 @@ export class DashboardController {
     const freshness = classifyFreshness(this.lastGeneratedAt, this.options.ttlMinutesProvider(), this.now());
     endFreshness({ freshness });
     cachePerformance.finish({ hit: true, freshness });
-    if (freshness === 'fresh') {
+    if (freshness === 'fresh' && hasCompleteCoreData(cached)) {
       // Fresh, fingerprint-matching data (hydrateFromPersistedCache already
       // deleted and refused to hydrate anything that didn't match) may
       // authorize an Upgrade — restore eligibility for it explicitly, since
@@ -608,7 +630,8 @@ export class DashboardController {
       return;
     }
 
-    // Not fresh (TTL-stale, or no timestamp to judge by) — `run()` itself
+    // Not fresh (TTL-stale, no timestamp to judge by, or a fresh-but-core-
+    // incomplete snapshot) — `run()` itself
     // announces the stale replay (carrying `cached`) as its own first
     // action via `beginRevalidation`'s call site there, then continues with
     // a real scan; posting it again here would just be a redundant duplicate.
@@ -649,6 +672,7 @@ export class DashboardController {
    */
   needsBackgroundRefresh(): boolean {
     if (this.lastResult === undefined) return false;
+    if (!hasCompleteCoreData(this.lastResult)) return true;
     return classifyFreshness(this.lastGeneratedAt, this.options.ttlMinutesProvider(), this.now()) !== 'fresh';
   }
 
@@ -759,7 +783,11 @@ export class DashboardController {
       // pending, not-yet-applied file-change reload), `this.options` — and
       // therefore this whole scan — was stale from the moment it began,
       // regardless of what happened afterward.
-      if (generationAtStart === this.revalidationGeneration && this.optionsGeneration === generationBeforeThisRun) {
+      if (
+        hasCompleteCoreData(snapshot) &&
+        generationAtStart === this.revalidationGeneration &&
+        this.optionsGeneration === generationBeforeThisRun
+      ) {
         this.eligibleGeneration = generationAtStart;
         // A granted scan is itself a re-confirmation that `this.options`
         // are accurate as of this generation — advance the watermark to

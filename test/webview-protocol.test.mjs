@@ -67,6 +67,7 @@ const PROJECT = { label: 'app', manifestPath: 'package.json' };
 
 const DATA = {
   rows: [CLEAN_ROW, VULNERABLE_ROW],
+  availability: { updates: 'complete', advisories: 'complete', unavailableUpdatePackages: [] },
   generatedAt: '2026-08-01T12:00:00.000Z',
   project: PROJECT,
   canChangeProject: false,
@@ -144,6 +145,18 @@ test('extra keys on the envelope are rejected, not ignored', () => {
   // not come from the other half of this protocol.
   assert.equal(isWebviewToHostMessage({ type: 'refresh', packageName: 'lodash' }), false);
   assert.equal(isWebviewToHostMessage({ type: 'ready', __proto__: {} }), true);
+});
+
+test('upgrade target option requests require a package and correlation id', () => {
+  assert.equal(
+    isWebviewToHostMessage({ type: 'load-upgrade-targets', package: 'react', requestId: 'targets-1' }),
+    true
+  );
+  assert.equal(isWebviewToHostMessage({ type: 'load-upgrade-targets', package: 'react' }), false);
+  assert.equal(
+    isWebviewToHostMessage({ type: 'load-upgrade-targets', package: 'react', requestId: '', target: '19.0.0' }),
+    false
+  );
 });
 
 // ------------------------------------------------- upgrade requests
@@ -367,6 +380,53 @@ test('scan progress accepts real stage/count data and rejects fake or inconsiste
   assert.equal(isHostToWebviewMessage({ status: 'scan-progress', stage: 'made-up', completed: 1, total: 2 }), false);
   assert.equal(isHostToWebviewMessage({ status: 'scan-progress', stage: 'versions', completed: 3, total: 2 }), false);
   assert.equal(isHostToWebviewMessage({ status: 'scan-progress', stage: 'versions', percent: 50 }), false);
+});
+
+test('upgrade target option messages validate channels, labels, and recommendation integrity', () => {
+  const targets = {
+    recommendedVersion: '18.3.1',
+    options: [
+      { version: '18.3.1', channel: 'stable', labels: ['recommended', 'lts'] },
+      { version: '19.0.0', channel: 'stable', labels: ['latest'] },
+      { version: '20.0.0-beta.1', channel: 'prerelease', labels: [] },
+    ],
+    truncated: true,
+  };
+  assert.equal(
+    isHostToWebviewMessage({ status: 'upgrade-targets-loading', package: 'react', requestId: 'targets-1' }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({ status: 'upgrade-targets', package: 'react', requestId: 'targets-1', targets }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-targets',
+      package: 'react',
+      requestId: 'targets-1',
+      targets: { ...targets, options: [{ version: '19.0.0', channel: 'nightly', labels: [] }] },
+    }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-targets',
+      package: 'react',
+      requestId: 'targets-1',
+      targets: { ...targets, recommendedVersion: '99.0.0' },
+    }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-targets-error',
+      package: 'react',
+      requestId: 'targets-1',
+      error: { code: 'NETWORK', message: 'offline' },
+    }),
+    true
+  );
 });
 
 // ----------------------------------------- host -> webview: upgrade-analyzing
@@ -656,6 +716,7 @@ test('the optional data fields are accepted when present and correct', () => {
       status: 'partial-error',
       data: {
         ...DATA,
+        availability: { updates: 'complete', advisories: 'unavailable', unavailableUpdatePackages: [] },
         advisoriesError: { code: 'REGISTRY_5XX', message: 'server error 503' },
         auditUnavailable: true,
       },
@@ -715,6 +776,11 @@ test('a malformed DashboardData shell is rejected', () => {
     { ...DATA, advisoriesError: null },
     { ...DATA, advisoriesError: { code: 'X' } },
     { ...DATA, auditUnavailable: 'yes' },
+    { ...DATA, availability: undefined },
+    { ...DATA, availability: { updates: 'partial', advisories: 'complete', unavailableUpdatePackages: [] } },
+    { ...DATA, availability: { updates: 'complete', advisories: 'complete', unavailableUpdatePackages: ['clean-pkg'] } },
+    { ...DATA, availability: { updates: 'complete', advisories: 'unavailable', unavailableUpdatePackages: [] } },
+    { ...DATA, availability: { updates: 'unknown', advisories: 'complete', unavailableUpdatePackages: [] } },
     { ...DATA, project: undefined },
     { ...DATA, project: null },
     { ...DATA, project: { label: 'app' } },

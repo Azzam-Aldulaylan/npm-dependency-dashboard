@@ -16,9 +16,9 @@
 
 import type { CachedResponse } from '../registry/versions.js';
 import type { DependencyFinding } from '../hygiene/types.js';
-import type { PackageRow } from '../types.js';
+import type { PackageRow, ScanDataAvailability } from '../types.js';
 import type { ProtocolError } from '../validation.js';
-import { isAbsentOr, isDependencyFinding, isPackageRow, isProtocolError, isRecord, isStringOrNull } from '../validation.js';
+import { isAbsentOr, isDependencyFinding, isPackageRow, isProtocolError, isRecord, isScanDataAvailability, isStringOrNull } from '../validation.js';
 import type { ProjectSourceFingerprint } from './sourceFingerprint.js';
 import { isSourceFingerprint } from './sourceFingerprint.js';
 
@@ -42,8 +42,12 @@ import { isSourceFingerprint } from './sourceFingerprint.js';
  * 4: package rows gained their optional-dependency classification. Version 3
  * rows cannot distinguish optional dependencies from production dependencies,
  * so they must be regenerated before the Manage UI renders their type.
+ *
+ * 5: snapshots gained explicit update/advisory availability. Older rows can
+ * contain null update metadata or no advisories without saying whether those
+ * are proven facts or failed lookups, so replaying them would be misleading.
  */
-export const CACHE_SCHEMA_VERSION = 4;
+export const CACHE_SCHEMA_VERSION = 5;
 
 /**
  * The registry response cache did not change when project rows gained a
@@ -71,6 +75,7 @@ function isValidIsoTimestamp(value: unknown): value is string {
  */
 export interface ScanSnapshot {
   rows: PackageRow[];
+  availability: ScanDataAvailability;
   advisoriesError?: ProtocolError;
   auditUnavailable?: boolean;
   /** Deprecated + duplicate-version findings — see src/core/hygiene/index.ts. Optional so a pre-existing persisted entry (written before this field existed) still passes validation as "no findings computed yet" rather than being rejected outright. */
@@ -103,9 +108,12 @@ export function isPersistedProjectCache(value: unknown): value is PersistedProje
     isSourceFingerprint(value['sourceFingerprint']) &&
     Array.isArray(rows) &&
     rows.every(isPackageRow) &&
+    isScanDataAvailability(value['availability']) &&
     isAbsentOr(value['advisoriesError'], isProtocolError) &&
     isAbsentOr(value['auditUnavailable'], (v) => typeof v === 'boolean') &&
-    isAbsentOr(value['hygieneFindings'], (v) => Array.isArray(v) && v.every(isDependencyFinding))
+    isAbsentOr(value['hygieneFindings'], (v) => Array.isArray(v) && v.every(isDependencyFinding)) &&
+    ((value['availability'] as ScanDataAvailability).advisories === 'unavailable') ===
+      (value['advisoriesError'] !== undefined)
   );
 }
 

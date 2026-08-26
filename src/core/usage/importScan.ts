@@ -32,6 +32,11 @@ export interface RawImportMatch {
   kind: 'import' | 'require' | 'dynamic-import';
 }
 
+/** The same trusted static match plus the literal package specifier needed by target-surface compatibility checks. */
+export interface RawImportSpecifierMatch extends RawImportMatch {
+  specifier: string;
+}
+
 const MAX_SNIPPET_LENGTH = 160;
 
 function stripComments(text: string): string {
@@ -91,6 +96,133 @@ function stripComments(text: string): string {
   return out;
 }
 
+/**
+ * Marks positions that are executable source rather than comment/string/
+ * template/regex contents. The regex matcher below still needs quoted
+ * specifiers intact, so it checks only that the import/require keyword begins
+ * in code. Conservative template masking may miss imports inside `${...}`;
+ * that is preferable to promoting documentation text to confirmed evidence.
+ */
+function codePositionMask(text: string): boolean[] {
+  const code = new Array<boolean>(text.length).fill(true);
+  let index = 0;
+  let previousSignificant = '';
+  let previousWord = '';
+  const controlParentheses: boolean[] = [];
+  let afterControlCondition = false;
+
+  const markUntilQuote = (quote: string): void => {
+    code[index] = false;
+    index += 1;
+    while (index < text.length) {
+      code[index] = false;
+      if (text[index] === '\\' && index + 1 < text.length) {
+        index += 1;
+        code[index] = false;
+      } else if (text[index] === quote) {
+        index += 1;
+        return;
+      }
+      index += 1;
+    }
+  };
+
+  const regexCanStart = (): boolean =>
+    previousSignificant === '' || /[=([{,;:!?&|+\-*%~<>]/.test(previousSignificant) ||
+    afterControlCondition ||
+    previousWord === 'return' || previousWord === 'throw' || previousWord === 'case' ||
+    previousWord === 'yield' || previousWord === 'await' || previousWord === 'else' ||
+    previousWord === 'do';
+
+  while (index < text.length) {
+    const character = text[index] ?? '';
+    const next = text[index + 1] ?? '';
+    if (character === '/' && next === '/') {
+      while (index < text.length && text[index] !== '\n') {
+        code[index] = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (character === '/' && next === '*') {
+      code[index] = false;
+      code[index + 1] = false;
+      index += 2;
+      while (index < text.length && !(text[index] === '*' && text[index + 1] === '/')) {
+        code[index] = false;
+        index += 1;
+      }
+      if (index < text.length) {
+        code[index] = false;
+        code[index + 1] = false;
+        index += 2;
+      }
+      continue;
+    }
+    if (character === "'" || character === '"' || character === '`') {
+      markUntilQuote(character);
+      previousSignificant = 'string';
+      previousWord = '';
+      continue;
+    }
+    if (character === '/' && regexCanStart()) {
+      code[index] = false;
+      index += 1;
+      let inClass = false;
+      while (index < text.length) {
+        code[index] = false;
+        const current = text[index] ?? '';
+        if (current === '\\' && index + 1 < text.length) {
+          index += 1;
+          code[index] = false;
+        } else if (current === '[') {
+          inClass = true;
+        } else if (current === ']') {
+          inClass = false;
+        } else if (current === '/' && !inClass) {
+          index += 1;
+          while (/[a-z]/i.test(text[index] ?? '')) {
+            code[index] = false;
+            index += 1;
+          }
+          break;
+        } else if (current === '\n') {
+          break;
+        }
+        index += 1;
+      }
+      previousSignificant = 'regex';
+      previousWord = '';
+      afterControlCondition = false;
+      continue;
+    }
+    if (/[A-Za-z0-9_$]/.test(character)) {
+      const start = index;
+      while (/[A-Za-z0-9_$]/.test(text[index] ?? '')) index += 1;
+      previousWord = text.slice(start, index);
+      previousSignificant = text[index - 1] ?? '';
+      continue;
+    }
+    if (!/\s/.test(character)) {
+      if (character === '(') {
+        controlParentheses.push(
+          previousWord === 'if' || previousWord === 'for' || previousWord === 'while' ||
+          previousWord === 'with' || previousWord === 'switch' || previousWord === 'catch'
+        );
+        afterControlCondition = false;
+      } else if (character === ')') {
+        afterControlCondition = controlParentheses.pop() === true;
+      } else {
+        afterControlCondition = false;
+      }
+      previousSignificant = character;
+      previousWord = '';
+    }
+    index += 1;
+  }
+  return code;
+}
+
 interface KeywordPattern {
   kind: RawImportMatch['kind'];
   regex: RegExp;
@@ -137,10 +269,21 @@ function lineTextAt(text: string, lineStarts: readonly number[], line: number): 
   return raw.length > MAX_SNIPPET_LENGTH ? `${raw.slice(0, MAX_SNIPPET_LENGTH)}…` : raw;
 }
 
-export function scanSourceForImports(text: string): RawImportMatch[] {
+function hasUnescapedTemplateInterpolation(value: string): boolean {
+  for (let index = 0; index < value.length - 1; index += 1) {
+    if (value[index] !== '$' || value[index + 1] !== '{') continue;
+    let backslashes = 0;
+    for (let cursor = index - 1; cursor >= 0 && value[cursor] === '\\'; cursor -= 1) backslashes += 1;
+    if (backslashes % 2 === 0) return true;
+  }
+  return false;
+}
+
+export function scanSourceForImportSpecifiers(text: string): RawImportSpecifierMatch[] {
   const cleaned = stripComments(text);
+  const codePositions = codePositionMask(text);
   const lineStarts = buildLineStarts(text);
-  const matches: RawImportMatch[] = [];
+  const matches: RawImportSpecifierMatch[] = [];
   // Avoid double-reporting the same specifier occurrence under more than one
   // pattern (the `import ... from` and side-effect-`import` patterns are
   // mutually exclusive by construction, but keyed dedupe is cheap insurance).
@@ -150,7 +293,13 @@ export function scanSourceForImports(text: string): RawImportMatch[] {
     regex.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = regex.exec(cleaned)) !== null) {
+      if (codePositions[match.index] !== true) continue;
       const specifier = match[2] ?? '';
+      const quote = match[1];
+      // Interpolated templates are runtime expressions, not exact package
+      // subpaths. Treating them as literals could turn incomplete static
+      // evidence into a false confirmed missing-file finding.
+      if (quote === '`' && hasUnescapedTemplateInterpolation(specifier)) continue;
       const specifierIndex = match.index + match[0].lastIndexOf(specifier);
       if (seenAtIndex.has(specifierIndex)) continue;
       seenAtIndex.add(specifierIndex);
@@ -159,10 +308,15 @@ export function scanSourceForImports(text: string): RawImportMatch[] {
       if (packageName === null) continue;
 
       const { line, column } = locate(lineStarts, specifierIndex);
-      matches.push({ packageName, line, column, snippet: lineTextAt(text, lineStarts, line), kind });
+      matches.push({ packageName, specifier, line, column, snippet: lineTextAt(text, lineStarts, line), kind });
     }
   }
 
   matches.sort((a, b) => a.line - b.line || a.column - b.column);
   return matches;
+}
+
+/** Backward-compatible usage-analysis shape; detailed consumers opt into the function above. */
+export function scanSourceForImports(text: string): RawImportMatch[] {
+  return scanSourceForImportSpecifiers(text).map(({ specifier: _specifier, ...match }) => match);
 }

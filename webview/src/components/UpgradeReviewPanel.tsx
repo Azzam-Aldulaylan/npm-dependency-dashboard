@@ -21,6 +21,7 @@ import {
   VerificationStepsCard,
 } from './UpgradeAnalysisCards.js';
 import { UpgradeAnalysisSections } from './UpgradeAnalysisSections.js';
+import { ProjectCompatibilitySection } from './ProjectCompatibilitySection.js';
 import { UpgradeTargetSelector } from './UpgradeTargetSelector.js';
 import type { UpgradeTargetLoadState } from './UpgradeTargetSelector.js';
 import type { UsageRequestState } from './UsageReferencesPanel.js';
@@ -339,13 +340,14 @@ export function UpgradeReviewPanel({
   onRefresh,
   onChangeTab,
   onOpenAdvisory,
+  onOpenUsageReference,
 }: {
   row: PackageRow;
   active: boolean;
   /** The upgrade target this row currently offers, or null when none is available. */
   targetVersion: string | null;
   targetState: UpgradeTargetLoadState;
-  analyzingPhase: 'compatibility' | 'smart-plan' | null;
+  analyzingPhase: 'compatibility' | 'project-compatibility' | 'smart-plan' | null;
   analysis: UpgradeAnalysisPresentation | null;
   /** Per-section progressive state, rendered while `analysis` is still null — see src/host/upgradeAnalysisSections.ts. */
   sections: UpgradeAnalysisSectionsState;
@@ -366,6 +368,7 @@ export function UpgradeReviewPanel({
   onRefresh: () => void;
   onChangeTab: (tab: ManageTabId) => void;
   onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[]) => void) | undefined;
+  onOpenUsageReference?: ((usageId: string, referenceIndex: number) => void) | undefined;
 }): ReactElement {
   const targetSelector = row.upgradeTo === null ? null : (
     <UpgradeTargetSelector
@@ -448,6 +451,7 @@ export function UpgradeReviewPanel({
           onChangeTab={onChangeTab}
           onConfigureVerification={onConfigureVerification}
           onOpenAdvisory={onOpenAdvisory}
+          onOpenUsageReference={onOpenUsageReference}
         />
       </div>
     );
@@ -483,7 +487,8 @@ export function UpgradeReviewPanel({
         </div>
         <div className="upgrade-tab__details">
           <UpgradePreviewCard analysis={analysis} />
-          <CompatibilityCheckCard compatibility={analysis.compatibility} majorUpdate={analysis.majorUpdate} />
+          <CompatibilityCheckCard compatibility={analysis.compatibility} projectCompatibility={analysis.projectCompatibility} />
+          <ProjectCompatibilitySection analysis={analysis.projectCompatibility} onOpenUsageReference={onOpenUsageReference} />
           {analysis.smartPlan !== null && coordinated ? (
             <CoordinatedUpgradePlanCard
               requestedChanges={analysis.changes}

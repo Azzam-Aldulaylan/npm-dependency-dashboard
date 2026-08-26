@@ -43,7 +43,7 @@ import { parseManifest } from '../../core/manifest/parse.js';
 import { computeSourceFingerprint, sourceFingerprintsMatch } from '../../core/cache/sourceFingerprint.js';
 import type { ProjectSourceFingerprint } from '../../core/cache/sourceFingerprint.js';
 import { buildUnusedFinding } from '../../core/usage/unused.js';
-import type { DependencyUsageResult } from '../../core/usage/types.js';
+import type { DependencyReference, DependencyUsageResult } from '../../core/usage/types.js';
 import type { DependencyFinding } from '../../core/hygiene/types.js';
 import { peerRequirementsFor } from '../../core/upgrade/peerRequirement.js';
 import { stillRequiredBy } from '../../core/upgrade/removeImpact.js';
@@ -108,6 +108,26 @@ export class UsageAnalysisCoordinator {
 
   isBusy(): boolean {
     return this.activeCts !== undefined;
+  }
+
+  /**
+   * Reuses the existing opaque UsageReferenceStore boundary for compatibility
+   * findings. The references were collected by the host; display paths never
+   * become navigation authority in the webview.
+   */
+  storeProjectCompatibilityReferences(
+    packageName: string,
+    references: readonly DependencyReference[],
+    folder: vscode.WorkspaceFolder
+  ): string | null {
+    if (references.length === 0) return null;
+    return this.referenceStore.store(packageName, {
+      packageName,
+      references: [...references],
+      truncated: false,
+      scannedFileCount: 0,
+      scannedAt: new Date().toISOString(),
+    }, folder);
   }
 
   dispose(): void {

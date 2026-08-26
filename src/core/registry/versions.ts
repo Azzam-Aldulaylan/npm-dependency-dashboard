@@ -187,6 +187,14 @@ export interface PackageVersionMetadata {
   optionalDependencies: Record<string, string>;
   peerDependencies: Record<string, string>;
   peerDependenciesMeta: Record<string, { optional: boolean }>;
+  /** Exact-version runtime requirements used by project compatibility analysis. */
+  engines?: Record<string, string>;
+  /** Published command names. Values are paths only; they are never executed by analysis. */
+  bin?: string | Record<string, string>;
+  /** Published package export map, retained as bounded JSON for subpath checks. */
+  exports?: unknown;
+  /** True when the registry export map exceeded safety bounds; absence can no longer be proven from it. */
+  exportsTruncated?: boolean;
 }
 
 function readStringMap(value: unknown): Record<string, string> {
@@ -207,6 +215,45 @@ function readPeerMeta(value: unknown): Record<string, { optional: boolean }> {
     if (typeof raw !== 'object' || raw === null) continue;
     const optional = (raw as Record<string, unknown>)['optional'];
     if (typeof optional === 'boolean') out[key] = { optional };
+  }
+  return out;
+}
+
+function readBin(value: unknown): string | Record<string, string> | undefined {
+  if (typeof value === 'string') return value;
+  const entries = readStringMap(value);
+  return Object.keys(entries).length === 0 ? undefined : entries;
+}
+
+/** Registry-controlled JSON stays data-only and bounded before analyzers inspect it. */
+function readBoundedPackageMap(
+  value: unknown,
+  depth = 0,
+  budget = { remaining: 5_000, truncated: false }
+): unknown {
+  if (budget.remaining <= 0 || depth > 12) {
+    budget.truncated = true;
+    return undefined;
+  }
+  budget.remaining -= 1;
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    if (value.length > 1_000) budget.truncated = true;
+    return value
+      .slice(0, 1_000)
+      .map((entry) => readBoundedPackageMap(entry, depth + 1, budget))
+      .filter((entry) => entry !== undefined);
+  }
+  if (typeof value !== 'object') return undefined;
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+    const parsed = readBoundedPackageMap(raw, depth + 1, budget);
+    if (parsed !== undefined) out[key] = parsed;
+    if (budget.remaining <= 0) {
+      budget.truncated = true;
+      break;
+    }
   }
   return out;
 }
@@ -248,7 +295,7 @@ export async function fetchPackageVersionMetadata(
     throw new FetchError('PARSE_ERROR', `registry metadata package mismatch from ${url}`);
   }
 
-  return {
+  const metadata: PackageVersionMetadata = {
     name,
     version,
     dependencies: readStringMap(json['dependencies']),
@@ -256,6 +303,16 @@ export async function fetchPackageVersionMetadata(
     peerDependencies: readStringMap(json['peerDependencies']),
     peerDependenciesMeta: readPeerMeta(json['peerDependenciesMeta']),
   };
+  const engines = readStringMap(json['engines']);
+  if (Object.keys(engines).length > 0) metadata.engines = engines;
+  const bin = readBin(json['bin']);
+  if (bin !== undefined) metadata.bin = bin;
+  if (json['exports'] !== undefined) {
+    const exportsBudget = { remaining: 5_000, truncated: false };
+    metadata.exports = readBoundedPackageMap(json['exports'], 0, exportsBudget);
+    if (exportsBudget.truncated) metadata.exportsTruncated = true;
+  }
+  return metadata;
 }
 
 /** GET /<pkg> with the abbreviated Accept header — the escalation path. */

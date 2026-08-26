@@ -15,6 +15,7 @@ export interface BoundedFileScanOptions<T> {
   concurrency?: number;
   isCancelled?: () => boolean;
   onProgress?: (processed: number, total: number) => void;
+  onReadFailure?: (item: T) => void;
 }
 
 export interface BoundedFileScanResult {
@@ -53,6 +54,7 @@ export async function scanFilesBounded<T>(
       if (item === undefined) continue;
       const text = texts[index];
       if (text !== null && text !== undefined) options.consume(item, text);
+      else options.onReadFailure?.(item);
       processed += 1;
       options.onProgress?.(processed, options.items.length);
     }

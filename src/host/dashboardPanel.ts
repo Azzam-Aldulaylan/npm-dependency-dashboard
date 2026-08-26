@@ -38,7 +38,7 @@ import { DEFAULT_TTL_MINUTES, effectiveTtlMinutes } from '../core/cache/freshnes
 import { deriveProjectCacheKey } from '../core/cache/keys.js';
 import { PersistentEtagStore } from '../core/cache/persistentEtagStore.js';
 import { PersistentProjectCacheStore } from '../core/cache/projectCacheStore.js';
-import { isSameProjectReload, lockfileWatchDirs, projectCandidateLabel } from '../core/workspace/scan.js';
+import { DEFAULT_EXCLUDED_DIRS, isSameProjectReload, lockfileWatchDirs, projectCandidateLabel } from '../core/workspace/scan.js';
 import { NodeHttpClient } from '../core/registry/http.js';
 import type { PerformanceRecorder } from '../core/performance/measurement.js';
 import { createPerformanceSession } from '../core/performance/measurement.js';
@@ -161,9 +161,14 @@ export class DashboardPanel {
   /** One watcher per ancestor directory (see setupFileWatchers) — never a single glob built by interpolating directory names, which real directory content could break out of. */
   private lockfileWatchers: vscode.FileSystemWatcher[] = [];
   private configurationWatchers: vscode.FileSystemWatcher[] = [];
+  /** Source/config watcher used only to obsolete an open project-compatibility review; it never invalidates dashboard dependency facts. */
+  private projectCompatibilitySourceWatcher: vscode.FileSystemWatcher | undefined;
   /** The absolute lockfile path the current persisted entry was built against — needed to purge every npm-workspace sibling sharing it once a reload has just replaced it. Null means the selected project has no lockfile. */
   private selectedLockfilePath: string | null = null;
   private invalidationTimer: NodeJS.Timeout | undefined;
+  private projectCompatibilityInvalidationTimer: NodeJS.Timeout | undefined;
+  /** Advanced before debouncing so final analysis reads can detect events that race their own snapshot. */
+  private projectCompatibilitySourceGeneration = 0;
   /**
    * Dev-mode-only ("F5" Extension Development Host) auto-reload: watches this
    * extension's own `dist/webview.{js,css}` and re-assigns `panel.webview.html`
@@ -227,6 +232,9 @@ export class DashboardPanel {
         void this.usageCoordinator.runPendingBackgroundRefresh();
       },
       performanceEnabled: this.performanceEnabled,
+      storeProjectCompatibilityReferences: (packageName, references, folder) =>
+        this.usageCoordinator.storeProjectCompatibilityReferences(packageName, references, folder),
+      projectCompatibilitySourceGeneration: () => this.projectCompatibilitySourceGeneration,
     });
     this.usageCoordinator = new UsageAnalysisCoordinator({
       sink: this.sink,
@@ -1004,9 +1012,15 @@ export class DashboardPanel {
     this.lockfileWatchers = [];
     for (const watcher of this.configurationWatchers) watcher.dispose();
     this.configurationWatchers = [];
+    this.projectCompatibilitySourceWatcher?.dispose();
+    this.projectCompatibilitySourceWatcher = undefined;
     if (this.invalidationTimer !== undefined) {
       clearTimeout(this.invalidationTimer);
       this.invalidationTimer = undefined;
+    }
+    if (this.projectCompatibilityInvalidationTimer !== undefined) {
+      clearTimeout(this.projectCompatibilityInvalidationTimer);
+      this.projectCompatibilityInvalidationTimer = undefined;
     }
   }
 
@@ -1029,6 +1043,7 @@ export class DashboardPanel {
    */
   private setupFileWatchers(candidate: DiscoveredProject, manifestPath: string): void {
     this.disposeWatchers();
+    this.projectCompatibilitySourceGeneration += 1;
 
     this.manifestWatcher = vscode.workspace.createFileSystemWatcher(
       new vscode.RelativePattern(vscode.Uri.file(path.dirname(manifestPath)), path.basename(manifestPath))
@@ -1037,6 +1052,29 @@ export class DashboardPanel {
     this.manifestWatcher.onDidChange(onManifestEvent);
     this.manifestWatcher.onDidCreate(onManifestEvent);
     this.manifestWatcher.onDidDelete(onManifestEvent);
+
+    const projectBase = candidate.dir === ''
+      ? candidate.folder.uri
+      : vscode.Uri.joinPath(candidate.folder.uri, candidate.dir);
+    this.projectCompatibilitySourceWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(projectBase, '{**/*.{js,jsx,ts,tsx,mjs,cjs},tsconfig*.json}')
+    );
+    const onProjectCompatibilitySourceEvent = (uri: vscode.Uri): void => {
+      const relative = path.relative(projectBase.fsPath, uri.fsPath);
+      if (relative === '' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return;
+      if (relative.split(path.sep).some((segment) => DEFAULT_EXCLUDED_DIRS.includes(segment))) return;
+      this.projectCompatibilitySourceGeneration += 1;
+      if (this.projectCompatibilityInvalidationTimer !== undefined) {
+        clearTimeout(this.projectCompatibilityInvalidationTimer);
+      }
+      this.projectCompatibilityInvalidationTimer = setTimeout(() => {
+        this.projectCompatibilityInvalidationTimer = undefined;
+        void this.upgradeCoordinator.checkOpenAnalysisFreshness();
+      }, FILE_EVENT_DEBOUNCE_MS);
+    };
+    this.projectCompatibilitySourceWatcher.onDidChange(onProjectCompatibilitySourceEvent);
+    this.projectCompatibilitySourceWatcher.onDidCreate(onProjectCompatibilitySourceEvent);
+    this.projectCompatibilitySourceWatcher.onDidDelete(onProjectCompatibilitySourceEvent);
 
     const onConfigurationEvent = (): void => this.onWatchedFileEvent('configuration');
     const npmrcWatcher = vscode.workspace.createFileSystemWatcher(

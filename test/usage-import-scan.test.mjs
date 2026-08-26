@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { scanSourceForImports } from '../out/core/usage/importScan.js';
+import { scanSourceForImportSpecifiers, scanSourceForImports } from '../out/core/usage/importScan.js';
 import { importedPackageName, specifierMatchesPackage } from '../out/core/usage/packageNameMatch.js';
 
 function names(matches) {
@@ -41,6 +41,24 @@ test('dynamic import("foo") is detected', () => {
   const matches = scanSourceForImports(`const x = await import('foo');`);
   assert.deepEqual(names(matches), ['foo']);
   assert.equal(matches[0].kind, 'dynamic-import');
+});
+
+test('detailed import matches retain exact literal subpaths, including static template literals', () => {
+  const matches = scanSourceForImportSpecifiers([
+    `import x from 'next/public';`,
+    'const y = import(`@scope/pkg/feature`);',
+  ].join('\n'));
+  assert.deepEqual(matches.map(({ packageName, specifier, kind }) => ({ packageName, specifier, kind })), [
+    { packageName: 'next', specifier: 'next/public', kind: 'import' },
+    { packageName: '@scope/pkg', specifier: '@scope/pkg/feature', kind: 'dynamic-import' },
+  ]);
+});
+
+test('interpolated dynamic imports are not mistaken for exact target subpaths', () => {
+  const source = 'const module = import(`next/${segment}`);';
+  assert.deepEqual(scanSourceForImportSpecifiers(source), []);
+  assert.deepEqual(scanSourceForImports(source), [],
+    'the backward-compatible usage scan also avoids claiming a statically known package for this expression');
 });
 
 test('export ... from "foo" (re-export) is detected', () => {
@@ -78,6 +96,27 @@ test('a block comment mentioning a package name does not count', () => {
 test('a plain string literal (not an import/require specifier) does not count as usage', () => {
   assert.deepEqual(scanSourceForImports(`const message = "please install foo";`), []);
   assert.deepEqual(scanSourceForImports(`const label = 'foo';`), []);
+});
+
+test('import-looking documentation strings, templates, and regexes do not become compatibility evidence', () => {
+  const source = [
+    `const docs = "import Close from 'next/dist/removed'";`,
+    `const moreDocs = "require('next/dist/removed')";`,
+    "const template = `import Close from 'next/dist/removed'`;",
+    `const matcher = /require\\('next\\/dist\\/removed'\\)/;`,
+  ].join('\n');
+  assert.deepEqual(scanSourceForImportSpecifiers(source), []);
+});
+
+test('regex expressions in control-statement positions are not import evidence', () => {
+  for (const source of [
+    `if (ok) /import Close from 'next/dist/removed'/.test(text);`,
+    `while (next()) /require('next/dist/removed')/.test(text);`,
+    `for (; ok;) /import('next/dist/removed')/.test(text);`,
+    `with (scope) /import X from 'next/dist/removed'/.test(text);`,
+  ]) {
+    assert.deepEqual(scanSourceForImportSpecifiers(source), []);
+  }
 });
 
 test('line and column are reported for the specifier location', () => {

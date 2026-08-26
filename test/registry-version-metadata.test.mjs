@@ -49,6 +49,27 @@ test('exact-version metadata preserves peer ranges and optional peer flags', asy
   assert.deepEqual(metadata.optionalDependencies, { native: '^3' });
 });
 
+test('exact-version metadata exposes bounded engine, bin, and exports evidence', async () => {
+  const metadata = await fetchPackageVersionMetadata(
+    { async get() {
+      return response({
+        name: 'framework',
+        version: '15.5.24',
+        engines: { node: '^18.18.0 || >=20.0.0', npm: 42 },
+        bin: { framework: './bin.js' },
+        exports: { '.': './index.js', './server': { import: './server.mjs', require: './server.cjs' } },
+      });
+    } },
+    new MemoryEtagStore(),
+    'https://registry.example',
+    'framework',
+    '15.5.24'
+  );
+  assert.deepEqual(metadata.engines, { node: '^18.18.0 || >=20.0.0' });
+  assert.deepEqual(metadata.bin, { framework: './bin.js' });
+  assert.deepEqual(metadata.exports, { '.': './index.js', './server': { import: './server.mjs', require: './server.cjs' } });
+});
+
 test('scoped package names are encoded and use scoped registry routing lazily', async () => {
   const calls = [];
   const client = {

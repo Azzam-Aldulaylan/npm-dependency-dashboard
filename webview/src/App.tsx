@@ -126,7 +126,7 @@ export function App(): ReactElement {
   // constructed or edited here, only ever stored as received and echoed
   // back by its own `analysisId` on confirm/cancel/use-smart-plan.
   const [analysis, setAnalysis] = useState<UpgradeAnalysisPresentation | null>(null);
-  const [analyzingPhase, setAnalyzingPhase] = useState<'compatibility' | 'smart-plan' | null>(null);
+  const [analyzingPhase, setAnalyzingPhase] = useState<'compatibility' | 'project-compatibility' | 'smart-plan' | null>(null);
   // Per-section progressive state for the active analysis attempt — see
   // src/host/upgradeAnalysisSections.ts. Reset to WAITING_UPGRADE_ANALYSIS_SECTIONS
   // every time a fresh `upgrade`/`bulk-upgrade` request is issued; superseded
@@ -1476,6 +1476,7 @@ export function App(): ReactElement {
           }}
           onConfigureVerification={requestConfigureVerification}
           onOpenAdvisory={requestOpenAdvisory}
+          onOpenUsageReference={requestOpenUsageReference}
         />
       ) : null}
 

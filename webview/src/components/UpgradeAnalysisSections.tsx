@@ -14,6 +14,7 @@ import {
   VerificationStepsCard,
 } from './UpgradeAnalysisCards.js';
 import { PHASE_LABEL } from './UpgradeAnalysisLoading.js';
+import { ProjectCompatibilitySection } from './ProjectCompatibilitySection.js';
 
 /**
  * A single section's compact loading placeholder — deliberately not a large
@@ -47,6 +48,7 @@ export function UpgradeAnalysisSections({
   onChangeTab,
   onConfigureVerification,
   onOpenAdvisory,
+  onOpenUsageReference,
 }: {
   row: PackageRow;
   targetVersion: string;
@@ -54,8 +56,9 @@ export function UpgradeAnalysisSections({
   onChangeTab: (tab: ManageTabId) => void;
   onConfigureVerification: () => void;
   onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[]) => void) | undefined;
+  onOpenUsageReference?: ((usageId: string, referenceIndex: number) => void) | undefined;
 }): ReactElement {
-  const { overview, compatibility, security, smartPlan } = sections;
+  const { overview, compatibility, projectCompatibility, security, smartPlan } = sections;
 
   return (
     <div className="upgrade-tab">
@@ -67,9 +70,20 @@ export function UpgradeAnalysisSections({
           </p>
         </div>
         {compatibility.status === 'complete' ? (
-          <CompatibilityCheckCard compatibility={compatibility.value} majorUpdate={overview.status === 'complete' ? overview.value.majorUpdate : false} />
+          <CompatibilityCheckCard
+            compatibility={compatibility.value}
+            projectCompatibility={projectCompatibility.status === 'complete' ? projectCompatibility.value : undefined}
+          />
         ) : (
           <SectionPlaceholder label={compatibility.status === 'loading' ? PHASE_LABEL.compatibility : 'Waiting to check compatibility…'} />
+        )}
+
+        {projectCompatibility.status === 'complete' ? (
+          <ProjectCompatibilitySection analysis={projectCompatibility.value} onOpenUsageReference={onOpenUsageReference} />
+        ) : (
+          <SectionPlaceholder
+            label={projectCompatibility.status === 'loading' ? PHASE_LABEL['project-compatibility'] : 'Waiting to check project compatibility…'}
+          />
         )}
 
         {smartPlan.status === 'complete' &&

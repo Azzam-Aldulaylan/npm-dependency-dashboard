@@ -2,9 +2,10 @@ import type { ReactElement } from 'react';
 
 import { LoadingRing } from './DependencyLoadingState.js';
 
-/** Exported for UpgradeAnalysisSections.tsx's per-section loading placeholders, which reuse this exact copy rather than inventing a second phrasing for the same two phases. */
-export const PHASE_LABEL: Record<'compatibility' | 'smart-plan', string> = {
+/** Exported for UpgradeAnalysisSections.tsx's per-section loading placeholders, which reuse this exact copy rather than inventing a second phrasing for the same phases. */
+export const PHASE_LABEL: Record<'compatibility' | 'project-compatibility' | 'smart-plan', string> = {
   compatibility: 'Checking peer compatibility…',
+  'project-compatibility': 'Checking project imports, runtime, configuration, and tooling…',
   'smart-plan': 'Finding a coordinated upgrade path…',
 };
 
@@ -23,7 +24,7 @@ export function UpgradeAnalysisLoading({
   packageName: string;
   targetVersion: string;
   changeCount?: number;
-  phase: 'compatibility' | 'smart-plan' | null;
+  phase: 'compatibility' | 'project-compatibility' | 'smart-plan' | null;
 }): ReactElement {
   return (
     <div className="analysis-loading" role="status" aria-live="polite">

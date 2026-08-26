@@ -43,7 +43,7 @@ export function primaryAction(
  * directly under the header, as the one place a 2-second read answers
  * "is this upgrade OK".
  */
-export function overallStatusDetail(analysis: UpgradeAnalysisPresentation): string | undefined {
+export function overallStatusDetail(analysis: { compatibility: UpgradeAnalysisPresentation['compatibility'] }): string | undefined {
   const { compatibility } = analysis;
   if (compatibility.completeness === 'partial') return 'Some compatibility checks could not be completed.';
   const nonCompatible = compatibility.findings.filter((finding) => finding.status !== 'compatible').length;

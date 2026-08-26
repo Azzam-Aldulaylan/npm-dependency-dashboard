@@ -2,7 +2,8 @@ import type { ReactElement } from 'react';
 
 import { LoadingRing } from './DependencyLoadingState.js';
 
-const PHASE_LABEL: Record<'compatibility' | 'smart-plan', string> = {
+/** Exported for UpgradeAnalysisSections.tsx's per-section loading placeholders, which reuse this exact copy rather than inventing a second phrasing for the same two phases. */
+export const PHASE_LABEL: Record<'compatibility' | 'smart-plan', string> = {
   compatibility: 'Checking peer compatibility…',
   'smart-plan': 'Finding a coordinated upgrade path…',
 };

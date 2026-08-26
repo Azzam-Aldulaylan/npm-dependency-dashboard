@@ -1412,6 +1412,28 @@ button {
   animation: dashboard-spin 1.2s linear infinite;
 }
 
+/* A manually-triggered freshness bar (e.g. the Upgrade review panel's own)
+   isn't actively refreshing the way the dashboard-wide banner above always
+   is — a spinning icon there would be misleading. */
+.stale-status__icon--static {
+  animation: none;
+}
+
+.stale-status__action {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* The Upgrade review panel's structural-staleness variant — the same shell
+   as the soft (time-based) case above, but a warning tone matching this
+   codebase's existing status-badge--warning treatment, since it also blocks
+   Confirm/Use-smart-plan rather than being purely informational. */
+.stale-status--hard {
+  border-color: var(--vscode-editorWarning-foreground);
+  color: var(--vscode-editorWarning-foreground);
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 10%, transparent);
+}
+
 /* -------------------------------------------------------------- responsive */
 
 @media (max-width: 680px) {
@@ -4223,6 +4245,21 @@ button {
   flex-shrink: 0;
 }
 
+/* Progressive Upgrade review — a section still waiting on its own data.
+   Same card shell as a resolved section (so the grid never jumps once it
+   settles), just a small ring + label instead of real content. */
+.analysis-card--pending {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--vscode-descriptionForeground);
+}
+
+.analysis-card__pending-label {
+  margin: 0;
+  font-size: 0.8em;
+}
+
 .analysis-card__more {
   align-self: flex-start;
   margin-top: 0.55rem;
@@ -4514,6 +4551,23 @@ button {
 .analysis-loading__detail {
   margin: 0;
   color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+/* Progressive Upgrade review's own compact header — a small inline ring +
+   title above the section cards, not the full centered block used while
+   nothing at all is known yet (UpgradeAnalysisLoading.tsx's own usage). */
+.analysis-loading--compact {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0.1rem 0 0.3rem;
+  text-align: left;
+  gap: 0.6rem;
+}
+
+.analysis-loading--compact .analysis-loading__title {
+  margin: 0;
   font-size: 0.85em;
 }
 

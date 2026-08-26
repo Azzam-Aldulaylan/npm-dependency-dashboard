@@ -962,6 +962,14 @@ export class DashboardPanel {
     this.invalidationTimer = setTimeout(() => {
       this.invalidationTimer = undefined;
       void this.fileChangeCoordinator.flush();
+      // FileChangeCoordinator's own flush() above is deferred while an
+      // upgrade analysis is open (isBusy() stays true for the whole review
+      // lifetime) — checkOpenAnalysisFreshness is the one place that still
+      // re-reads disk during that window, so an open Upgrade review panel
+      // learns its analysis is structurally stale instead of only finding
+      // out at confirm time. See its own doc for why this reuses the same
+      // debounce rather than a new timer.
+      void this.upgradeCoordinator.checkOpenAnalysisFreshness();
     }, FILE_EVENT_DEBOUNCE_MS);
   }
 

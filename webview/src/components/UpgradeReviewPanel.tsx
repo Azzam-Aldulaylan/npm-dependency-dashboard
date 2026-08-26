@@ -1,33 +1,26 @@
 import type { ReactElement } from 'react';
 
 import type { PackageRow, Severity } from '../../../src/core/types.js';
-import type {
-  CompatibilityFindingKind,
-  UpgradeAnalysisFiles,
-  UpgradeAnalysisPresentation,
-  UpgradeAnalysisVerification,
-} from '../../../src/host/webviewProtocol.js';
-import { compatibilityOutcomeDisplay, securityOutcomeDisplay, upgradeSafetyHeadline } from '../../../src/host/outcomeCopy.js';
+import type { UpgradeAnalysisPresentation } from '../../../src/host/webviewProtocol.js';
+import type { UpgradeAnalysisSections as UpgradeAnalysisSectionsState } from '../../../src/host/upgradeAnalysisSections.js';
+import { isUpgradeAnalysisSoftStale } from '../../../src/host/upgradeFreshness.js';
+import { compatibilityOutcomeDisplay, upgradeSafetyHeadline } from '../../../src/host/outcomeCopy.js';
 import { classifyUpdate } from '../../../src/host/updateClassification.js';
 import { severityDisplay } from '../../../src/host/severityDisplay.js';
 import { summarizeUpgradeSecurity } from '../../../src/host/upgradeSecuritySummary.js';
-import {
-  IconAlertTriangle,
-  IconCheck,
-  IconFile,
-  IconGear,
-  IconHelpCircle,
-  IconHistory,
-  IconListChecks,
-  IconRoute,
-  IconShield,
-  IconTrendUp,
-} from '../icons.js';
+import { IconHistory, IconRefresh, IconTrendUp } from '../icons.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
 import { SmartPlanSection } from './SmartPlanSection.js';
-import { UpgradeAnalysisLoading } from './UpgradeAnalysisLoading.js';
-import { overallStatusDetail, primaryAction } from './UpgradeAnalysisModal.js';
+import {
+  CompatibilityCheckCard,
+  FilesModifiedCard,
+  SecurityOutcomeCard,
+  SimpleUpgradePlanCard,
+  VerificationStepsCard,
+} from './UpgradeAnalysisCards.js';
+import { UpgradeAnalysisSections } from './UpgradeAnalysisSections.js';
+import { primaryAction } from './UpgradeAnalysisModal.js';
 import type { UsageRequestState } from './UsageReferencesPanel.js';
 
 const UPDATE_KIND_LABEL: Record<'major' | 'minor' | 'patch', string> = {
@@ -234,261 +227,51 @@ function UpgradePreviewCard({ analysis }: { analysis: UpgradeAnalysisPresentatio
   );
 }
 
-type CompatCheckTone = 'ok' | 'warn' | 'unknown';
-
-function CompatCheckItem({ tone, label, value }: { tone: CompatCheckTone; label: string; value: string }): ReactElement {
-  const icon = tone === 'ok' ? <IconCheck /> : tone === 'warn' ? <IconAlertTriangle /> : <IconHelpCircle />;
-  return (
-    <div className={`hygiene-strip__item${tone === 'warn' ? ' hygiene-strip__item--warn' : tone === 'unknown' ? ' hygiene-strip__item--unknown' : ''}`}>
-      <span className="hygiene-strip__icon" aria-hidden="true">
-        {icon}
-      </span>
-      <span className="hygiene-strip__label">{label}</span>
-      <span className="hygiene-strip__value">{value}</span>
-    </div>
-  );
-}
-
-const PEER_FINDING_KINDS: ReadonlySet<CompatibilityFindingKind> = new Set([
-  'peer-compatible',
-  'peer-incompatible',
-  'peer-missing',
-  'optional-peer-missing',
-  'invalid-peer-range',
-]);
-
-/**
- * The 4-check compact grid. Only two of these four categories have a real
- * signal anywhere in this codebase today (peer dependencies, from
- * `compatibility.findings`; breaking changes, from the `major-version-change`
- * finding kind / `majorUpdate`) — engine-requirement and deprecated-API
- * detection do not exist in the analysis pipeline at all, so both render
- * "Not checked" rather than a fabricated "Compatible"/"None detected".
- */
-function CompatibilityCheckCard({ analysis }: { analysis: UpgradeAnalysisPresentation }): ReactElement {
-  const { compatibility, majorUpdate } = analysis;
-  const summary = overallStatusDetail(analysis);
-  const summaryTone = compatibilityOutcomeDisplay(compatibility.status).className;
-  const peerFindings = compatibility.findings.filter((finding) => PEER_FINDING_KINDS.has(finding.kind));
-  const peerProblems = peerFindings.filter((finding) => finding.status !== 'compatible');
-  // An empty peer-findings list is never claimed as "no peer dependencies" —
-  // the underlying compatibility check (see CompatibilitySection.tsx's own
-  // fallback copy) can't distinguish "genuinely has none" from "nothing was
-  // available to check", so both collapse to the same honest "Not checked"
-  // this card already uses for the two checks with no detector at all.
-  const peerTone: CompatCheckTone = peerFindings.length === 0 ? 'unknown' : peerProblems.length > 0 ? 'warn' : 'ok';
-  const peerValue =
-    peerFindings.length === 0
-      ? 'Not checked'
-      : peerProblems.length > 0
-        ? `${peerProblems.length} conflict${peerProblems.length === 1 ? '' : 's'}`
-        : 'No conflicts';
-
-  const hasMajorFinding = compatibility.findings.some((finding) => finding.kind === 'major-version-change') || majorUpdate;
-
-  return (
-    <section className="analysis-card" aria-labelledby="upgrade-compat-heading">
-      <h3 className="analysis-card__title" id="upgrade-compat-heading">
-        <IconRoute className="analysis-card__title-icon" />
-        Compatibility check
-      </h3>
-      {summary !== undefined ? (
-        <p className={`usage-status${summaryTone === 'compatible' ? ' usage-status--ok' : summaryTone === 'conflict' ? ' usage-status--error' : ''}`}>
-          {summaryTone === 'compatible' ? (
-            <IconCheck className="usage-status__icon" />
-          ) : summaryTone === 'conflict' ? (
-            <IconAlertTriangle className="usage-status__icon" />
-          ) : (
-            <IconHelpCircle className="usage-status__icon" />
-          )}
-          {summary}
-        </p>
-      ) : null}
-      <div className="hygiene-strip">
-        <CompatCheckItem tone={peerTone} label="Peer dependencies" value={peerValue} />
-        <CompatCheckItem tone="unknown" label="Engine requirements" value="Not checked" />
-        <CompatCheckItem tone={hasMajorFinding ? 'warn' : 'ok'} label="Breaking changes" value={hasMajorFinding ? 'Major version change' : 'None detected'} />
-        <CompatCheckItem tone="unknown" label="Deprecated APIs" value="Not checked" />
-      </div>
-    </section>
-  );
+function formatUpgradeAnalysisAge(analyzedAt: string, now: number): string {
+  const timestamp = Date.parse(analyzedAt);
+  if (!Number.isFinite(timestamp)) return 'previously';
+  const minutes = Math.max(0, Math.floor((now - timestamp) / 60_000));
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours}h ${remainingMinutes}m ago`;
 }
 
 /**
- * The plain, non-conflict case — every real proposed change (`analysis.changes`),
- * numbered, reusing the exact same `.smart-plan__*` markup SmartPlanSection
- * uses for the genuinely-coordinated-conflict case below. No risk/impact
- * score is shown: this codebase has no such rating anywhere in the upgrade
- * pipeline, so showing one would be invented, not derived.
+ * Soft (time-based, ~1hr) vs hard (structural — the project changed since
+ * this analysis ran) freshness for the analysis currently on screen. The
+ * soft case reuses the dashboard's own `.stale-status` tone verbatim
+ * (non-alarming, matching App.tsx's whole-scan revalidation banner); the
+ * hard case gets a `.stale-status--hard` warning tone and also disables
+ * Confirm/Use-smart-plan (see the primary action button below) — pure time
+ * passing never does that on its own. Refresh is not a new mechanism: it
+ * simply re-runs analysis (Cancel + Analyze) — the host's own STALE_SOURCE
+ * recheck at confirm time remains the sole authority regardless of what
+ * this bar shows.
  */
-function SimpleUpgradePlanCard({ row, analysis }: { row: PackageRow; analysis: UpgradeAnalysisPresentation }): ReactElement {
-  const steps = analysis.changes;
-  return (
-    <section className="analysis-card" aria-labelledby="upgrade-plan-heading">
-      <h3 className="analysis-card__title" id="upgrade-plan-heading">
-        Smart upgrade plan
-      </h3>
-      <p className="usage-card__subtitle">
-        {steps.length} step{steps.length === 1 ? '' : 's'} to upgrade {row.name}
-      </p>
-      <ol className="smart-plan__changes">
-        {steps.map((change) => (
-          <li className="smart-plan__change" key={change.packageName}>
-            <span className="smart-plan__package">
-              Upgrade {change.packageName} from {change.currentVersion} → {change.targetVersion}
-            </span>
-            {change.majorUpdate ? <span className="status-badge status-badge--warning">Major update</span> : null}
-          </li>
-        ))}
-      </ol>
-    </section>
-  );
-}
-
-/**
- * Before → after vulnerability counts, entirely from the host-computed
- * `SecurityOutcome` — never a second, webview-side security calculation.
- */
-function SecurityOutcomeCard({
-  row,
-  security,
-  onChangeTab,
+function UpgradeFreshnessBar({
+  analyzedAt,
+  hardStale,
+  now,
+  onRefresh,
 }: {
-  row: PackageRow;
-  security: UpgradeAnalysisPresentation['security'];
-  onChangeTab: (tab: ManageTabId) => void;
+  analyzedAt: string;
+  hardStale: boolean;
+  now: number;
+  onRefresh: () => void;
 }): ReactElement | null {
-  if (security === null || row.advisories.length === 0) return null;
-  const before = severityDisplay(row.worstSeverity);
-  const resolvedCount = security.resolvedAdvisories.length;
-  const remainingCount = security.remaining.filter((entry) => entry.status === 'remains').length;
-  const unknownCount = security.remaining.filter((entry) => entry.status === 'unknown').length;
-  const after = securityOutcomeDisplay(security.status);
-  const subtitle =
-    security.status === 'resolved'
-      ? 'This upgrade will improve your security posture.'
-      : security.status === 'remains'
-        ? resolvedCount > 0
-          ? "This upgrade improves your security posture, but doesn't resolve every known vulnerability."
-          : "This upgrade doesn't change your security posture."
-        : 'The security outcome of this upgrade could not be fully verified.';
-
+  const softStale = isUpgradeAnalysisSoftStale(analyzedAt, now);
+  if (!softStale && !hardStale) return null;
   return (
-    <section className="analysis-card" aria-labelledby="upgrade-security-heading">
-      <div className="usage-card__head">
-        <h3 className="analysis-card__title" id="upgrade-security-heading">
-          <IconShield className="analysis-card__title-icon" />
-          Security outcome
-        </h3>
-        <button type="button" className="usage-show-all" onClick={() => onChangeTab('vulnerabilities')}>
-          View vulnerabilities →
-        </button>
-      </div>
-      <p className="usage-card__subtitle">{subtitle}</p>
-      <div className="security-outcome">
-        <div className="security-outcome__box">
-          <p className="security-outcome__label">Before upgrade</p>
-          <p className="security-outcome__value security-outcome__value--bad">
-            {row.advisories.length} {before.label} vulnerabilit{row.advisories.length === 1 ? 'y' : 'ies'}
-          </p>
-          <p className="security-outcome__detail">Affecting {row.advisories.length} advisor{row.advisories.length === 1 ? 'y' : 'ies'}</p>
-        </div>
-        <span className="usage-path__arrow" aria-hidden="true">
-          →
-        </span>
-        <div className="security-outcome__box">
-          <p className="security-outcome__label">After upgrade</p>
-          <p className={`security-outcome__value${remainingCount === 0 && unknownCount === 0 ? ' security-outcome__value--good' : ''}`}>
-            {remainingCount} vulnerabilit{remainingCount === 1 ? 'y' : 'ies'}
-            {unknownCount > 0 ? `, ${unknownCount} undetermined` : ''}
-          </p>
-          <p className="security-outcome__detail">{after.label}</p>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function baseName(path: string): string {
-  const parts = path.split(/[\\/]/);
-  return parts.at(-1) ?? path;
-}
-
-/** Only the manifest and lockfile — the only two files any upgrade transaction in this codebase ever modifies. Never a fabricated "+N more". */
-function FilesModifiedCard({ files }: { files: UpgradeAnalysisFiles }): ReactElement {
-  return (
-    <section className="analysis-card" aria-labelledby="upgrade-files-heading">
-      <h3 className="analysis-card__title" id="upgrade-files-heading">
-        <IconFile className="analysis-card__title-icon" />
-        Files to be modified
-      </h3>
-      <p className="usage-card__subtitle">This upgrade will modify the following files.</p>
-      <ul className="usage-ref-list upgrade-files-list">
-        <li className="usage-ref__button usage-ref__button--static upgrade-files-list__item">
-          <IconFile className="usage-ref__icon" aria-hidden="true" />
-          <span className="usage-ref__path">{baseName(files.manifestPath)}</span>
-          <span className="status-badge status-badge--neutral">Modified</span>
-        </li>
-        <li className="usage-ref__button usage-ref__button--static upgrade-files-list__item">
-          <IconFile className="usage-ref__icon" aria-hidden="true" />
-          <span className="usage-ref__path">{baseName(files.lockfilePath)}</span>
-          <span className="status-badge status-badge--neutral">Modified</span>
-        </li>
-      </ul>
-    </section>
-  );
-}
-
-/**
- * Verification steps, entirely from `UpgradeAnalysisVerification` — install
- * is the one step every upgrade transaction always runs; each configured
- * script name gets its own step, in its own words (never remapped to a
- * generic "Build project"/"Run tests" label the actual script might not
- * match). All shown as `Queued` — this is the pre-execution preview, before
- * the transaction has started.
- */
-function VerificationStepsCard({
-  verification,
-  onConfigureVerification,
-}: {
-  verification: UpgradeAnalysisVerification;
-  onConfigureVerification: () => void;
-}): ReactElement {
-  return (
-    <section className="analysis-card" aria-labelledby="upgrade-verification-heading">
-      <h3 className="analysis-card__title" id="upgrade-verification-heading">
-        <IconListChecks className="analysis-card__title-icon" />
-        Verification steps
-      </h3>
-      <p className="usage-card__subtitle">We'll run these checks after upgrading.</p>
-      <ul className="verification-steps">
-        <li className="verification-steps__item">
-          <span>Install dependencies</span>
-          <span className="status-badge status-badge--neutral">Queued</span>
-        </li>
-        {verification.configured
-          ? verification.scriptNames.map((name) => (
-              <li className="verification-steps__item" key={name}>
-                <span>
-                  Run <code>{name}</code>
-                </span>
-                <span className="status-badge status-badge--neutral">Queued</span>
-              </li>
-            ))
-          : (
-            <li className="verification-steps__item">
-              <span>Build / test verification</span>
-              <span className="status-badge status-badge--warning">Not configured</span>
-            </li>
-          )}
-      </ul>
-      {!verification.configured ? (
-        <button type="button" className="button button--secondary verification__configure" onClick={onConfigureVerification}>
-          <IconGear />
-          Configure verification
-        </button>
-      ) : null}
-    </section>
+    <p className={`stale-status${hardStale ? ' stale-status--hard' : ''}`}>
+      <IconRefresh className="stale-status__icon stale-status__icon--static" />
+      {hardStale
+        ? 'Project files changed since this analysis ran. Refresh before continuing.'
+        : `Dependency data may be out of date. Last analyzed ${formatUpgradeAnalysisAge(analyzedAt, now)}.`}
+      <button type="button" className="button button--subtle stale-status__action" onClick={onRefresh}>
+        Refresh
+      </button>
+    </p>
   );
 }
 
@@ -511,6 +294,9 @@ export function UpgradeReviewPanel({
   targetVersion,
   analyzingPhase,
   analysis,
+  sections,
+  hardStale,
+  now,
   busy,
   usage,
   onAnalyzeUpgrade,
@@ -518,6 +304,7 @@ export function UpgradeReviewPanel({
   onUseSmartPlan,
   onCancel,
   onConfigureVerification,
+  onRefresh,
   onChangeTab,
 }: {
   row: PackageRow;
@@ -526,6 +313,11 @@ export function UpgradeReviewPanel({
   targetVersion: string | null;
   analyzingPhase: 'compatibility' | 'smart-plan' | null;
   analysis: UpgradeAnalysisPresentation | null;
+  /** Per-section progressive state, rendered while `analysis` is still null — see src/host/upgradeAnalysisSections.ts. */
+  sections: UpgradeAnalysisSectionsState;
+  /** True when the host has flagged `analysis` as structurally stale — see UpgradeFreshnessBar. */
+  hardStale: boolean;
+  now: number;
   busy: boolean;
   usage: UsageRequestState | undefined;
   onAnalyzeUpgrade: (target: string) => void;
@@ -533,6 +325,7 @@ export function UpgradeReviewPanel({
   onUseSmartPlan: () => void;
   onCancel: () => void;
   onConfigureVerification: () => void;
+  onRefresh: () => void;
   onChangeTab: (tab: ManageTabId) => void;
 }): ReactElement {
   if (!active || targetVersion === null) {
@@ -565,7 +358,13 @@ export function UpgradeReviewPanel({
   if (analysis === null) {
     return (
       <div className="review-panel">
-        <UpgradeAnalysisLoading packageName={row.name} targetVersion={targetVersion} phase={analyzingPhase} />
+        <UpgradeAnalysisSections
+          row={row}
+          targetVersion={targetVersion}
+          sections={sections}
+          onChangeTab={onChangeTab}
+          onConfigureVerification={onConfigureVerification}
+        />
       </div>
     );
   }
@@ -574,6 +373,7 @@ export function UpgradeReviewPanel({
 
   return (
     <div className="review-panel">
+      <UpgradeFreshnessBar analyzedAt={analysis.analyzedAt} hardStale={hardStale} now={now} onRefresh={onRefresh} />
       <div className="upgrade-tab">
         <div className="upgrade-tab__summary">
           <UpgradeSummaryCard analysis={analysis} />
@@ -582,8 +382,8 @@ export function UpgradeReviewPanel({
         </div>
         <div className="upgrade-tab__details">
           <UpgradePreviewCard analysis={analysis} />
-          <CompatibilityCheckCard analysis={analysis} />
-          {analysis.smartPlan !== null ? <SmartPlanSection smartPlan={analysis.smartPlan} /> : <SimpleUpgradePlanCard row={row} analysis={analysis} />}
+          <CompatibilityCheckCard compatibility={analysis.compatibility} majorUpdate={analysis.majorUpdate} />
+          {analysis.smartPlan !== null ? <SmartPlanSection smartPlan={analysis.smartPlan} /> : <SimpleUpgradePlanCard row={row} changes={analysis.changes} />}
           <SecurityOutcomeCard row={row} security={analysis.security} onChangeTab={onChangeTab} />
           <div className="upgrade-tab__bottom-grid">
             <FilesModifiedCard files={analysis.files} />
@@ -607,7 +407,7 @@ export function UpgradeReviewPanel({
             type="button"
             className={`button${analysis.compatibility.status === 'warning' || analysis.compatibility.status === 'unknown' ? ' button--subtle' : ''}`}
             onClick={action.onClick === 'confirm' ? onConfirm : onUseSmartPlan}
-            disabled={busy}
+            disabled={busy || hardStale}
           >
             {action.label}
           </button>

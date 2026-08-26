@@ -5,6 +5,7 @@ import type { PackageRow, Severity } from '../../../src/core/types.js';
 import type { DependencyFinding } from '../../../src/core/hygiene/types.js';
 import type { TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
 import type { RemoveAnalysisPresentation, UpgradeAnalysisPresentation } from '../../../src/host/webviewProtocol.js';
+import type { UpgradeAnalysisSections } from '../../../src/host/upgradeAnalysisSections.js';
 import { CLASSIFICATION_LABEL, classificationOf } from '../dependencyClassification.js';
 import { IconFolder, IconInfo, IconShield, IconSliders, IconTrash, IconTrendUp, IconX } from '../icons.js';
 import type { RemovalImpactState } from '../removalImpactState.js';
@@ -29,12 +30,18 @@ interface UpgradeReviewState {
   active: boolean;
   analyzingPhase: 'compatibility' | 'smart-plan' | null;
   analysis: UpgradeAnalysisPresentation | null;
+  /** Per-section progressive state, rendered while `analysis` is still null — see src/host/upgradeAnalysisSections.ts. */
+  sections: UpgradeAnalysisSections;
+  /** True when the host has flagged `analysis` as structurally stale (manifest/lockfile changed since it ran) — a non-authoritative UX hint that blocks Confirm/Use-smart-plan until Refresh. */
+  hardStale: boolean;
   busy: boolean;
   onAnalyze: (target: string) => void;
   onConfirm: () => void;
   onUseSmartPlan: () => void;
   onCancel: () => void;
   onConfigureVerification: () => void;
+  /** Re-runs analysis for the same row/target — Cancel followed immediately by a fresh Analyze, not a new mechanism. */
+  onRefresh: () => void;
 }
 
 interface RemovalReviewState {
@@ -250,6 +257,9 @@ export function ManageDependencyModal({
         targetVersion={upgrade.targetVersion}
         analyzingPhase={upgrade.analyzingPhase}
         analysis={upgrade.analysis}
+        sections={upgrade.sections}
+        hardStale={upgrade.hardStale}
+        now={now}
         busy={upgrade.busy}
         usage={usage}
         onAnalyzeUpgrade={upgrade.onAnalyze}
@@ -257,6 +267,7 @@ export function ManageDependencyModal({
         onUseSmartPlan={upgrade.onUseSmartPlan}
         onCancel={cancelUpgradeReview}
         onConfigureVerification={upgrade.onConfigureVerification}
+        onRefresh={upgrade.onRefresh}
         onChangeTab={onChangeTab}
       />
     );

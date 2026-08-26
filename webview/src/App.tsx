@@ -31,6 +31,8 @@ import type {
   UpgradeAnalysisPresentation,
 } from '../../src/host/webviewProtocol.js';
 import { isHostToWebviewMessage } from '../../src/host/webviewProtocol.js';
+import type { UpgradeAnalysisSections } from '../../src/host/upgradeAnalysisSections.js';
+import { applyPartialSection, markPhaseLoading, WAITING_UPGRADE_ANALYSIS_SECTIONS } from '../../src/host/upgradeAnalysisSections.js';
 import { DashboardToolbar } from './components/DashboardToolbar.js';
 import { DependencyEmptyState } from './components/DependencyEmptyState.js';
 import { DependencyLoadingState } from './components/DependencyLoadingState.js';
@@ -107,6 +109,16 @@ export function App(): ReactElement {
   // back by its own `analysisId` on confirm/cancel/use-smart-plan.
   const [analysis, setAnalysis] = useState<UpgradeAnalysisPresentation | null>(null);
   const [analyzingPhase, setAnalyzingPhase] = useState<'compatibility' | 'smart-plan' | null>(null);
+  // Per-section progressive state for the active analysis attempt — see
+  // src/host/upgradeAnalysisSections.ts. Reset to WAITING_UPGRADE_ANALYSIS_SECTIONS
+  // every time a fresh `upgrade`/`bulk-upgrade` request is issued; superseded
+  // (not read) once `analysis` itself is non-null.
+  const [analysisSections, setAnalysisSections] = useState<UpgradeAnalysisSections>(WAITING_UPGRADE_ANALYSIS_SECTIONS);
+  // Non-null exactly when the host has flagged the currently-displayed
+  // `analysis` as structurally stale (its own `analysisId` matches) — see
+  // `upgrade-analysis-stale` in webviewProtocol.ts. A pure UX hint; Confirm/
+  // Use-smart-plan still always re-validate host-side regardless.
+  const [hardStaleAnalysisId, setHardStaleAnalysisId] = useState<string | null>(null);
   // True from the moment Confirm/Use coordinated upgrade is clicked until a
   // terminal message (upgrade-error, or any fresh dashboard snapshot
   // following success) arrives — disables the modal's own buttons so a
@@ -119,6 +131,25 @@ export function App(): ReactElement {
   useEffect(() => {
     activeUpgradeRef.current = activeUpgrade;
   }, [activeUpgrade]);
+  // Mirrors `analysis?.analysisId` for the message handler below, same
+  // reason as activeUpgradeRef — lets the (registered-once) `upgrade-
+  // analysis-stale` handler ignore a hint about an analysis this webview
+  // isn't even displaying anymore.
+  const analysisIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    analysisIdRef.current = analysis?.analysisId ?? null;
+  }, [analysis]);
+  // A monotonic, client-minted correlation id for the current analysis
+  // attempt — see webviewProtocol.ts's own doc on `requestId`. Distinguishes
+  // two sequential analyses for the *same* package (e.g. Cancel then
+  // Analyze again) the way `activeUpgradeRef`'s package-name-only guard
+  // alone cannot; every `upgrade-analyzing`/`upgrade-analysis-partial`/
+  // `upgrade-analysis` message not matching `activeRequestIdRef.current` is
+  // dropped as stale/superseded. A plain incrementing counter, not
+  // `crypto.randomUUID()` — this is a pure local-session correlation nonce
+  // with no security requirement for unguessability.
+  const nextRequestIdRef = useRef(0);
+  const activeRequestIdRef = useRef<string | null>(null);
 
   // Same anchor/lock discipline as the upgrade state above, for a
   // coordinated removal — the two share one host-side panel-wide lock, so
@@ -259,11 +290,14 @@ export function App(): ReactElement {
         // what they were before this arrived.
         if (upgradeErrorClearsActiveState(incoming.error.code)) {
           activeUpgradeRef.current = null;
+          activeRequestIdRef.current = null;
           setActiveUpgrade(null);
           setActiveTarget(null);
           setActiveUpgradeChanges([]);
           setAnalysis(null);
           setAnalyzingPhase(null);
+          setAnalysisSections(WAITING_UPGRADE_ANALYSIS_SECTIONS);
+          setHardStaleAnalysisId(null);
           setConfirmBusy(false);
         }
         if (upgradeErrorIsUserVisible(incoming.error.code)) {
@@ -273,7 +307,22 @@ export function App(): ReactElement {
       }
 
       if (incoming.status === 'upgrade-analyzing') {
-        if (incoming.package === activeUpgradeRef.current) setAnalyzingPhase(incoming.phase);
+        if (incoming.requestId === activeRequestIdRef.current) {
+          setAnalyzingPhase(incoming.phase);
+          setAnalysisSections((previous) => markPhaseLoading(previous, incoming.phase));
+        }
+        return;
+      }
+
+      if (incoming.status === 'upgrade-analysis-partial') {
+        // Dropped when it isn't about the attempt this webview is still
+        // tracking — a late partial from a superseded/cancelled attempt
+        // (re-analyzing the same package, switching rows, etc). See
+        // requestUpgrade/requestBulkUpgrade for where a fresh requestId is
+        // minted and analysisSections reset.
+        if (incoming.requestId === activeRequestIdRef.current) {
+          setAnalysisSections((previous) => applyPartialSection(previous, incoming.section));
+        }
         return;
       }
 
@@ -282,10 +331,18 @@ export function App(): ReactElement {
         // (e.g. a result that arrived just after a client-side cancel) — see
         // requestCancelUpgrade below for why this can still legitimately
         // happen even though the host is also told to drop it.
-        if (incoming.analysis.package === activeUpgradeRef.current) {
+        if (incoming.requestId === activeRequestIdRef.current) {
           setAnalysis(incoming.analysis);
           setAnalyzingPhase(null);
         }
+        return;
+      }
+
+      if (incoming.status === 'upgrade-analysis-stale') {
+        // A pure UX hint — never applied to an analysis this webview isn't
+        // even showing anymore (e.g. it arrived after Cancel, or after a
+        // newer analysis already replaced it).
+        if (incoming.analysisId === analysisIdRef.current) setHardStaleAnalysisId(incoming.analysisId);
         return;
       }
 
@@ -461,11 +518,14 @@ export function App(): ReactElement {
       // Any other message is a fresh snapshot that supersedes whatever
       // optimistic upgrade state was showing.
       activeUpgradeRef.current = null;
+      activeRequestIdRef.current = null;
       setActiveUpgrade(null);
       setActiveTarget(null);
       setActiveUpgradeChanges([]);
       setAnalysis(null);
       setAnalyzingPhase(null);
+      setAnalysisSections(WAITING_UPGRADE_ANALYSIS_SECTIONS);
+      setHardStaleAnalysisId(null);
       setConfirmBusy(false);
       setUpgradeError(null);
       setUpgradeOrigin(null);
@@ -566,31 +626,40 @@ export function App(): ReactElement {
     // replace the analysis id this client is tracking with a duplicate request
     // that the host will reject as UPGRADE_IN_PROGRESS.
     if (!upgradeAnalysisRequestIsAllowed(activeUpgradeRef.current)) return;
+    const requestId = String(++nextRequestIdRef.current);
     activeUpgradeRef.current = packageName;
+    activeRequestIdRef.current = requestId;
     setActiveUpgrade(packageName);
     setActiveTarget(target);
     setActiveUpgradeChanges([{ packageName, currentVersion: '', targetVersion: target, major: false }]);
     setAnalysis(null);
     setAnalyzingPhase(null);
+    setAnalysisSections(WAITING_UPGRADE_ANALYSIS_SECTIONS);
+    setHardStaleAnalysisId(null);
     setConfirmBusy(false);
     setUpgradeOrigin('manage-dependency');
-    vscode.postMessage({ type: 'upgrade', package: packageName, target });
+    vscode.postMessage({ type: 'upgrade', package: packageName, target, requestId });
   }, []);
 
   const requestBulkUpgrade = useCallback((changes: readonly BulkUpgradeCandidate[]) => {
     const first = changes[0];
     if (first === undefined) return;
+    const requestId = String(++nextRequestIdRef.current);
     activeUpgradeRef.current = first.packageName;
+    activeRequestIdRef.current = requestId;
     setActiveUpgrade(first.packageName);
     setActiveTarget(first.targetVersion);
     setActiveUpgradeChanges(changes);
     setAnalysis(null);
     setAnalyzingPhase(null);
+    setAnalysisSections(WAITING_UPGRADE_ANALYSIS_SECTIONS);
+    setHardStaleAnalysisId(null);
     setConfirmBusy(false);
     setUpgradeOrigin('dashboard');
     vscode.postMessage({
       type: 'bulk-upgrade',
       changes: changes.map((change) => ({ package: change.packageName, target: change.targetVersion })),
+      requestId,
     });
   }, []);
 
@@ -616,13 +685,29 @@ export function App(): ReactElement {
     vscode.postMessage({ type: 'cancel-upgrade', analysisId: analysis?.analysisId ?? null });
     setActiveUpgrade(null);
     activeUpgradeRef.current = null;
+    activeRequestIdRef.current = null;
     setActiveTarget(null);
     setActiveUpgradeChanges([]);
     setAnalysis(null);
     setAnalyzingPhase(null);
+    setAnalysisSections(WAITING_UPGRADE_ANALYSIS_SECTIONS);
+    setHardStaleAnalysisId(null);
     setConfirmBusy(false);
     setUpgradeOrigin(null);
   }, [analysis]);
+
+  // Structural staleness's own Refresh action — not a new mechanism, just
+  // this same Cancel followed immediately by a fresh Analyze. Safe because
+  // `handleCancelUpgrade` is fully synchronous host-side (see
+  // upgradeAssistantCoordinator.ts), so the panel-wide lock is guaranteed
+  // free before the `upgrade` message right behind it is processed.
+  const requestRefreshUpgradeAnalysis = useCallback(
+    (packageName: string, target: string) => {
+      requestCancelUpgrade();
+      requestUpgrade(packageName, target);
+    },
+    [requestCancelUpgrade, requestUpgrade]
+  );
 
   const requestConfigureVerification = useCallback(() => {
     vscode.postMessage({ type: 'configure-verification' });
@@ -1044,12 +1129,17 @@ export function App(): ReactElement {
                   active: upgradeActive,
                   analyzingPhase: upgradeActive ? analyzingPhase : null,
                   analysis: upgradeActive ? analysis : null,
+                  sections: upgradeActive ? analysisSections : WAITING_UPGRADE_ANALYSIS_SECTIONS,
+                  hardStale: upgradeActive && hardStaleAnalysisId !== null && hardStaleAnalysisId === analysis?.analysisId,
                   busy: confirmBusy,
                   onAnalyze: (target) => requestUpgrade(row.name, target),
                   onConfirm: requestConfirmUpgrade,
                   onUseSmartPlan: requestUseSmartPlan,
                   onCancel: requestCancelUpgrade,
                   onConfigureVerification: requestConfigureVerification,
+                  onRefresh: () => {
+                    if (row.upgradeTo !== null) requestRefreshUpgradeAnalysis(row.name, row.upgradeTo);
+                  },
                 }}
                 removal={{
                   active: removeActive,

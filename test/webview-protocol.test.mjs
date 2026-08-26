@@ -77,6 +77,7 @@ const DATA = {
 
 const MINIMAL_ANALYSIS = {
   analysisId: 'abc123',
+  analyzedAt: '2026-08-01T09:00:00.000Z',
   package: 'react-toastify',
   currentVersion: '10.0.6',
   targetVersion: '11.1.0',
@@ -94,6 +95,20 @@ const MINIMAL_ANALYSIS = {
   smartPlan: null,
   verification: { configured: false },
   files: { manifestPath: '/app/package.json', lockfilePath: '/app/package-lock.json', rollbackAvailable: true },
+};
+
+// The `overview` UpgradeAnalysisPartialSection carries the same fields as
+// MINIMAL_ANALYSIS's own equivalents, minus analysisId/analyzedAt/package/
+// compatibility/security/smartPlan — those are never part of the Stage-0
+// partial (see UpgradeAnalysisPartialSection's own doc).
+const OVERVIEW_SECTION_FIELDS = {
+  currentVersion: MINIMAL_ANALYSIS.currentVersion,
+  targetVersion: MINIMAL_ANALYSIS.targetVersion,
+  classification: MINIMAL_ANALYSIS.classification,
+  majorUpdate: MINIMAL_ANALYSIS.majorUpdate,
+  changes: MINIMAL_ANALYSIS.changes,
+  verification: MINIMAL_ANALYSIS.verification,
+  files: MINIMAL_ANALYSIS.files,
 };
 
 // ------------------------------------------------- webview -> host
@@ -134,13 +149,17 @@ test('extra keys on the envelope are rejected, not ignored', () => {
 // ------------------------------------------------- upgrade requests
 
 test('a well-formed upgrade request is accepted', () => {
-  assert.equal(isWebviewToHostMessage({ type: 'upgrade', package: 'left-pad', target: '2.0.0' }), true);
+  assert.equal(
+    isWebviewToHostMessage({ type: 'upgrade', package: 'left-pad', target: '2.0.0', requestId: 'req-1' }),
+    true
+  );
 });
 
 test('a well-formed bulk upgrade requires a bounded, unique list of exact package targets', () => {
   assert.equal(
     isWebviewToHostMessage({
       type: 'bulk-upgrade',
+      requestId: 'req-1',
       changes: [
         { package: 'alpha', target: '1.1.0' },
         { package: 'beta', target: '2.0.0' },
@@ -148,10 +167,11 @@ test('a well-formed bulk upgrade requires a bounded, unique list of exact packag
     }),
     true
   );
-  assert.equal(isWebviewToHostMessage({ type: 'bulk-upgrade', changes: [] }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'bulk-upgrade', requestId: 'req-1', changes: [] }), false);
   assert.equal(
     isWebviewToHostMessage({
       type: 'bulk-upgrade',
+      requestId: 'req-1',
       changes: [
         { package: 'alpha', target: '1.1.0' },
         { package: 'alpha', target: '1.2.0' },
@@ -160,15 +180,24 @@ test('a well-formed bulk upgrade requires a bounded, unique list of exact packag
     false
   );
   assert.equal(
-    isWebviewToHostMessage({ type: 'bulk-upgrade', changes: [{ package: 'alpha', target: '1.1.0', args: '--force' }] }),
+    isWebviewToHostMessage({
+      type: 'bulk-upgrade',
+      requestId: 'req-1',
+      changes: [{ package: 'alpha', target: '1.1.0', args: '--force' }],
+    }),
     false
   );
 });
 
-test('an upgrade request missing package or target is rejected', () => {
+test('an upgrade request missing package, target, or requestId is rejected', () => {
   assert.equal(isWebviewToHostMessage({ type: 'upgrade' }), false);
-  assert.equal(isWebviewToHostMessage({ type: 'upgrade', package: 'left-pad' }), false);
-  assert.equal(isWebviewToHostMessage({ type: 'upgrade', target: '2.0.0' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'upgrade', package: 'left-pad', requestId: 'req-1' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'upgrade', target: '2.0.0', requestId: 'req-1' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'upgrade', package: 'left-pad', target: '2.0.0' }), false);
+  assert.equal(
+    isWebviewToHostMessage({ type: 'upgrade', package: 'left-pad', target: '2.0.0', requestId: '' }),
+    false
+  );
 });
 
 test('an upgrade request with extra keys is rejected, not partially trusted', () => {
@@ -177,6 +206,7 @@ test('an upgrade request with extra keys is rejected, not partially trusted', ()
       type: 'upgrade',
       package: 'left-pad',
       target: '2.0.0',
+      requestId: 'req-1',
       dev: false, // a webview-supplied classification must never be accepted
     }),
     false
@@ -185,11 +215,11 @@ test('an upgrade request with extra keys is rejected, not partially trusted', ()
 
 test('an upgrade request with the wrong value types is rejected', () => {
   for (const value of [
-    { type: 'upgrade', package: 42, target: '2.0.0' },
-    { type: 'upgrade', package: 'left-pad', target: null },
-    { type: 'upgrade', package: '', target: '2.0.0' },
-    { type: 'upgrade', package: 'left-pad', target: '' },
-    { type: 'upgrade', package: ['left-pad'], target: '2.0.0' },
+    { type: 'upgrade', package: 42, target: '2.0.0', requestId: 'req-1' },
+    { type: 'upgrade', package: 'left-pad', target: null, requestId: 'req-1' },
+    { type: 'upgrade', package: '', target: '2.0.0', requestId: 'req-1' },
+    { type: 'upgrade', package: 'left-pad', target: '', requestId: 'req-1' },
+    { type: 'upgrade', package: ['left-pad'], target: '2.0.0', requestId: 'req-1' },
   ]) {
     assert.equal(isWebviewToHostMessage(value), false, `${JSON.stringify(value)} accepted`);
   }
@@ -309,14 +339,27 @@ test('every host-to-webview variant is accepted', () => {
     true
   );
   assert.equal(
-    isHostToWebviewMessage({ status: 'upgrade-analyzing', package: 'react-toastify', phase: 'compatibility' }),
+    isHostToWebviewMessage({ status: 'upgrade-analyzing', package: 'react-toastify', phase: 'compatibility', requestId: 'req-1' }),
     true
   );
   assert.equal(
-    isHostToWebviewMessage({ status: 'upgrade-analyzing', package: 'react-toastify', phase: 'smart-plan' }),
+    isHostToWebviewMessage({ status: 'upgrade-analyzing', package: 'react-toastify', phase: 'smart-plan', requestId: 'req-1' }),
     true
   );
-  assert.equal(isHostToWebviewMessage({ status: 'upgrade-analysis', analysis: MINIMAL_ANALYSIS }), true);
+  assert.equal(
+    isHostToWebviewMessage({ status: 'upgrade-analysis', analysis: MINIMAL_ANALYSIS, requestId: 'req-1' }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-analysis-partial',
+      requestId: 'req-1',
+      package: 'react-toastify',
+      section: { kind: 'overview', ...OVERVIEW_SECTION_FIELDS },
+    }),
+    true
+  );
+  assert.equal(isHostToWebviewMessage({ status: 'upgrade-analysis-stale', analysisId: 'abc123' }), true);
 });
 
 test('scan progress accepts real stage/count data and rejects fake or inconsistent progress', () => {
@@ -352,6 +395,7 @@ test('upgrade-analysis rejects extra top-level keys on the analysis payload', ()
   assert.equal(
     isHostToWebviewMessage({
       status: 'upgrade-analysis',
+      requestId: 'req-1',
       analysis: { ...MINIMAL_ANALYSIS, extra: true },
     }),
     false
@@ -367,6 +411,7 @@ test('upgrade-analysis rejects an unknown compatibility status or classification
   assert.equal(
     isHostToWebviewMessage({
       status: 'upgrade-analysis',
+      requestId: 'req-1',
       analysis: { ...MINIMAL_ANALYSIS, compatibility: { ...MINIMAL_ANALYSIS.compatibility, status: 'ok' } },
     }),
     false
@@ -374,6 +419,7 @@ test('upgrade-analysis rejects an unknown compatibility status or classification
   assert.equal(
     isHostToWebviewMessage({
       status: 'upgrade-analysis',
+      requestId: 'req-1',
       analysis: { ...MINIMAL_ANALYSIS, classification: 'peer' },
     }),
     false
@@ -395,6 +441,7 @@ test('upgrade-analysis accepts one structurally valid compatibility finding, and
   assert.equal(
     isHostToWebviewMessage({
       status: 'upgrade-analysis',
+      requestId: 'req-1',
       analysis: { ...MINIMAL_ANALYSIS, compatibility: { ...MINIMAL_ANALYSIS.compatibility, findings: [finding] } },
     }),
     true
@@ -402,6 +449,7 @@ test('upgrade-analysis accepts one structurally valid compatibility finding, and
   assert.equal(
     isHostToWebviewMessage({
       status: 'upgrade-analysis',
+      requestId: 'req-1',
       analysis: {
         ...MINIMAL_ANALYSIS,
         compatibility: { ...MINIMAL_ANALYSIS.compatibility, findings: [{ ...finding, kind: 'not-a-real-kind' }] },
@@ -433,7 +481,7 @@ test('upgrade-analysis accepts a well-formed security outcome, and rejects one w
     ],
   };
   assert.equal(
-    isHostToWebviewMessage({ status: 'upgrade-analysis', analysis: { ...MINIMAL_ANALYSIS, security } }),
+    isHostToWebviewMessage({ status: 'upgrade-analysis', requestId: 'req-1', analysis: { ...MINIMAL_ANALYSIS, security } }),
     true
   );
   const malformed = {
@@ -441,7 +489,7 @@ test('upgrade-analysis accepts a well-formed security outcome, and rejects one w
     remaining: [{ ...security.remaining[0], status: 'still-vulnerable' }], // not a real status
   };
   assert.equal(
-    isHostToWebviewMessage({ status: 'upgrade-analysis', analysis: { ...MINIMAL_ANALYSIS, security: malformed } }),
+    isHostToWebviewMessage({ status: 'upgrade-analysis', requestId: 'req-1', analysis: { ...MINIMAL_ANALYSIS, security: malformed } }),
     false
   );
 });
@@ -452,12 +500,12 @@ test('upgrade-analysis accepts a well-formed smart plan, and rejects one with a 
     reasonFindingIds: ['["peer-incompatible","some-library","react-toastify","10.0.6"]'],
   };
   assert.equal(
-    isHostToWebviewMessage({ status: 'upgrade-analysis', analysis: { ...MINIMAL_ANALYSIS, smartPlan } }),
+    isHostToWebviewMessage({ status: 'upgrade-analysis', requestId: 'req-1', analysis: { ...MINIMAL_ANALYSIS, smartPlan } }),
     true
   );
   const malformed = { ...smartPlan, changes: [{ packageName: 'some-library', targetVersion: '5.0.0' }] };
   assert.equal(
-    isHostToWebviewMessage({ status: 'upgrade-analysis', analysis: { ...MINIMAL_ANALYSIS, smartPlan: malformed } }),
+    isHostToWebviewMessage({ status: 'upgrade-analysis', requestId: 'req-1', analysis: { ...MINIMAL_ANALYSIS, smartPlan: malformed } }),
     false
   );
 });
@@ -466,6 +514,7 @@ test('upgrade-analysis accepts the configured verification shape with script nam
   assert.equal(
     isHostToWebviewMessage({
       status: 'upgrade-analysis',
+      requestId: 'req-1',
       analysis: { ...MINIMAL_ANALYSIS, verification: { configured: true, scriptNames: ['test'] } },
     }),
     true
@@ -473,8 +522,94 @@ test('upgrade-analysis accepts the configured verification shape with script nam
   assert.equal(
     isHostToWebviewMessage({
       status: 'upgrade-analysis',
+      requestId: 'req-1',
       analysis: { ...MINIMAL_ANALYSIS, verification: { configured: true } },
     }),
+    false
+  );
+});
+
+// ------------------------------------ host -> webview: upgrade-analysis-partial
+
+test('upgrade-analysis-partial accepts a well-formed section of every kind', () => {
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-analysis-partial',
+      requestId: 'req-1',
+      package: 'react-toastify',
+      section: { kind: 'overview', ...OVERVIEW_SECTION_FIELDS },
+    }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-analysis-partial',
+      requestId: 'req-1',
+      package: 'react-toastify',
+      section: { kind: 'compatibility', compatibility: MINIMAL_ANALYSIS.compatibility },
+    }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-analysis-partial',
+      requestId: 'req-1',
+      package: 'react-toastify',
+      section: { kind: 'security', security: null },
+    }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-analysis-partial',
+      requestId: 'req-1',
+      package: 'react-toastify',
+      section: { kind: 'smart-plan', smartPlan: null },
+    }),
+    true
+  );
+});
+
+test('upgrade-analysis-partial rejects a missing requestId/package, an unknown section kind, and extra top-level keys', () => {
+  const overview = { status: 'upgrade-analysis-partial', requestId: 'req-1', package: 'x', section: { kind: 'overview', ...OVERVIEW_SECTION_FIELDS } };
+  assert.equal(isHostToWebviewMessage({ ...overview, requestId: undefined }), false);
+  assert.equal(isHostToWebviewMessage({ ...overview, package: undefined }), false);
+  assert.equal(
+    isHostToWebviewMessage({ ...overview, section: { kind: 'not-a-real-kind' } }),
+    false
+  );
+  assert.equal(isHostToWebviewMessage({ ...overview, extra: true }), false);
+});
+
+test('upgrade-analysis-partial rejects a section object with an extra or missing field for its own kind', () => {
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-analysis-partial',
+      requestId: 'req-1',
+      package: 'x',
+      section: { kind: 'security', security: null, extra: true },
+    }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-analysis-partial',
+      requestId: 'req-1',
+      package: 'x',
+      section: { kind: 'compatibility' },
+    }),
+    false
+  );
+});
+
+// -------------------------------------- host -> webview: upgrade-analysis-stale
+
+test('upgrade-analysis-stale accepts a bare analysisId and rejects a missing one or extra keys', () => {
+  assert.equal(isHostToWebviewMessage({ status: 'upgrade-analysis-stale', analysisId: 'abc123' }), true);
+  assert.equal(isHostToWebviewMessage({ status: 'upgrade-analysis-stale' }), false);
+  assert.equal(isHostToWebviewMessage({ status: 'upgrade-analysis-stale', analysisId: '' }), false);
+  assert.equal(
+    isHostToWebviewMessage({ status: 'upgrade-analysis-stale', analysisId: 'abc123', package: 'x' }),
     false
   );
 });

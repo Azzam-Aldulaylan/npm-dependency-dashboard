@@ -1837,7 +1837,7 @@ button {
 }
 
 .manage-modal .manage-tabs__tab {
-  min-height: 2.25rem;
+  min-height: 2.5rem;
   padding: 0.5rem 0.65rem;
   font-size: 0.78em;
 }
@@ -1945,13 +1945,18 @@ button {
 
 .manage-tabs__icon {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
-  font-size: 0.95em;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 4px;
+  color: var(--vscode-descriptionForeground);
 }
 
 .manage-tabs__icon svg {
-  width: 1em;
-  height: 1em;
+  width: 1.1rem;
+  height: 1.1rem;
 }
 
 .manage-tabs__tab:hover {
@@ -1968,6 +1973,11 @@ button {
   border-bottom-color: var(--accent-total);
   color: var(--vscode-foreground);
   font-weight: 600;
+}
+
+.manage-tabs__tab--active .manage-tabs__icon {
+  color: var(--accent-total);
+  background: color-mix(in srgb, var(--accent-total) 14%, transparent);
 }
 
 .manage-tabs__dot {
@@ -3187,13 +3197,13 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.3rem;
-  height: 2.3rem;
+  width: 2.8rem;
+  height: 2.8rem;
   margin-bottom: 0.2rem;
   border-radius: 999px;
   color: var(--review-empty-accent, var(--vscode-descriptionForeground));
   background: color-mix(in srgb, var(--review-empty-accent, transparent) 16%, transparent);
-  font-size: 1.1rem;
+  font-size: 1.35rem;
 }
 
 .review-panel__empty-heading {
@@ -5369,7 +5379,7 @@ button {
   }
 
   .manage-modal .manage-tabs__tab {
-    min-height: 2.35rem;
+    min-height: 2.65rem;
     padding-inline: 0.6rem;
   }
 

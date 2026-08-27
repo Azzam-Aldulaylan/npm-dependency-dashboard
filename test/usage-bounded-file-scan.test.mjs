@@ -63,3 +63,35 @@ test('usage cancellation stops queued batches', async () => {
   assert.deepEqual(started, [1, 2]);
   assert.deepEqual(result, { processed: 0, cancelled: true });
 });
+
+test('an already-cancelled empty scan is not reported as complete', async () => {
+  const result = await scanFilesBounded({
+    items: [],
+    read: async () => '',
+    consume: () => undefined,
+    isCancelled: () => true,
+  });
+  assert.deepEqual(result, { processed: 0, cancelled: true });
+});
+
+test('item completion reports the exact deterministic item, including config-only entries', async () => {
+  const completed = [];
+  await scanFilesBounded({
+    items: [
+      { path: '.eslintrc', source: false },
+      { path: 'src/a.ts', source: true },
+      { path: 'vite.config.ts', source: true },
+      { path: 'vitest.config.json', source: false },
+    ],
+    concurrency: 2,
+    read: async (item) => item.path,
+    consume: () => undefined,
+    onItemProcessed: (item, processed, total) => completed.push([item.path, processed, total]),
+  });
+  assert.deepEqual(completed, [
+    ['.eslintrc', 1, 4],
+    ['src/a.ts', 2, 4],
+    ['vite.config.ts', 3, 4],
+    ['vitest.config.json', 4, 4],
+  ]);
+});

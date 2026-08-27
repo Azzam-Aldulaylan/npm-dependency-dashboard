@@ -11,15 +11,15 @@
  * specifically to guarantee a fresh check, not a cheap skip.
  */
 
-import { sourceFingerprintsMatch } from '../../core/cache/sourceFingerprint.js';
-import type { ProjectSourceFingerprint } from '../../core/cache/sourceFingerprint.js';
+import { usageSourceIdentitiesMatch } from './usageAnalysisState.js';
+import type { UsageSourceIdentity } from './usageAnalysisState.js';
 
 export function shouldRunBackgroundUsageRefresh(
   force: boolean,
-  lastAutoAnalyzedFingerprint: ProjectSourceFingerprint | undefined,
-  currentFingerprint: ProjectSourceFingerprint
+  lastAutoAnalyzedIdentity: UsageSourceIdentity | undefined,
+  currentIdentity: UsageSourceIdentity
 ): boolean {
   if (force) return true;
-  if (lastAutoAnalyzedFingerprint === undefined) return true;
-  return !sourceFingerprintsMatch(lastAutoAnalyzedFingerprint, currentFingerprint);
+  if (lastAutoAnalyzedIdentity === undefined) return true;
+  return !usageSourceIdentitiesMatch(lastAutoAnalyzedIdentity, currentIdentity);
 }

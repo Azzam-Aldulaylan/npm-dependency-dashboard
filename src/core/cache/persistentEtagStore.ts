@@ -14,6 +14,7 @@ import { hasUrlCredentials } from './keys.js';
 import type { KeyValueStore } from './keyValueStore.js';
 import { ETAG_CACHE_SCHEMA_VERSION, isPersistedEtagCacheCollection } from './schema.js';
 import { WriteBackCache } from './writeBackCache.js';
+import type { WriteBackCacheScheduler } from './writeBackCache.js';
 
 export const REGISTRY_CACHE_STORAGE_KEY = 'dependencyDashboard.registryCache';
 
@@ -39,6 +40,18 @@ export const MAX_REGISTRY_CACHE_ENTRIES = 500;
  * rest of the current extension-host session.
  */
 export const MAX_REGISTRY_CACHE_SERIALIZED_BYTES = 5 * 1024 * 1024;
+
+/** Registry responses commonly settle on adjacent event-loop turns. Batch the
+ * resulting full-cache writes briefly, while bounding a continuous stream so
+ * persistence can never be postponed indefinitely. */
+export const REGISTRY_CACHE_TRAILING_FLUSH_MS = 50;
+export const REGISTRY_CACHE_MAX_FLUSH_DELAY_MS = 250;
+
+export interface PersistentEtagStoreOptions {
+  trailingDelayMs?: number;
+  maxDelayMs?: number;
+  scheduler?: WriteBackCacheScheduler;
+}
 
 function utf8Bytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
@@ -106,11 +119,20 @@ export function loadPersistedEtagEntries(store: KeyValueStore): Array<[string, C
 export class PersistentEtagStore implements EtagStore {
   private readonly cache: WriteBackCache<CachedResponse>;
 
-  constructor(store: KeyValueStore, initialEntries: Array<[string, CachedResponse]> = loadValidatedPersistedEtagEntries(store)) {
+  constructor(
+    store: KeyValueStore,
+    initialEntries: Array<[string, CachedResponse]> = loadValidatedPersistedEtagEntries(store),
+    options: PersistentEtagStoreOptions = {}
+  ) {
     const boundedInitialEntries = boundPersistedEtagEntries(initialEntries);
     this.cache = new WriteBackCache<CachedResponse>({
       initialEntries,
       maxEntries: MAX_REGISTRY_CACHE_ENTRIES,
+      batching: {
+        trailingDelayMs: options.trailingDelayMs ?? REGISTRY_CACHE_TRAILING_FLUSH_MS,
+        maxDelayMs: options.maxDelayMs ?? REGISTRY_CACHE_MAX_FLUSH_DELAY_MS,
+        ...(options.scheduler === undefined ? {} : { scheduler: options.scheduler }),
+      },
       persist: async (entries) => {
         // Defense in depth (see keys.ts) — a URL npmrc.ts would already have
         // refused to resolve must still never reach disk if one somehow did.

@@ -15,6 +15,7 @@ export interface BoundedFileScanOptions<T> {
   concurrency?: number;
   isCancelled?: () => boolean;
   onProgress?: (processed: number, total: number) => void;
+  onItemProcessed?: (item: T, processed: number, total: number) => void;
   onReadFailure?: (item: T) => void;
 }
 
@@ -31,6 +32,7 @@ export async function scanFilesBounded<T>(
     ? Math.max(1, Math.floor(requestedLimit))
     : DEFAULT_USAGE_FILE_CONCURRENCY;
   let processed = 0;
+  if (options.isCancelled?.() === true) return { processed, cancelled: true };
 
   for (let offset = 0; offset < options.items.length; offset += limit) {
     if (options.isCancelled?.() === true) return { processed, cancelled: true };
@@ -56,6 +58,7 @@ export async function scanFilesBounded<T>(
       if (text !== null && text !== undefined) options.consume(item, text);
       else options.onReadFailure?.(item);
       processed += 1;
+      options.onItemProcessed?.(item, processed, options.items.length);
       options.onProgress?.(processed, options.items.length);
     }
   }

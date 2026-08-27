@@ -11,14 +11,12 @@
  * lockfile write, so unlike an upgrade this never needs the panel's mutation
  * lock — only its own single-flight guard.
  *
- * Caching: an in-memory, per-project, per-package cache keyed by the
- * project's own source fingerprint (src/core/cache/sourceFingerprint.ts —
- * the same manifest/lockfile hash DashboardController's persisted cache
- * already uses), with a short TTL. This intentionally does not watch every
- * source file for edits — see the redesign brief's own "a simple session/
- * project cache is acceptable initially, do not over-engineer" — a stale
- * cache entry is bounded by the TTL, and a manifest/lockfile change
- * invalidates it immediately via the fingerprint mismatch.
+ * Caching: an in-memory, per-project, per-package cache keyed by both the
+ * manifest/lockfile source fingerprint and a watcher-owned source/config
+ * generation, with a short TTL as a secondary bound. Relevant file events
+ * synchronously advance only the selected project's generation, so stale
+ * entries and in-flight publications are rejected without fingerprinting or
+ * retaining the source tree.
  *
  * "Analyze cleanup" also runs automatically — quietly, in the background,
  * never as part of the initial loading skeleton — after dependency data
@@ -40,7 +38,7 @@ import * as vscode from 'vscode';
 
 import { buildDependencyGraph } from '../../core/lockfile/build.js';
 import { parseManifest } from '../../core/manifest/parse.js';
-import { computeSourceFingerprint, sourceFingerprintsMatch } from '../../core/cache/sourceFingerprint.js';
+import { computeSourceFingerprint } from '../../core/cache/sourceFingerprint.js';
 import type { ProjectSourceFingerprint } from '../../core/cache/sourceFingerprint.js';
 import { buildUnusedFinding } from '../../core/usage/unused.js';
 import type { DependencyReference, DependencyUsageResult } from '../../core/usage/types.js';
@@ -54,6 +52,15 @@ import type { DiscoveredProject } from '../projectResolution.js';
 import type { RemovalImpactAssessment } from '../webviewProtocol.js';
 import { shouldRunBackgroundUsageRefresh } from './backgroundUsageRefreshGate.js';
 import { analyzeDependencyUsage } from './usageAnalyzer.js';
+import {
+  UsageAnalysisState,
+  ForegroundUsageOperationRegistry,
+  foregroundUsageBusyMessage,
+  canJoinBackgroundUsageScan,
+  shouldCancelUnderlyingUsageScan,
+  usageScanFailureAudience,
+  type UsageSourceIdentity,
+} from './usageAnalysisState.js';
 import { UsageReferenceStore } from './usageReferenceStore.js';
 
 export interface WhereUsedMessage {
@@ -79,13 +86,24 @@ export interface UsageCoordinatorOptions {
   isUpgradeBusy?(): boolean;
 }
 
-interface CachedUsage {
-  result: DependencyUsageResult;
-  fingerprint: ProjectSourceFingerprint;
-  cachedAt: number;
+export const USAGE_CACHE_TTL_MS = 10 * 60_000;
+
+interface ActiveUsageScan {
+  projectId: string;
+  identity: UsageSourceIdentity;
+  packageNames: ReadonlySet<string>;
+  backgroundOwner: boolean;
+  cts: vscode.CancellationTokenSource;
+  progressSubscribers: Set<(scanned: number, total: number) => void>;
+  promise: Promise<Map<string, DependencyUsageResult>>;
 }
 
-export const USAGE_CACHE_TTL_MS = 10 * 60_000;
+interface ForegroundUsageConsumerValue {
+  scan: ActiveUsageScan;
+  ownsScan: boolean;
+}
+
+type ForegroundUsageConsumer = import('./usageAnalysisState.js').ForegroundUsageOperation<ForegroundUsageConsumerValue>;
 
 function toProtocolError(cause: unknown): { code: string; message: string } {
   if (cause instanceof Error) return { code: cause.name, message: cause.message };
@@ -94,20 +112,96 @@ function toProtocolError(cause: unknown): { code: string; message: string } {
 
 export class UsageAnalysisCoordinator {
   private readonly referenceStore = new UsageReferenceStore();
-  /** root -> packageName -> cached result. */
-  private readonly cache = new Map<string, Map<string, CachedUsage>>();
-  /** root -> fingerprint last auto-analyzed by requestBackgroundUsageRefresh. */
-  private readonly lastAutoFingerprint = new Map<string, ProjectSourceFingerprint>();
-  private activeCts: vscode.CancellationTokenSource | undefined;
+  private readonly analysisState = new UsageAnalysisState(USAGE_CACHE_TTL_MS);
+  /** Request-visible usage state currently rendered by package, scoped to its project. */
+  private readonly visibleUsageProjects = new Map<string, string>();
+  /** Cleanup findings have no protocol reset, so retain their real analysis time for an expired empty supersession result. */
+  private visibleCleanup: { projectId: string; analyzedAt?: string } | undefined;
+  /** The shared removal-impact result/analyzing state currently belongs to at most one project. */
+  private visibleRemovalImpactProjectId: string | undefined;
+  /** project id -> source identity last auto-analyzed by requestBackgroundUsageRefresh. */
+  private readonly lastAutoIdentity = new Map<string, UsageSourceIdentity>();
+  private activeScan: ActiveUsageScan | undefined;
+  private readonly foregroundOperations = new ForegroundUsageOperationRegistry<ForegroundUsageConsumerValue>();
   /** At most one slot: multiple requests before it can run collapse into it — force always wins. See requestBackgroundUsageRefresh. */
   private pendingBackgroundRequest: { force: boolean } | undefined;
-  /** Guards the async gap between deciding to run a pending request and handleAnalyzeCleanup actually claiming `activeCts`, so two callers racing to service the same pending slot can't both start a scan. */
+  /** Guards the async gap before handleAnalyzeCleanup claims `activeScan`, so racing callers cannot both start a scan. */
   private schedulingBackgroundRefresh = false;
 
   constructor(private readonly options: UsageCoordinatorOptions) {}
 
   isBusy(): boolean {
-    return this.activeCts !== undefined;
+    return this.activeScan !== undefined;
+  }
+
+  /**
+   * Synchronous watcher boundary. No source-tree read is needed: advancing
+   * this project-only generation immediately makes cache entries and async
+   * completions stale, while other projects remain isolated.
+   */
+  invalidateProjectSource(projectId = this.options.getSelectedProject()?.id): number {
+    if (projectId === undefined) return 0;
+    const generation = this.analysisState.invalidate(projectId);
+    this.lastAutoIdentity.delete(projectId);
+    if (this.activeScan?.projectId === projectId) this.activeScan.cts.cancel();
+    this.supersedeVisibleAnalysis(projectId);
+    return generation;
+  }
+
+  /**
+   * Cache invalidation alone is insufficient when a source-only watcher event
+   * does not replace the dashboard snapshot: already-rendered usage/removal
+   * evidence would otherwise remain visible until the user requested it
+   * again. Reuse only existing protocol states, and revoke opaque reference
+   * authority before publishing the supersession messages.
+   */
+  private supersedeVisibleAnalysis(projectId: string): void {
+    const packages = [...this.visibleUsageProjects]
+      .filter(([, visibleProjectId]) => visibleProjectId === projectId)
+      .map(([packageName]) => packageName);
+    const cleanupVisible = this.visibleCleanup?.projectId === projectId;
+    const removalVisible = this.visibleRemovalImpactProjectId === projectId;
+    if (
+      packages.length > 0 ||
+      cleanupVisible ||
+      removalVisible ||
+      this.options.getSelectedProject()?.id === projectId
+    ) this.referenceStore.clear();
+    if (packages.length === 0 && !cleanupVisible && !removalVisible) return;
+    for (const packageName of packages) {
+      this.visibleUsageProjects.delete(packageName);
+      this.options.sink.postMessage({
+        status: 'usage-error',
+        package: packageName,
+        error: {
+          code: 'STALE_SOURCE',
+          message: 'Project source or configuration changed. Re-analyze usage.',
+        },
+      });
+    }
+    if (cleanupVisible) {
+      const analyzedAt = this.visibleCleanup?.analyzedAt ?? new Date().toISOString();
+      this.visibleCleanup = undefined;
+      // There is no cleanup-idle protocol message. An empty result with an
+      // already-expired cache boundary clears stale likely-unused findings
+      // while accurately presenting the previous analysis as stale.
+      this.options.sink.postMessage({
+        status: 'cleanup-result',
+        findings: [],
+        analyzedAt,
+        cacheExpiresAt: new Date(0).toISOString(),
+      });
+    }
+    if (removalVisible) {
+      this.visibleRemovalImpactProjectId = undefined;
+      this.options.sink.postMessage({
+        status: 'removal-impact-error',
+        error: {
+          code: 'STALE_SOURCE',
+          message: 'Project source or configuration changed. Re-analyze removal impact.',
+        },
+      });
+    }
   }
 
   /**
@@ -131,9 +225,10 @@ export class UsageAnalysisCoordinator {
   }
 
   dispose(): void {
-    this.activeCts?.cancel();
-    this.activeCts?.dispose();
-    this.activeCts = undefined;
+    this.activeScan?.cts.cancel();
+    this.foregroundOperations.cancelActive((consumer) => {
+      if (shouldCancelUnderlyingUsageScan(consumer.ownsScan)) consumer.scan.cts.cancel();
+    });
     this.pendingBackgroundRequest = undefined;
     this.referenceStore.clear();
   }
@@ -149,40 +244,108 @@ export class UsageAnalysisCoordinator {
     });
   }
 
-  private getCached(root: string, packageName: string, fingerprint: ProjectSourceFingerprint): CachedUsage | undefined {
-    const entry = this.cache.get(root)?.get(packageName);
-    if (entry === undefined) return undefined;
-    if (Date.now() - entry.cachedAt > USAGE_CACHE_TTL_MS) return undefined;
-    if (!sourceFingerprintsMatch(entry.fingerprint, fingerprint)) return undefined;
-    return entry;
+  private identityFor(controller: DashboardController, selected: DiscoveredProject): UsageSourceIdentity {
+    return this.analysisState.identity(selected.id, this.fingerprintFor(controller));
   }
 
-  private setCached(root: string, packageName: string, fingerprint: ProjectSourceFingerprint, result: DependencyUsageResult): CachedUsage {
-    let projectCache = this.cache.get(root);
-    if (projectCache === undefined) {
-      projectCache = new Map();
-      this.cache.set(root, projectCache);
-    }
-    const entry = { result, fingerprint, cachedAt: Date.now() };
-    projectCache.set(packageName, entry);
-    return entry;
+  private isCurrent(projectId: string, identity: UsageSourceIdentity): boolean {
+    return this.analysisState.isCurrent(projectId, identity);
+  }
+
+  private startScan(input: {
+    projectId: string;
+    identity: UsageSourceIdentity;
+    selected: DiscoveredProject;
+    manifestText: string;
+    packageNames: readonly string[];
+    backgroundOwner: boolean;
+    performance: ReturnType<typeof createPerformanceSession>;
+    onProgress?: (scanned: number, total: number) => void;
+  }): ActiveUsageScan {
+    const cts = new vscode.CancellationTokenSource();
+    const progressSubscribers = new Set<(scanned: number, total: number) => void>();
+    if (input.onProgress !== undefined) progressSubscribers.add(input.onProgress);
+    const scan = {
+      projectId: input.projectId,
+      identity: input.identity,
+      packageNames: new Set(input.packageNames),
+      backgroundOwner: input.backgroundOwner,
+      cts,
+      progressSubscribers,
+      promise: Promise.resolve(new Map<string, DependencyUsageResult>()),
+    } satisfies ActiveUsageScan;
+    scan.promise = analyzeDependencyUsage({
+      folder: input.selected.folder,
+      dir: input.selected.dir,
+      manifestText: input.manifestText,
+      packageNames: input.packageNames,
+      token: cts.token,
+      performance: input.performance,
+      onProgress: (scanned, total) => {
+        for (const subscriber of progressSubscribers) subscriber(scanned, total);
+      },
+    }).finally(() => {
+      if (this.activeScan === scan) {
+        this.activeScan = undefined;
+        cts.dispose();
+        this.triggerPendingBackgroundRefresh();
+      }
+    });
+    this.activeScan = scan;
+    return scan;
+  }
+
+  private joinBackgroundScan(
+    projectId: string,
+    identity: UsageSourceIdentity,
+    packageNames: readonly string[]
+  ): ActiveUsageScan | undefined {
+    const scan = this.activeScan;
+    if (scan === undefined || !canJoinBackgroundUsageScan({
+      backgroundOwner: scan.backgroundOwner,
+      scanProjectId: scan.projectId,
+      requestedProjectId: projectId,
+      scanIdentity: scan.identity,
+      requestedIdentity: identity,
+      scannedPackages: scan.packageNames,
+      requestedPackages: packageNames,
+    })) return undefined;
+    return scan;
+  }
+
+  private createForegroundConsumer(
+    scan: ActiveUsageScan,
+    ownsScan: boolean
+  ): ForegroundUsageConsumer | undefined {
+    return this.foregroundOperations.claim({ scan, ownsScan });
+  }
+
+  private releaseForegroundConsumer(consumer: ForegroundUsageConsumer): void {
+    this.foregroundOperations.release(consumer);
+  }
+
+  private cancelForegroundConsumer(consumer: ForegroundUsageConsumer): void {
+    this.foregroundOperations.cancel(consumer, (active) => {
+      if (shouldCancelUnderlyingUsageScan(active.ownsScan)) active.scan.cts.cancel();
+    });
+  }
+
+  private cacheResults(
+    projectId: string,
+    identity: UsageSourceIdentity,
+    results: ReadonlyMap<string, DependencyUsageResult>
+  ): void {
+    if (!this.isCurrent(projectId, identity)) return;
+    for (const [name, result] of results) this.analysisState.set(projectId, name, identity, result);
   }
 
   /** On-demand, single-package usage scan — never runs a full cleanup pass just to answer one package. */
   async handleWhereUsed(message: WhereUsedMessage, bypassCache = false): Promise<void> {
-    if (this.isBusy()) {
-      this.options.sink.postMessage({
-        status: 'usage-error',
-        package: message.package,
-        error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Another usage analysis is already in progress for this project.' },
-      });
-      return;
-    }
-
     const controller = await this.options.ensureController();
     if (controller === undefined) return;
     const row = controller.lastResultRows().find((candidate) => candidate.name === message.package);
     if (row === undefined) {
+      this.visibleUsageProjects.delete(message.package);
       this.options.sink.postMessage({
         status: 'usage-error',
         package: message.package,
@@ -193,16 +356,18 @@ export class UsageAnalysisCoordinator {
     const selected = this.options.getSelectedProject();
     if (selected === undefined) return;
 
-    const fingerprint = this.fingerprintFor(controller);
+    const identity = this.identityFor(controller, selected);
     const performance = createPerformanceSession(
       'Dependency Dashboard usage analysis',
       this.options.performanceEnabled?.() ?? false
     );
     const endCache = performance.start('usage cache lookup');
-    const cached = bypassCache ? undefined : this.getCached(controller.root, message.package, fingerprint);
+    const cached = bypassCache ? undefined : this.analysisState.get(selected.id, message.package, identity);
+    if (cached !== undefined) performance.increment('usage cache hits');
     endCache({ hit: cached !== undefined, bypassed: bypassCache });
     if (cached !== undefined) {
       const usageId = this.referenceStore.store(message.package, cached.result, selected.folder);
+      this.visibleUsageProjects.set(message.package, selected.id);
       this.options.sink.postMessage({
         status: 'usage-result',
         package: message.package,
@@ -217,25 +382,56 @@ export class UsageAnalysisCoordinator {
       return;
     }
 
+    if (this.foregroundOperations.isClaimed()) {
+      this.visibleUsageProjects.delete(message.package);
+      this.options.sink.postMessage(foregroundUsageBusyMessage('usage', message.package));
+      performance.finish({ cached: false, joined: false });
+      return;
+    }
+
+    let scan = this.joinBackgroundScan(selected.id, identity, [message.package]);
+    const joined = scan !== undefined;
+    if (joined) performance.increment('usage joined scans');
+    if (scan === undefined && this.isBusy()) {
+      this.visibleUsageProjects.delete(message.package);
+      this.options.sink.postMessage(foregroundUsageBusyMessage('usage', message.package));
+      performance.finish({ cached: false, joined: false });
+      return;
+    }
+    this.visibleUsageProjects.set(message.package, selected.id);
     this.options.sink.postMessage({ status: 'usage-analyzing', package: message.package });
-    const cts = new vscode.CancellationTokenSource();
-    this.activeCts = cts;
+    const source = controller.upgradeSource;
+    scan ??= this.startScan({
+      projectId: selected.id,
+      identity,
+      selected,
+      manifestText: source.manifestText,
+      packageNames: [message.package],
+      backgroundOwner: false,
+      performance,
+    });
+    const consumer = this.createForegroundConsumer(scan, !joined);
+    if (consumer === undefined) {
+      if (!joined) scan.cts.cancel();
+      this.visibleUsageProjects.delete(message.package);
+      this.options.sink.postMessage(foregroundUsageBusyMessage('usage', message.package));
+      performance.finish({ cached: false, joined });
+      return;
+    }
     try {
-      const source = controller.upgradeSource;
-      const resultsByPackage = await analyzeDependencyUsage({
-        folder: selected.folder,
-        dir: selected.dir,
-        manifestText: source.manifestText,
-        packageNames: [message.package],
-        token: cts.token,
-        performance,
-      });
-      if (this.options.isDisposed() || this.activeCts !== cts) return;
+      const resultsByPackage = await scan.promise;
+      if (
+        consumer.cancelled ||
+        scan.cts.token.isCancellationRequested ||
+        this.options.isDisposed() ||
+        !this.isCurrent(selected.id, identity)
+      ) return;
 
       const result = resultsByPackage.get(message.package);
       if (result === undefined) return;
-      const cachedEntry = this.setCached(controller.root, message.package, fingerprint, result);
+      const cachedEntry = this.analysisState.set(selected.id, message.package, identity, result);
       const usageId = this.referenceStore.store(message.package, result, selected.folder);
+      this.visibleUsageProjects.set(message.package, selected.id);
       this.options.sink.postMessage({
         status: 'usage-result',
         package: message.package,
@@ -247,16 +443,17 @@ export class UsageAnalysisCoordinator {
         },
       });
     } catch (cause) {
-      if (!this.options.isDisposed()) {
+      const failureAudience = usageScanFailureAudience({
+        backgroundOwner: scan.backgroundOwner,
+        foregroundWaiters: consumer.cancelled ? 0 : 1,
+      });
+      if (failureAudience !== 'quiet' && !consumer.cancelled && !this.options.isDisposed() && this.isCurrent(selected.id, identity)) {
+        this.visibleUsageProjects.delete(message.package);
         this.options.sink.postMessage({ status: 'usage-error', package: message.package, error: toProtocolError(cause) });
       }
     } finally {
-      if (this.activeCts === cts) {
-        cts.dispose();
-        this.activeCts = undefined;
-        this.triggerPendingBackgroundRefresh();
-      }
-      performance.finish({ cached: false });
+      this.releaseForegroundConsumer(consumer);
+      performance.finish({ cached: false, joined });
     }
   }
 
@@ -289,6 +486,17 @@ export class UsageAnalysisCoordinator {
 
     const controller = await this.options.ensureController();
     if (controller === undefined) return false;
+    // `ensureController` may yield while another request starts a scan. Do
+    // not overwrite that scan's ownership after the initial fast-path check.
+    if (this.isBusy()) {
+      if (!background) {
+        this.options.sink.postMessage({
+          status: 'cleanup-error',
+          error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Another usage analysis is already in progress for this project.' },
+        });
+      }
+      return false;
+    }
     const rows = controller.lastResultRows();
     const packageNames = rows.map((row) => row.name);
     const selected = this.options.getSelectedProject();
@@ -296,6 +504,7 @@ export class UsageAnalysisCoordinator {
 
     if (packageNames.length === 0) {
       const analyzedAt = new Date().toISOString();
+      this.visibleCleanup = { projectId: selected.id, analyzedAt };
       this.options.sink.postMessage({
         status: 'cleanup-result',
         findings: [],
@@ -305,39 +514,58 @@ export class UsageAnalysisCoordinator {
       return true;
     }
 
-    const cts = new vscode.CancellationTokenSource();
-    this.activeCts = cts;
     const performance = createPerformanceSession(
       'Dependency Dashboard cleanup usage analysis',
       this.options.performanceEnabled?.() ?? false
     );
     performance.setMetadata('direct dependencies', packageNames.length);
     performance.setMetadata('background', background);
-    if (!background) this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned: 0, total: 0 });
+    if (!background) {
+      const previousAnalyzedAt = this.visibleCleanup?.projectId === selected.id
+        ? this.visibleCleanup.analyzedAt
+        : undefined;
+      this.visibleCleanup = { projectId: selected.id, ...(previousAnalyzedAt === undefined
+        ? {}
+        : { analyzedAt: previousAnalyzedAt }) };
+      this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned: 0, total: 0 });
+    }
 
+    const identity = this.identityFor(controller, selected);
+    let consumer: ForegroundUsageConsumer | undefined;
     try {
       const source = controller.upgradeSource;
       const runScan = async (
         progress: vscode.Progress<{ message?: string; increment?: number }> | undefined,
         onCancellationToken: vscode.CancellationToken | undefined
       ): Promise<Map<string, DependencyUsageResult>> => {
-        const cancellation = onCancellationToken?.onCancellationRequested(() => cts.cancel());
+        let lastScanned = 0;
+        const scan = this.startScan({
+          projectId: selected.id,
+          identity,
+          selected,
+          manifestText: source.manifestText,
+          packageNames,
+          backgroundOwner: background,
+          performance,
+          onProgress: (scanned, total) => {
+            const increment = total > 0 ? ((scanned - lastScanned) / total) * 100 : 0;
+            lastScanned = scanned;
+            progress?.report({ message: `${scanned} of ${total} files checked`, increment });
+            if (!background) this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned, total });
+          },
+        });
+        if (!background) {
+          consumer = this.createForegroundConsumer(scan, true);
+          if (consumer === undefined) {
+            scan.cts.cancel();
+            throw new Error('Another usage analysis is already in progress for this project.');
+          }
+        }
+        const cancellation = onCancellationToken?.onCancellationRequested(() => {
+          if (consumer !== undefined) this.cancelForegroundConsumer(consumer);
+        });
         try {
-          let lastScanned = 0;
-          return await analyzeDependencyUsage({
-            folder: selected.folder,
-            dir: selected.dir,
-            manifestText: source.manifestText,
-            packageNames,
-            token: cts.token,
-            performance,
-            onProgress: (scanned, total) => {
-              const increment = total > 0 ? ((scanned - lastScanned) / total) * 100 : 0;
-              lastScanned = scanned;
-              progress?.report({ message: `${scanned} of ${total} files checked`, increment });
-              if (!background) this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned, total });
-            },
-          });
+          return await scan.promise;
         } finally {
           cancellation?.dispose();
         }
@@ -348,32 +576,36 @@ export class UsageAnalysisCoordinator {
             { location: vscode.ProgressLocation.Notification, title: 'Analyzing dependency usage', cancellable: true },
             (progress, token) => runScan(progress, token)
           );
-      if (cts.token.isCancellationRequested || this.options.isDisposed() || this.activeCts !== cts) return false;
+      if (
+        consumer?.cancelled === true ||
+        this.options.isDisposed() ||
+        !this.isCurrent(selected.id, identity)
+      ) return false;
 
-      const fingerprint = this.fingerprintFor(controller);
       const findings: DependencyFinding[] = [];
       let analyzedAt = new Date().toISOString();
       let cacheExpiresAt = new Date(Date.now() + USAGE_CACHE_TTL_MS).toISOString();
       for (const [name, result] of resultsByPackage) {
-        const cachedEntry = this.setCached(controller.root, name, fingerprint, result);
+        const cachedEntry = this.analysisState.set(selected.id, name, identity, result);
         analyzedAt = result.scannedAt;
         cacheExpiresAt = new Date(cachedEntry.cachedAt + USAGE_CACHE_TTL_MS).toISOString();
         const finding = buildUnusedFinding(name, result);
         if (finding !== null) findings.push(finding);
       }
+      this.visibleCleanup = { projectId: selected.id, analyzedAt };
       this.options.sink.postMessage({ status: 'cleanup-result', findings, analyzedAt, cacheExpiresAt });
       return true;
     } catch (cause) {
-      if (!background && !this.options.isDisposed()) {
+      const failureAudience = usageScanFailureAudience({
+        backgroundOwner: background,
+        foregroundWaiters: 0,
+      });
+      if (failureAudience === 'owner' && consumer?.cancelled !== true && !this.options.isDisposed() && this.isCurrent(selected.id, identity)) {
         this.options.sink.postMessage({ status: 'cleanup-error', error: toProtocolError(cause) });
       }
       return false;
     } finally {
-      if (this.activeCts === cts) {
-        cts.dispose();
-        this.activeCts = undefined;
-        this.triggerPendingBackgroundRefresh();
-      }
+      if (consumer !== undefined) this.releaseForegroundConsumer(consumer);
       performance.finish();
     }
   }
@@ -387,7 +619,7 @@ export class UsageAnalysisCoordinator {
    * (foreground or background) is in flight, or the panel's upgrade/remove
    * mutation lock is still held — it records the request and returns;
    * `triggerPendingBackgroundRefresh` (called from every place this
-   * coordinator's own `activeCts` is cleared) and DashboardPanel's
+   * coordinator's own `activeScan` is cleared) and DashboardPanel's
    * post-mutation-lock-release hook both retry it the moment whatever was
    * blocking it clears.
    *
@@ -436,12 +668,14 @@ export class UsageAnalysisCoordinator {
         return;
       }
 
-      const fingerprint = this.fingerprintFor(controller);
-      const last = this.lastAutoFingerprint.get(controller.root);
-      if (!shouldRunBackgroundUsageRefresh(pending.force, last, fingerprint)) return;
+      const selected = this.options.getSelectedProject();
+      if (selected === undefined) return;
+      const identity = this.identityFor(controller, selected);
+      const last = this.lastAutoIdentity.get(selected.id);
+      if (!shouldRunBackgroundUsageRefresh(pending.force, last, identity)) return;
 
       const completed = await this.handleAnalyzeCleanup({ background: true });
-      if (completed) this.lastAutoFingerprint.set(controller.root, fingerprint);
+      if (completed && this.isCurrent(selected.id, identity)) this.lastAutoIdentity.set(selected.id, identity);
     } finally {
       this.schedulingBackgroundRefresh = false;
     }
@@ -451,7 +685,10 @@ export class UsageAnalysisCoordinator {
   }
 
   private triggerPendingBackgroundRefresh(): void {
-    void this.runPendingBackgroundRefresh();
+    // This path has no foreground caller to receive a rejection. Background
+    // refresh errors are intentionally quiet, but must never become an
+    // unhandled promise rejection in the extension host.
+    void this.runPendingBackgroundRefresh().catch(() => undefined);
   }
 
   /**
@@ -459,7 +696,7 @@ export class UsageAnalysisCoordinator {
    * "Analyze removal" card in the Manage dependency modal, and the bulk
    * Review step's inline impact check (see Part 5 of the redesign brief),
    * both funnel through here. Shares this coordinator's own single-flight
-   * `activeCts` guard, the identical one-pass `analyzeDependencyUsage` batch
+   * shared scan guard, the identical one-pass `analyzeDependencyUsage` batch
    * scan `handleAnalyzeCleanup` already uses (one workspace read regardless
    * of how many packages are requested), and the same `UsageReferenceStore`
    * — "View references" on a source-reference evidence entry opens through
@@ -479,14 +716,6 @@ export class UsageAnalysisCoordinator {
    * `handleWhereUsed` applies to a single package name.
    */
   async handleAnalyzeRemovalImpact(message: AnalyzeRemovalImpactMessage): Promise<void> {
-    if (this.isBusy()) {
-      this.options.sink.postMessage({
-        status: 'removal-impact-error',
-        error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Another usage analysis is already in progress for this project.' },
-      });
-      return;
-    }
-
     const controller = await this.options.ensureController();
     if (controller === undefined) return;
     const rowNames = new Set(controller.lastResultRows().map((row) => row.name));
@@ -495,18 +724,31 @@ export class UsageAnalysisCoordinator {
     if (selected === undefined) return;
 
     if (packageNames.length === 0) {
+      this.visibleRemovalImpactProjectId = selected.id;
       this.options.sink.postMessage({ status: 'removal-impact-result', assessments: [], generatedAt: new Date().toISOString() });
       return;
     }
 
-    const cts = new vscode.CancellationTokenSource();
-    this.activeCts = cts;
     const performance = createPerformanceSession(
       'Dependency Dashboard removal impact analysis',
       this.options.performanceEnabled?.() ?? false
     );
     performance.setMetadata('candidates', packageNames.length);
-    this.options.sink.postMessage({ status: 'removal-impact-analyzing', scanned: 0, total: 0 });
+    const identity = this.identityFor(controller, selected);
+    const endCache = performance.start('removal usage cache lookup');
+    const cached = this.analysisState.getComplete(selected.id, packageNames, identity);
+    if (cached !== undefined) performance.increment('usage cache hits', cached.size);
+    endCache({ hit: cached !== undefined, packages: cached?.size ?? 0 });
+    let consumer: ForegroundUsageConsumer | undefined;
+    let joinedProgressSubscriber: ((scanned: number, total: number) => void) | undefined;
+    let joined = false;
+
+    if (cached === undefined && this.foregroundOperations.isClaimed()) {
+      this.visibleRemovalImpactProjectId = undefined;
+      this.options.sink.postMessage(foregroundUsageBusyMessage('removal'));
+      performance.finish({ packages: packageNames.length, cached: false, joined: false });
+      return;
+    }
 
     try {
       const source = controller.upgradeSource;
@@ -520,21 +762,61 @@ export class UsageAnalysisCoordinator {
       });
       const removing = new Set(packageNames);
 
-      const resultsByPackage = await analyzeDependencyUsage({
-        folder: selected.folder,
-        dir: selected.dir,
-        manifestText: source.manifestText,
-        packageNames,
-        token: cts.token,
-        performance,
-        onProgress: (scanned, total) => {
-          this.options.sink.postMessage({ status: 'removal-impact-analyzing', scanned, total });
-        },
-      });
+      let resultsByPackage: ReadonlyMap<string, DependencyUsageResult>;
+      if (cached !== undefined) {
+        resultsByPackage = new Map([...cached].map(([name, entry]) => [name, entry.result]));
+      } else {
+        let scan = this.joinBackgroundScan(selected.id, identity, packageNames);
+        joined = scan !== undefined;
+        if (joined) performance.increment('usage joined scans');
+        if (scan === undefined && this.isBusy()) {
+          this.visibleRemovalImpactProjectId = undefined;
+          this.options.sink.postMessage(foregroundUsageBusyMessage('removal'));
+          return;
+        }
+        this.visibleRemovalImpactProjectId = selected.id;
+        this.options.sink.postMessage({ status: 'removal-impact-analyzing', scanned: 0, total: 0 });
+        scan ??= this.startScan({
+          projectId: selected.id,
+          identity,
+          selected,
+          manifestText: source.manifestText,
+          packageNames,
+          backgroundOwner: false,
+          performance,
+          onProgress: (scanned, total) => {
+            this.options.sink.postMessage({ status: 'removal-impact-analyzing', scanned, total });
+          },
+        });
+        if (joined) {
+          joinedProgressSubscriber = (scanned, total) => {
+            if (consumer?.cancelled === true) return;
+            this.options.sink.postMessage({ status: 'removal-impact-analyzing', scanned, total });
+          };
+          scan.progressSubscribers.add(joinedProgressSubscriber);
+        }
+        consumer = this.createForegroundConsumer(scan, !joined);
+        if (consumer === undefined) {
+          if (!joined) scan.cts.cancel();
+          this.visibleRemovalImpactProjectId = undefined;
+          this.options.sink.postMessage(foregroundUsageBusyMessage('removal'));
+          return;
+        }
+        resultsByPackage = await scan.promise;
+        if (
+          consumer.cancelled ||
+          scan.cts.token.isCancellationRequested ||
+          this.options.isDisposed() ||
+          !this.isCurrent(selected.id, identity)
+        ) return;
+        // Fresh removal scans and joined cleanup scans both make their
+        // bounded parsed results reusable by later usage/removal requests.
+        this.cacheResults(selected.id, identity, resultsByPackage);
+      }
       // Cancellation means the user closed the review before results were
       // ready — same discipline as a cancelled background cleanup scan:
       // never publish a partial result as if it were complete.
-      if (this.options.isDisposed() || this.activeCts !== cts || cts.token.isCancellationRequested) return;
+      if (this.options.isDisposed() || !this.isCurrent(selected.id, identity)) return;
 
       // analyzeDependencyUsage always returns an entry for every name it was
       // given (see its own implementation), so `usageResult` is only ever
@@ -551,23 +833,30 @@ export class UsageAnalysisCoordinator {
         return [{ packageName: name, assessment, usageId }];
       });
 
+      this.visibleRemovalImpactProjectId = selected.id;
       this.options.sink.postMessage({ status: 'removal-impact-result', assessments, generatedAt: new Date().toISOString() });
     } catch (cause) {
-      if (!this.options.isDisposed()) {
+      const failureAudience = usageScanFailureAudience({
+        backgroundOwner: consumer?.value.scan.backgroundOwner ?? false,
+        foregroundWaiters: consumer?.cancelled === true ? 0 : 1,
+      });
+      if (failureAudience !== 'quiet' && consumer?.cancelled !== true && !this.options.isDisposed() && this.isCurrent(selected.id, identity)) {
+        this.visibleRemovalImpactProjectId = undefined;
         this.options.sink.postMessage({ status: 'removal-impact-error', error: toProtocolError(cause) });
       }
     } finally {
-      if (this.activeCts === cts) {
-        cts.dispose();
-        this.activeCts = undefined;
-        this.triggerPendingBackgroundRefresh();
+      if (joinedProgressSubscriber !== undefined && consumer !== undefined) {
+        consumer.value.scan.progressSubscribers.delete(joinedProgressSubscriber);
       }
-      performance.finish({ packages: packageNames.length });
+      if (consumer !== undefined) this.releaseForegroundConsumer(consumer);
+      performance.finish({ packages: packageNames.length, cached: cached !== undefined, joined });
     }
   }
 
   handleCancel(): void {
-    this.activeCts?.cancel();
+    this.foregroundOperations.cancelActive((consumer) => {
+      if (shouldCancelUnderlyingUsageScan(consumer.ownsScan)) consumer.scan.cts.cancel();
+    });
   }
 
   /**

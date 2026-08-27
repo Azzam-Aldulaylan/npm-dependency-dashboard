@@ -120,6 +120,9 @@ test('an empty row set is all zeros', () => {
     total: 0,
     updatesAvailable: 0,
     majorUpdates: 0,
+    minorUpdates: 0,
+    patchUpdates: 0,
+    otherUpdates: 0,
     vulnerable: 0,
     criticalVulnerabilities: 0,
     highVulnerabilities: 0,
@@ -135,7 +138,9 @@ test('counts are tallied across a mixed row set', () => {
   const rows = [
     row({ name: 'clean' }),
     row({ name: 'minor-update', wanted: '1.1.0', latest: '1.1.0' }),
+    row({ name: 'patch-update', wanted: '1.0.1', latest: '1.0.1' }),
     row({ name: 'major-update', wanted: '1.0.0', latest: '2.0.0' }),
+    row({ name: 'unclassified-update', wanted: 'next', latest: 'next' }),
     row({ name: 'critical-vuln', worstSeverity: 'critical' }),
     row({ name: 'high-vuln', worstSeverity: 'high' }),
     row({ name: 'moderate-vuln', worstSeverity: 'moderate' }),
@@ -144,9 +149,12 @@ test('counts are tallied across a mixed row set', () => {
   ];
 
   assert.deepEqual(summaryMetrics(rows), {
-    total: 8,
-    updatesAvailable: 2,
+    total: 10,
+    updatesAvailable: 4,
     majorUpdates: 1,
+    minorUpdates: 1,
+    patchUpdates: 1,
+    otherUpdates: 1,
     vulnerable: 4,
     criticalVulnerabilities: 1,
     highVulnerabilities: 1,
@@ -164,19 +172,70 @@ test('updates subtitle: up to date when nothing is outdated', () => {
   assert.equal(updatesCardSubtitle(summaryMetrics([])), 'Up to date');
 });
 
-test('updates subtitle: major count takes priority when any major update exists', () => {
-  const rows = [row({ current: '1.0.0', wanted: '1.0.0', latest: '2.0.0' })];
-  assert.equal(updatesCardSubtitle(summaryMetrics(rows)), '1 major');
+test('updates subtitle: mixed major, minor, and patch updates are all shown highest to lowest', () => {
+  const rows = [
+    row({ name: 'patch', wanted: '1.0.1', latest: '1.0.1' }),
+    row({ name: 'major', wanted: '1.0.0', latest: '2.0.0' }),
+    row({ name: 'minor', wanted: '1.1.0', latest: '1.1.0' }),
+  ];
+  assert.equal(updatesCardSubtitle(summaryMetrics(rows)), '1 major · 1 minor · 1 patch');
 });
 
-test('updates subtitle: falls back to a percentage when no update is major', () => {
+test('updates subtitle: a major update does not hide additional non-major updates', () => {
   const rows = [
-    row({ wanted: '1.1.0', latest: '1.1.0' }),
-    row({ name: 'other' }),
-    row({ name: 'other2' }),
-    row({ name: 'other3' }),
+    row({ name: 'major', latest: '2.0.0' }),
+    row({ name: 'minor-a', wanted: '1.1.0', latest: '1.1.0' }),
+    row({ name: 'minor-b', wanted: '1.2.0', latest: '1.2.0' }),
   ];
-  assert.equal(updatesCardSubtitle(summaryMetrics(rows)), '25% of dependencies');
+  assert.equal(updatesCardSubtitle(summaryMetrics(rows)), '1 major · 2 minor');
+});
+
+test('updates subtitle: minor-only updates retain their category', () => {
+  const rows = [
+    row({ name: 'a', wanted: '1.1.0', latest: '1.1.0' }),
+    row({ name: 'b', wanted: '1.2.0', latest: '1.2.0' }),
+  ];
+  assert.equal(updatesCardSubtitle(summaryMetrics(rows)), '2 minor');
+});
+
+test('updates subtitle: patch-only updates retain their category', () => {
+  const rows = [
+    row({ name: 'a', wanted: '1.0.1', latest: '1.0.1' }),
+    row({ name: 'b', wanted: '1.0.2', latest: '1.0.2' }),
+  ];
+  assert.equal(updatesCardSubtitle(summaryMetrics(rows)), '2 patch');
+});
+
+test('updates subtitle: invalid semver updates are accounted for as other', () => {
+  const rows = [
+    row({ name: 'invalid-target', wanted: 'next', latest: 'next' }),
+    row({ name: 'invalid-current', current: 'workspace:*', wanted: '1.0.0', latest: '1.0.0' }),
+  ];
+  assert.equal(updatesCardSubtitle(summaryMetrics(rows)), '2 other');
+});
+
+test('updates subtitle: zero categories are omitted without disturbing category order', () => {
+  const rows = [
+    row({ name: 'major', latest: '2.0.0' }),
+    row({ name: 'patch', wanted: '1.0.1', latest: '1.0.1' }),
+    row({ name: 'other', wanted: 'next', latest: 'next' }),
+  ];
+  assert.equal(updatesCardSubtitle(summaryMetrics(rows)), '1 major · 1 patch · 1 other');
+});
+
+test('update category counts completely account for the updates-available headline', () => {
+  const metrics = summaryMetrics([
+    row({ name: 'major-a', latest: '2.0.0' }),
+    row({ name: 'major-b', latest: '3.0.0' }),
+    row({ name: 'minor', wanted: '1.1.0', latest: '1.1.0' }),
+    row({ name: 'patch', wanted: '1.0.1', latest: '1.0.1' }),
+    row({ name: 'other', wanted: 'next', latest: 'next' }),
+    row({ name: 'current' }),
+  ]);
+  const classifiedTotal =
+    metrics.majorUpdates + metrics.minorUpdates + metrics.patchUpdates + metrics.otherUpdates;
+  assert.equal(classifiedTotal, metrics.updatesAvailable);
+  assert.equal(updatesCardSubtitle(metrics), '2 major · 1 minor · 1 patch · 1 other');
 });
 
 test('vulnerabilities subtitle: clean set says so', () => {

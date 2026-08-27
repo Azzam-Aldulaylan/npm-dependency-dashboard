@@ -23,7 +23,12 @@ import type { DependencyUsageResult } from '../../core/usage/types.js';
 import { UsageReferenceIndex } from '../../core/usage/referenceIndex.js';
 import type { PerformanceRecorder } from '../../core/performance/measurement.js';
 import { NOOP_PERFORMANCE_RECORDER } from '../../core/performance/measurement.js';
-import { findConfigFiles, findSourceFiles, readTextFileCapped, relativeToFolder } from './workspaceFiles.js';
+import {
+  findConfigFiles,
+  findSourceFiles,
+  planWorkspaceFiles,
+  readTextFileCapped,
+} from './workspaceFiles.js';
 
 const DEFAULT_MAX_FILES = 6000;
 
@@ -48,24 +53,67 @@ export async function analyzeDependencyUsage(
   const performance = options.performance ?? NOOP_PERFORMANCE_RECORDER;
 
   const endDiscovery = performance.start('usage file discovery');
-  const sourceFiles = await findSourceFiles(options.folder, options.dir, maxFiles, options.token);
-  endDiscovery({ files: sourceFiles.length });
+  const [sourceFiles, configFiles] = await Promise.all([
+    findSourceFiles(options.folder, options.dir, maxFiles, options.token),
+    findConfigFiles(options.folder, options.dir, options.token),
+  ]);
+  const files = planWorkspaceFiles(options.folder, sourceFiles, configFiles);
+  const overlappingFiles = sourceFiles.length + configFiles.length - files.length;
+  performance.increment('usage source discoveries', sourceFiles.length);
+  performance.increment('usage config discoveries', configFiles.length);
+  performance.increment('usage unique files', files.length);
+  endDiscovery({
+    'source files': sourceFiles.length,
+    'config files': configFiles.length,
+    'unique files': files.length,
+    overlaps: overlappingFiles,
+  });
   const fileCapReached = sourceFiles.length >= maxFiles;
 
-  const endSourceScan = performance.start('usage source scan');
-  const sourceScan = await scanFilesBounded({
-    items: sourceFiles,
-    read: readTextFileCapped,
-    consume: (uri, text) => {
-      const filePath = relativeToFolder(options.folder, uri);
-      if (filePath !== null) referenceIndex.addSourceFile(filePath, text);
+  let scannedSourceFiles = 0;
+  const endWorkspaceScan = performance.start('usage workspace scan');
+  const workspaceScan = await scanFilesBounded({
+    items: files,
+    read: ({ uri }) => readTextFileCapped(uri, {
+      onStat: () => performance.increment('usage stats'),
+      onRead: (bytes) => {
+        performance.increment('usage reads');
+        performance.increment('usage bytes', bytes);
+      },
+    }),
+    consume: (file, text) => {
+      if (file.source) referenceIndex.addSourceFile(file.filePath, text);
+      if (!file.config) return;
+      const configName = file.filePath.slice(file.filePath.lastIndexOf('/') + 1);
+      for (const name of requested) {
+        if (configReferencesPackage(text, name)) {
+          referenceIndex.addReference(name, {
+            filePath: file.filePath,
+            line: 0,
+            column: 0,
+            snippet: configName,
+            kind: 'config',
+            context: configName,
+          });
+        }
+      }
     },
     isCancelled: () => options.token.isCancellationRequested,
-    ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+    onItemProcessed: (file) => {
+      if (!file.source) return;
+      scannedSourceFiles += 1;
+      options.onProgress?.(scannedSourceFiles, sourceFiles.length);
+    },
   });
-  const scanned = sourceScan.processed;
-  let cancelledEarly = sourceScan.cancelled;
-  endSourceScan({ files: scanned, packages: requested.size });
+  // A cancellation can settle during discovery with an empty/partial result,
+  // before the bounded scanner has an item on which to observe it. Never
+  // publish that degraded pass as complete.
+  const cancelledEarly = workspaceScan.cancelled || options.token.isCancellationRequested;
+  endWorkspaceScan({
+    'unique files': workspaceScan.processed,
+    'source files': scannedSourceFiles,
+    packages: requested.size,
+  });
 
   for (const name of requested) {
     for (const scriptMatch of findPackageInScripts(options.manifestText, name)) {
@@ -80,35 +128,6 @@ export async function analyzeDependencyUsage(
     }
   }
 
-  if (!options.token.isCancellationRequested) {
-    const endConfigScan = performance.start('usage config scan');
-    const configFiles = await findConfigFiles(options.folder, options.dir, options.token);
-    for (const uri of configFiles) {
-      if (options.token.isCancellationRequested) {
-        cancelledEarly = true;
-        break;
-      }
-      const text = await readTextFileCapped(uri);
-      if (text === null) continue;
-      const filePath = relativeToFolder(options.folder, uri);
-      if (filePath === null) continue;
-      const configName = filePath.slice(filePath.lastIndexOf('/') + 1);
-      for (const name of requested) {
-        if (configReferencesPackage(text, name)) {
-          referenceIndex.addReference(name, {
-            filePath,
-            line: 0,
-            column: 0,
-            snippet: configName,
-            kind: 'config',
-            context: configName,
-          });
-        }
-      }
-    }
-    endConfigScan({ files: configFiles.length });
-  }
-
   const scannedAt = new Date().toISOString();
   const truncated = fileCapReached || cancelledEarly;
   const results = new Map<string, DependencyUsageResult>();
@@ -117,7 +136,7 @@ export async function analyzeDependencyUsage(
       packageName: name,
       references: referenceIndex.forPackage(name),
       truncated,
-      scannedFileCount: scanned,
+      scannedFileCount: scannedSourceFiles,
       scannedAt,
     });
   }

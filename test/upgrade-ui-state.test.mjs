@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {
   applyUpgradeResultLocalFacts,
   manageRemovalReplacesUpgradeReview,
+  manageUpgradeReplacesRemovalReview,
   targetChangeInvalidatesManageAnalysis,
   upgradeAnalysisMessageMatchesRequest,
   upgradeAnalysisRequestIsAllowed,
@@ -75,6 +76,14 @@ test('starting removal replaces only the same package embedded upgrade review', 
   assert.equal(manageRemovalReplacesUpgradeReview('react', 'lodash', 'manage-dependency'), false);
   assert.equal(manageRemovalReplacesUpgradeReview('react', 'react', 'dashboard'), false);
   assert.equal(manageRemovalReplacesUpgradeReview('react', 'react', null), false);
+});
+
+test('starting an upgrade replaces only the same package embedded removal review', () => {
+  assert.equal(manageUpgradeReplacesRemovalReview('react', 'react', 'manage-dependency'), true);
+  assert.equal(manageUpgradeReplacesRemovalReview('react', null, 'manage-dependency'), false);
+  assert.equal(manageUpgradeReplacesRemovalReview('react', 'lodash', 'manage-dependency'), false);
+  assert.equal(manageUpgradeReplacesRemovalReview('react', 'react', 'dashboard'), false);
+  assert.equal(manageUpgradeReplacesRemovalReview('react', 'react', null), false);
 });
 
 // ------------------------------------------------------- clearing active state

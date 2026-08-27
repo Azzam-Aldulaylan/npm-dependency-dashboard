@@ -31,6 +31,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { NodeAuditRunner } from '../core/audit/npmAudit.js';
+import { BranchChangeCoordinator, realBranchTimerScheduler } from './branchChangeCoordinator.js';
 import { realTimerScheduler, BackgroundRefreshTimer } from '../core/cache/backgroundRefreshTimer.js';
 import type { FileChangeKind } from '../core/cache/fileChangeCoordinator.js';
 import { FileChangeCoordinator } from '../core/cache/fileChangeCoordinator.js';
@@ -50,9 +51,12 @@ import { reloadControllerFromDisk } from './fileChangeReload.js';
 import { pickProject } from './projectPicker.js';
 import type { DiscoveredProject, ResolvedProject } from './projectResolution.js';
 import { discoverProjects, loadProject } from './projectResolution.js';
+import { watchGitHead } from './gitHeadWatcher.js';
+import { reconcileProjectCandidates } from './projectReconciliation.js';
 import { UpgradeAssistantCoordinator } from './upgradeAssistantCoordinator.js';
 import { canRetryMutationEnrichment, classifyMutationEnrichmentStart } from './upgradeAssistantOutcome.js';
 import { UsageAnalysisCoordinator } from './usage/usageCoordinator.js';
+import { USAGE_FILE_WATCH_GLOB } from './usage/workspaceFiles.js';
 import type { ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
 import type { WebviewToHostMessage } from './webviewProtocol.js';
 import { isWebviewToHostMessage } from './webviewProtocol.js';
@@ -169,6 +173,11 @@ export class DashboardPanel {
   private projectCompatibilityInvalidationTimer: NodeJS.Timeout | undefined;
   /** Advanced before debouncing so final analysis reads can detect events that race their own snapshot. */
   private projectCompatibilitySourceGeneration = 0;
+  /** Optional built-in Git HEAD subscription for the repository containing the selected manifest. */
+  private gitHeadWatcher: vscode.Disposable | undefined;
+  private gitWatchedProjectPath: string | undefined;
+  private gitWatcherSetupGeneration = 0;
+  private branchProjectPickerCancellation: vscode.CancellationTokenSource | undefined;
   /**
    * Dev-mode-only ("F5" Extension Development Host) auto-reload: watches this
    * extension's own `dist/webview.{js,css}` and re-assigns `panel.webview.html`
@@ -183,10 +192,18 @@ export class DashboardPanel {
   private devReloadTimer: NodeJS.Timeout | undefined;
   /** Owns coalescing, upgrade-busy deferral, and serialized generation-checked reloads for watcher events — see fileChangeCoordinator.ts. This panel only owns the actual watcher subscriptions and debounce timing. */
   private readonly fileChangeCoordinator = new FileChangeCoordinator({
-    isBusy: () => this.upgradeCoordinator.isBusy(),
+    isBusy: () => this.upgradeCoordinator.isMutationBusy(),
     currentGeneration: () => this.reloadGeneration,
     reload: (kinds, generation) => this.reloadAfterFileChange(kinds, generation),
   });
+  private readonly branchChangeCoordinator = new BranchChangeCoordinator(
+    realBranchTimerScheduler,
+    {
+      isMutationBusy: () => this.upgradeCoordinator.isMutationBusy(),
+      reconcile: (generation) => this.reconcileAfterGitHeadChange(generation),
+    },
+    FILE_EVENT_DEBOUNCE_MS
+  );
   private readonly reloadSource: ReloadSource<DiscoveredProject> = {
     loadProject: (candidate) => this.loadProjectMeasured(candidate, 'Dependency Dashboard project reload'),
     toProjectInfo,
@@ -229,6 +246,10 @@ export class DashboardPanel {
         await this.fileChangeCoordinator.flushAll();
       },
       onMutationLockReleased: () => {
+        if (this.branchChangeCoordinator.hasPending) {
+          this.branchChangeCoordinator.mutationReleased();
+          return;
+        }
         void this.usageCoordinator.runPendingBackgroundRefresh();
       },
       performanceEnabled: this.performanceEnabled,
@@ -292,6 +313,12 @@ export class DashboardPanel {
         this.upgradeCoordinator.disposeWhenIdle();
         this.usageCoordinator.dispose();
         this.disposeWatchers();
+        this.gitHeadWatcher?.dispose();
+        this.gitHeadWatcher = undefined;
+        this.branchProjectPickerCancellation?.cancel();
+        this.branchProjectPickerCancellation?.dispose();
+        this.branchProjectPickerCancellation = undefined;
+        this.branchChangeCoordinator.dispose();
         this.fileChangeCoordinator.dispose();
         this.backgroundTimer.dispose();
         this.etagStore.dispose();
@@ -487,6 +514,13 @@ export class DashboardPanel {
       // does, bypassing the fingerprint gate other reload paths respect. See
       // UsageAnalysisCoordinator.requestBackgroundUsageRefresh's own doc for
       // why forcing is safe here.
+      if (this.selectedProject === undefined) {
+        const controller = await this.ensureController();
+        if (controller === undefined) return;
+        await controller.handleReady(this.sink);
+        void this.usageCoordinator.requestBackgroundUsageRefresh({ force: true });
+        return;
+      }
       await this.reloadAndScan(this.selectedProject, { forceUsageRecheck: true });
       return;
     }
@@ -633,11 +667,16 @@ export class DashboardPanel {
    */
   private async reloadAndScan(
     candidate: DiscoveredProject | undefined = this.selectedProject,
-    options: { forceUsageRecheck?: boolean } = {}
+    options: { forceUsageRecheck?: boolean; clearOnLoadFailure?: boolean } = {}
   ): Promise<void> {
     if (candidate === undefined) return; // nothing selected yet; only reachable before init ever completes
 
-    const sameProjectReload = isSameProjectReload(this.selectedProject?.id, candidate.id);
+    const previousProjectId = this.selectedProject?.id;
+    const sameProjectReload = isSameProjectReload(previousProjectId, candidate.id);
+    if (!sameProjectReload) {
+      this.usageCoordinator.invalidateProjectSource(previousProjectId);
+      this.usageCoordinator.invalidateProjectSource(candidate.id);
+    }
 
     // Captured before the disk read even starts, not after — the moment this
     // reload begins, whatever the existing controller currently considers
@@ -676,6 +715,13 @@ export class DashboardPanel {
       project = await this.loadProjectMeasured(candidate, 'Dependency Dashboard project reload');
     } catch (cause) {
       if (this.disposed || generation !== this.reloadGeneration) return;
+      if (options.clearOnLoadFailure === true) {
+        this.clearCurrentProjectForBranch(
+          'The selected package.json disappeared while this branch was loading. Select a project and try again.',
+          'ProjectChangedDuringBranchLoadError'
+        );
+        return;
+      }
       this.sink.postMessage({ status: 'fatal-error', error: toProtocolError(cause) });
       return;
     }
@@ -1024,6 +1070,139 @@ export class DashboardPanel {
     }
   }
 
+  private setupGitHeadWatcher(manifestPath: string): void {
+    if (this.gitWatchedProjectPath === manifestPath && this.gitHeadWatcher !== undefined) return;
+    this.gitHeadWatcher?.dispose();
+    this.gitHeadWatcher = undefined;
+    this.gitWatchedProjectPath = manifestPath;
+    this.gitWatcherSetupGeneration += 1;
+    const setupGeneration = this.gitWatcherSetupGeneration;
+    void watchGitHead(manifestPath, () => this.onGitHeadChanged()).then((watcher) => {
+      if (this.disposed || setupGeneration !== this.gitWatcherSetupGeneration) {
+        watcher?.dispose();
+        return;
+      }
+      this.gitHeadWatcher = watcher;
+      if (watcher === undefined) this.gitWatchedProjectPath = undefined;
+    });
+  }
+
+  private onGitHeadChanged(): void {
+    if (this.disposed) return;
+    this.branchProjectPickerCancellation?.cancel();
+    // Supersede an in-flight reload immediately; the debounced reconciliation
+    // below owns the first snapshot that may become authoritative on this HEAD.
+    this.reloadGeneration += 1;
+    this.controller?.beginRevalidation();
+    this.controller?.announceRevalidating(this.sink);
+    this.projectCompatibilitySourceGeneration += 1;
+    this.usageCoordinator.invalidateProjectSource(this.selectedProject?.id);
+    this.upgradeCoordinator.handleProjectSourceChanged();
+    this.fileChangeCoordinator.discardPending();
+    if (this.invalidationTimer !== undefined) {
+      clearTimeout(this.invalidationTimer);
+      this.invalidationTimer = undefined;
+    }
+    if (this.projectCompatibilityInvalidationTimer !== undefined) {
+      clearTimeout(this.projectCompatibilityInvalidationTimer);
+      this.projectCompatibilityInvalidationTimer = undefined;
+    }
+    this.branchChangeCoordinator.notify();
+  }
+
+  private clearCurrentProjectForBranch(message: string, code: string): void {
+    this.reloadGeneration += 1;
+    this.fileChangeCoordinator.discardPending();
+    this.controller?.dispose();
+    this.controller = undefined;
+    this.pending = undefined;
+    this.selectedProject = undefined;
+    this.selectedLockfilePath = null;
+    this.disposeWatchers();
+    this.sink.postMessage({ status: 'fatal-error', error: { code, message } });
+  }
+
+  private async pickBranchProject(
+    candidates: readonly DiscoveredProject[]
+  ): Promise<DiscoveredProject | undefined> {
+    const cancellation = new vscode.CancellationTokenSource();
+    this.branchProjectPickerCancellation = cancellation;
+    try {
+      const picked = await vscode.window.showQuickPick(
+        candidates.map((candidate) => ({
+          label: projectCandidateLabel(candidate),
+          description: candidate.manifestPath,
+          detail: candidate.folder.uri.fsPath,
+          candidate,
+        })),
+        {
+          title: 'Dependency Dashboard: Select a Project',
+          placeHolder: 'Choose which package.json to view',
+          matchOnDescription: true,
+          matchOnDetail: true,
+        },
+        cancellation.token
+      );
+      return picked?.candidate;
+    } finally {
+      if (this.branchProjectPickerCancellation === cancellation) {
+        this.branchProjectPickerCancellation = undefined;
+      }
+      cancellation.dispose();
+    }
+  }
+
+  private async reconcileAfterGitHeadChange(headGeneration: number): Promise<void> {
+    if (this.disposed || !this.branchChangeCoordinator.hasPending) return;
+    if (this.upgradeCoordinator.isMutationBusy()) return;
+    const previous = this.selectedProject;
+    const performance = createPerformanceSession('Dependency Dashboard branch reconciliation', this.performanceEnabled());
+    let candidates: DiscoveredProject[];
+    try {
+      candidates = await discoverProjects(performance);
+    } catch (cause) {
+      performance.finish({ failed: true });
+      if (this.upgradeCoordinator.isMutationBusy()) return;
+      if (this.disposed || !this.branchChangeCoordinator.claim(headGeneration)) return;
+      this.clearCurrentProjectForBranch(toProtocolError(cause).message, 'BranchReconciliationError');
+      return;
+    }
+    performance.finish({ candidates: candidates.length });
+    if (this.upgradeCoordinator.isMutationBusy()) return;
+    if (this.disposed || !this.branchChangeCoordinator.hasPending) return;
+    const decision = reconcileProjectCandidates(previous, candidates);
+    // Claim this exact HEAD before any panel mutation or QuickPick. A newer
+    // HEAD makes the claim fail and leaves all current state untouched.
+    if (!this.branchChangeCoordinator.claim(headGeneration)) return;
+    this.candidateCount = candidates.length;
+
+    if (decision.kind === 'none') {
+      this.clearCurrentProjectForBranch(
+        'No package.json was found on this branch.',
+        'NoProjectFoundOnBranchError'
+      );
+      return;
+    }
+
+    if (decision.kind === 'selection-required') {
+      this.clearCurrentProjectForBranch(
+        'Select a project to see dependencies on this branch.',
+        'NoProjectSelectedOnBranchError'
+      );
+      const picked = await this.pickBranchProject(decision.candidates);
+      if (this.upgradeCoordinator.isMutationBusy()) {
+        this.branchChangeCoordinator.deferClaimed(headGeneration);
+        return;
+      }
+      if (this.disposed || !this.branchChangeCoordinator.isCurrent(headGeneration)) return;
+      if (picked === undefined) return;
+      await this.reloadAndScan(picked, { clearOnLoadFailure: true });
+      return;
+    }
+
+    await this.reloadAndScan(decision.candidate, { clearOnLoadFailure: true });
+  }
+
   /**
    * Recreated on every project switch/reload so watchers always track the
    * currently selected project's actual files.
@@ -1044,6 +1223,7 @@ export class DashboardPanel {
   private setupFileWatchers(candidate: DiscoveredProject, manifestPath: string): void {
     this.disposeWatchers();
     this.projectCompatibilitySourceGeneration += 1;
+    this.setupGitHeadWatcher(manifestPath);
 
     this.manifestWatcher = vscode.workspace.createFileSystemWatcher(
       new vscode.RelativePattern(vscode.Uri.file(path.dirname(manifestPath)), path.basename(manifestPath))
@@ -1057,19 +1237,24 @@ export class DashboardPanel {
       ? candidate.folder.uri
       : vscode.Uri.joinPath(candidate.folder.uri, candidate.dir);
     this.projectCompatibilitySourceWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(projectBase, '{**/*.{js,jsx,ts,tsx,mjs,cjs},tsconfig*.json}')
+      new vscode.RelativePattern(projectBase, USAGE_FILE_WATCH_GLOB)
     );
     const onProjectCompatibilitySourceEvent = (uri: vscode.Uri): void => {
       const relative = path.relative(projectBase.fsPath, uri.fsPath);
       if (relative === '' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return;
       if (relative.split(path.sep).some((segment) => DEFAULT_EXCLUDED_DIRS.includes(segment))) return;
       this.projectCompatibilitySourceGeneration += 1;
+      this.usageCoordinator.invalidateProjectSource(candidate.id);
+      this.upgradeCoordinator.handleProjectSourceChanged();
       if (this.projectCompatibilityInvalidationTimer !== undefined) {
         clearTimeout(this.projectCompatibilityInvalidationTimer);
       }
       this.projectCompatibilityInvalidationTimer = setTimeout(() => {
         this.projectCompatibilityInvalidationTimer = undefined;
         void this.upgradeCoordinator.checkOpenAnalysisFreshness();
+        if (!this.branchChangeCoordinator.hasPending) {
+          void this.usageCoordinator.requestBackgroundUsageRefresh();
+        }
       }, FILE_EVENT_DEBOUNCE_MS);
     };
     this.projectCompatibilitySourceWatcher.onDidChange(onProjectCompatibilitySourceEvent);
@@ -1123,6 +1308,9 @@ export class DashboardPanel {
     if (this.disposed) return;
     this.controller?.beginRevalidation();
     this.controller?.announceRevalidating(this.sink);
+    this.usageCoordinator.invalidateProjectSource(this.selectedProject?.id);
+    this.upgradeCoordinator.handleProjectSourceChanged();
+    if (this.branchChangeCoordinator.hasPending) return;
     this.fileChangeCoordinator.notify(kind);
     if (this.invalidationTimer !== undefined) clearTimeout(this.invalidationTimer);
     this.invalidationTimer = setTimeout(() => {

@@ -7,6 +7,7 @@ import { PerformanceSession } from '../../out/core/performance/measurement.js';
 import { MemoryEtagStore } from '../../out/core/registry/versions.js';
 import { scanFilesBounded } from '../../out/core/usage/boundedFileScan.js';
 import { PersistentProjectCacheStore } from '../../out/core/cache/projectCacheStore.js';
+import { PersistentEtagStore } from '../../out/core/cache/persistentEtagStore.js';
 import { DashboardController } from '../../out/host/dashboardController.js';
 import { UsageReferenceIndex } from '../../out/core/usage/referenceIndex.js';
 import { paginate } from '../../out/host/pagination.js';
@@ -325,6 +326,71 @@ function memoryKeyValueStore() {
   };
 }
 
+function manualTimerScheduler() {
+  let currentTime = 0;
+  let nextId = 1;
+  const scheduled = new Map();
+  return {
+    now: () => currentTime,
+    schedule(callback, delayMs) {
+      const id = nextId;
+      nextId += 1;
+      scheduled.set(id, { at: currentTime + delayMs, callback });
+      return id;
+    },
+    cancel(handle) {
+      scheduled.delete(handle);
+    },
+    advanceBy(delayMs) {
+      const target = currentTime + delayMs;
+      while (true) {
+        const due = [...scheduled.entries()]
+          .filter(([, task]) => task.at <= target)
+          .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0];
+        if (due === undefined) break;
+        const [id, task] = due;
+        scheduled.delete(id);
+        currentTime = task.at;
+        task.callback();
+      }
+      currentTime = target;
+    },
+  };
+}
+
+async function runRegistryPersistenceCase(responseCount = 150) {
+  const scheduler = manualTimerScheduler();
+  let persistenceWrites = 0;
+  let cumulativeSerializedBytes = 0;
+  let finalSerializedBytes = 0;
+  const values = new Map();
+  const store = new PersistentEtagStore({
+    get: (key) => values.get(key),
+    update: async (key, value) => {
+      const bytes = Buffer.byteLength(JSON.stringify(value));
+      persistenceWrites += 1;
+      cumulativeSerializedBytes += bytes;
+      finalSerializedBytes = bytes;
+      values.set(key, value);
+    },
+  }, undefined, { scheduler });
+
+  for (let index = 0; index < responseCount; index += 1) {
+    store.set(`https://registry.npmjs.org/benchmark-package-${String(index).padStart(3, '0')}/latest`, {
+      etag: `W/benchmark-${index}`,
+      body: 'x'.repeat(540),
+    });
+    // Model responses settling on separate event-loop turns while advancing a
+    // deterministic clock by 1 ms per response.
+    await new Promise((resolve) => setImmediate(resolve));
+    scheduler.advanceBy(1);
+  }
+  scheduler.advanceBy(50);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  return { responseCount, persistenceWrites, cumulativeSerializedBytes, finalSerializedBytes };
+}
+
 async function runDashboardDeliveryCase() {
   const size = SIZES[3];
   const fixtureData = fixture(size);
@@ -568,6 +634,15 @@ async function main() {
   console.log(
     `manual preserving useful=${format(delivery.usefulRefreshMs)} full=${format(delivery.preservingRefreshMs)} ` +
     `statuses=${delivery.preservingStatuses.join(' -> ')}`
+  );
+
+  const registryPersistence = await runRegistryPersistenceCase();
+  console.log('');
+  console.log('Registry ETag persistence amplification (deterministic 150-response stream)');
+  console.log(
+    `responses=${registryPersistence.responseCount} writes=${registryPersistence.persistenceWrites} ` +
+    `cumulative-bytes=${registryPersistence.cumulativeSerializedBytes} ` +
+    `final-bytes=${registryPersistence.finalSerializedBytes}`
   );
 }
 

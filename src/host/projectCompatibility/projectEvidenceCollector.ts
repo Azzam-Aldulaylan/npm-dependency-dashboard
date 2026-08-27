@@ -10,8 +10,8 @@ import type { NextRuleProjectFile } from '../../core/projectCompatibility/rules/
 import {
   findConfigFiles,
   findSourceFiles,
+  planWorkspaceFiles,
   readTextFileCapped,
-  relativeToFolder,
 } from '../usage/workspaceFiles.js';
 import {
   parseProjectManifestCompatibilityEvidence,
@@ -68,55 +68,71 @@ export async function collectProjectCompatibilityEvidence(input: {
   input.signal?.addEventListener('abort', abort, { once: true });
   try {
     const maxFiles = input.maxFiles ?? DEFAULT_MAX_FILES;
-    const sourceFiles = await findSourceFiles(input.folder, input.dir, maxFiles, cancellation.token);
+    const [sourceFiles, configFiles] = await Promise.all([
+      findSourceFiles(input.folder, input.dir, maxFiles, cancellation.token),
+      findConfigFiles(input.folder, input.dir, cancellation.token),
+    ]);
+    const files = planWorkspaceFiles(input.folder, sourceFiles, configFiles);
     const imports: ProjectImportReference[] = [];
     const retainedFiles = new Map<string, NextRuleProjectFile>();
     let evidenceLimitReached = false;
     let failedReadCount = 0;
-    const sourceScan = await scanFilesBounded({
-      items: sourceFiles,
-      read: readTextFileCapped,
+    let scannedSourceFiles = 0;
+    let sourceCancelled = false;
+    let configCancelled = false;
+    const workspaceScan = await scanFilesBounded({
+      items: files,
+      read: ({ uri }) => readTextFileCapped(uri),
       isCancelled: () => cancellation.token.isCancellationRequested,
-      consume: (uri, content) => {
-        const filePath = relativeToFolder(input.folder, uri);
-        if (filePath === null) return;
-        for (const match of scanSourceForImportSpecifiers(content)) {
-          if (match.packageName !== input.packageName) continue;
-          if (imports.length >= MAX_IMPORT_REFERENCES) {
-            evidenceLimitReached = true;
-            continue;
+      consume: (file, content) => {
+        if (file.source) {
+          for (const match of scanSourceForImportSpecifiers(content)) {
+            if (match.packageName !== input.packageName) continue;
+            if (imports.length >= MAX_IMPORT_REFERENCES) {
+              evidenceLimitReached = true;
+              continue;
+            }
+            imports.push({
+              specifier: match.specifier,
+              kind: match.kind,
+              filePath: file.filePath,
+              line: match.line,
+              column: match.column,
+              snippet: match.snippet,
+            });
           }
-          imports.push({
-            specifier: match.specifier,
-            kind: match.kind,
-            filePath,
-            line: match.line,
-            column: match.column,
-            snippet: match.snippet,
-          });
+          if (shouldRetainFrameworkRuleFile(input.packageName, file.filePath)) {
+            if (retainedFiles.size >= MAX_FRAMEWORK_RULE_FILES) evidenceLimitReached = true;
+            else retainedFiles.set(file.filePath, { filePath: file.filePath, content });
+          }
         }
-        if (shouldRetainFrameworkRuleFile(input.packageName, filePath)) {
-          if (retainedFiles.size >= MAX_FRAMEWORK_RULE_FILES) evidenceLimitReached = true;
-          else retainedFiles.set(filePath, { filePath, content });
-        }
-      },
-      onReadFailure: () => { failedReadCount += 1; },
-    });
-
-    const configFiles = await findConfigFiles(input.folder, input.dir, cancellation.token);
-    const configScan = await scanFilesBounded({
-      items: configFiles,
-      read: readTextFileCapped,
-      isCancelled: () => cancellation.token.isCancellationRequested,
-      consume: (uri, content) => {
-        const filePath = relativeToFolder(input.folder, uri);
-        if (filePath !== null) {
-          if (!retainedFiles.has(filePath) && retainedFiles.size >= MAX_FRAMEWORK_RULE_FILES) evidenceLimitReached = true;
-          else retainedFiles.set(filePath, { filePath, content });
+        if (file.config) {
+          if (!retainedFiles.has(file.filePath) && retainedFiles.size >= MAX_FRAMEWORK_RULE_FILES) {
+            evidenceLimitReached = true;
+          } else {
+            retainedFiles.set(file.filePath, { filePath: file.filePath, content });
+          }
         }
       },
       onReadFailure: () => { failedReadCount += 1; },
+      onItemProcessed: (file) => {
+        if (file.source) scannedSourceFiles += 1;
+      },
     });
+    if (workspaceScan.cancelled || cancellation.token.isCancellationRequested) {
+      sourceCancelled = scannedSourceFiles < sourceFiles.length;
+      const processedConfigFiles = files
+        .slice(0, workspaceScan.processed)
+        .filter((file) => file.config).length;
+      configCancelled = processedConfigFiles < configFiles.length;
+      // Discovery itself is cancellable. If it resolves to an empty or
+      // partial set after cancellation, its returned length cannot prove
+      // that either evidence class was exhaustively discovered.
+      if (cancellation.token.isCancellationRequested) {
+        sourceCancelled = true;
+        configCancelled = true;
+      }
+    }
 
     imports.sort((left, right) =>
       left.filePath.localeCompare(right.filePath) || left.line - right.line || left.column - right.column ||
@@ -126,8 +142,8 @@ export async function collectProjectCompatibilityEvidence(input: {
     const truncated = projectCompatibilityScanIsTruncated({
       discoveredSourceFiles: sourceFiles.length,
       maxFiles,
-      sourceCancelled: sourceScan.cancelled,
-      configCancelled: configScan.cancelled,
+      sourceCancelled,
+      configCancelled,
       failedReadCount,
       evidenceLimitReached,
     });
@@ -135,7 +151,7 @@ export async function collectProjectCompatibilityEvidence(input: {
       ...manifest,
       imports,
       ruleFiles,
-      scannedFileCount: sourceScan.processed,
+      scannedFileCount: scannedSourceFiles,
       truncated,
       evidenceFingerprint: evidenceFingerprint({ manifest, imports, ruleFiles, truncated }),
     };

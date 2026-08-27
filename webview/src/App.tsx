@@ -20,6 +20,7 @@ import { resolveActionState } from '../../src/host/upgradeAction.js';
 import {
   applyUpgradeResultLocalFacts,
   manageRemovalReplacesUpgradeReview,
+  manageUpgradeReplacesRemovalReview,
   targetChangeInvalidatesManageAnalysis,
   upgradeAnalysisMessageMatchesRequest,
   upgradeAnalysisRequestIsAllowed,
@@ -966,6 +967,21 @@ export function App(): ReactElement {
     setRemoveOrigin(null);
   }, [removeAnalysis]);
 
+  // Upgrade and removal previews share one host-owned project lock. A
+  // completed embedded removal review is a decision screen, not ongoing
+  // work, so starting Upgrade review deliberately closes it first. Keep an
+  // in-progress removal analysis or file mutation protected from takeover.
+  const requestUpgradeFromManage = useCallback(
+    (packageName: string, target: string) => {
+      if (manageUpgradeReplacesRemovalReview(packageName, activeRemove, removeOrigin)) {
+        if (removeAnalysis === null || removeBusy) return;
+        requestCancelRemove();
+      }
+      requestUpgrade(packageName, target);
+    },
+    [activeRemove, removeAnalysis, removeBusy, removeOrigin, requestCancelRemove, requestUpgrade]
+  );
+
   // Selecting a card re-asserts that card's own intelligent default sort
   // (see cardDefaultComparator) over any manual header sort — a fresh
   // filtering context starts from a fresh, useful order rather than
@@ -1375,6 +1391,20 @@ export function App(): ReactElement {
             const upgradeActive = upgradeOrigin === 'manage-dependency' && activeUpgrade === row.name;
             const removeActive =
               (removeOrigin === 'manage-dependency' && activeRemove === row.name) || pendingManageRemoval === row.name;
+            // Once an embedded removal analysis has finished, Upgrade review
+            // becomes available again. Its Analyze action performs the lock
+            // handoff above; genuinely active work remains disabled.
+            const embeddedRemovalCanYield = removeActive && removeAnalysis !== null && !removeBusy;
+            const manageUpgradeDisabled =
+              coreDataIncomplete ||
+              loading ||
+              cleanupState.phase === 'analyzing' ||
+              remediationBatch.phase === 'running' ||
+              confirmBusy ||
+              removeBusy ||
+              removalImpact.phase === 'analyzing' ||
+              (activeRemove !== null && !embeddedRemovalCanYield) ||
+              (activeUpgrade !== null && !upgradeActive);
             return (
               <ManageDependencyModal
                 row={row}
@@ -1385,7 +1415,7 @@ export function App(): ReactElement {
                 activeTab={manageTab}
                 onChangeTab={setManageTab}
                 actionsDisabled={actionsDisabled}
-                upgradeDisabled={actionsDisabled || coreDataIncomplete}
+                upgradeDisabled={manageUpgradeDisabled}
                 updateResolutionAvailable={!data.availability.unavailableUpdatePackages.includes(row.name)}
                 advisoriesAvailable={data.availability.advisories === 'complete'}
                 blockClose={removalImpact.phase === 'analyzing' || confirmBusy || removeBusy}
@@ -1404,7 +1434,7 @@ export function App(): ReactElement {
                     upgradeOrigin === 'manage-dependency' && upgradeError?.package === row.name
                       ? upgradeError.message
                       : null,
-                  onAnalyze: (target) => requestUpgrade(row.name, target),
+                  onAnalyze: (target) => requestUpgradeFromManage(row.name, target),
                   onTargetChange: (target) => changeManageUpgradeTarget(row.name, target),
                   onConfirm: requestConfirmUpgrade,
                   onUseSmartPlan: requestUseSmartPlan,

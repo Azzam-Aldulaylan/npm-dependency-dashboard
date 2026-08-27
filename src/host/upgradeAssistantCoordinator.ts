@@ -35,6 +35,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { buildDependencyGraph } from '../core/lockfile/build.js';
+import { computeSourceFingerprint } from '../core/cache/sourceFingerprint.js';
 import { runSequentialBatch } from '../core/async/sequentialBatch.js';
 import { SharedPromise } from '../core/async/sharedPromise.js';
 import { directNodes } from '../core/lockfile/parse.js';
@@ -46,6 +47,13 @@ import { FetchError } from '../core/registry/http.js';
 import type { HttpClient } from '../core/registry/http.js';
 import { fetchPackument } from '../core/registry/versions.js';
 import type { EtagStore } from '../core/registry/versions.js';
+import type { PackageVersionMetadata } from '../core/registry/versions.js';
+import type { DependencyReference } from '../core/usage/types.js';
+import type {
+  ProjectCompatibilityAnalysis,
+  ProjectCompatibilityIdentity,
+  ToolingPackageEvidence,
+} from '../core/projectCompatibility/index.js';
 import type { PerformanceRecorder } from '../core/performance/measurement.js';
 import { createPerformanceSession } from '../core/performance/measurement.js';
 import { inspectAppliedUpgradeState } from '../core/upgrade/appliedState.js';
@@ -60,6 +68,7 @@ import { advisoriesByNameFromRows } from '../core/advisories/attribution.js';
 import { resolveRemediationRequest } from '../core/advisories/remediationRequest.js';
 import type { RemediationRequestRejection } from '../core/advisories/remediationRequest.js';
 import { evaluateSecurityOutcome } from '../core/advisories/securityOutcome.js';
+import { buildVulnerabilityContexts } from '../core/advisories/vulnerabilityContext.js';
 import type { SecurityOutcomeStatus } from '../core/advisories/securityOutcome.js';
 import type { DashboardController, MessageSink } from './dashboardController.js';
 import { createNodeNpmResolverDeps, resolveNpmInvocation } from './npmResolver.js';
@@ -69,6 +78,20 @@ import { combineSecurityOutcomes } from './securityOutcomeBatch.js';
 import type { DiscoveredProject, ResolvedProject } from './projectResolution.js';
 import { loadProject } from './projectResolution.js';
 import { IsolatedResolverVerifier } from './resolverVerifier.js';
+import { collectProjectCompatibilityEvidence, parseProjectManifestCompatibilityEvidence } from './projectCompatibility/projectEvidenceCollector.js';
+import {
+  analyzeProjectCompatibilityMedium,
+  appendProjectCompatibilityImportAnalysis,
+  targetExportsEvidence,
+  targetPrivateSubpathPrefixes,
+  removedTargetPackageCommands,
+} from './projectCompatibility/projectCompatibilityAnalysis.js';
+import { TargetPackageInspector } from './projectCompatibility/targetPackageInspector.js';
+import { TargetPackageSurfaceCache } from './projectCompatibility/targetPackageInspector.js';
+import {
+  projectCompatibilityEvidenceIsCurrent,
+  projectCompatibilityFinalReadIsCurrent,
+} from './projectCompatibility/projectCompatibilityFreshness.js';
 import { resolveAnalysisForExecution } from './upgradeAnalysisLookup.js';
 import type { AnalysisLookupRejection } from './upgradeAnalysisLookup.js';
 import { UPGRADE_ANALYSIS_RETENTION_MS } from './upgradeFreshness.js';
@@ -85,6 +108,7 @@ import {
   describeUpgradeTransactionOutcome,
 } from './upgradeAssistantOutcome.js';
 import { UpgradeExecutionSession } from './upgradeRunner.js';
+import { OperationReservation, SourceGenerationGuard } from './operationReservation.js';
 import { runUpgradeTransaction } from './upgradeTransaction.js';
 import { selectVerificationScripts } from './verificationPolicy.js';
 import type { VerificationScript } from './verificationPolicy.js';
@@ -164,8 +188,8 @@ export interface UpgradeAssistantCoordinatorOptions {
    * that called `reloadFinalState()` — the moment a background usage
    * refresh queued during that reload (see UsageAnalysisCoordinator's
    * `requestBackgroundUsageRefresh`) is allowed to actually start. Called
-   * before `flushDeferredChanges()` awaits, so the background scan starts
-   * without waiting on deferred watcher-event handling.
+   * after deferred watcher changes are flushed so background work observes
+   * the authoritative post-mutation project state.
    */
   onMutationLockReleased?(): void;
   performanceEnabled?(): boolean;
@@ -175,6 +199,14 @@ export interface UpgradeAssistantCoordinatorOptions {
   withCompatibilityProgress?: <T>(title: string, run: (signal: AbortSignal) => Promise<T>) => Promise<T>;
   /** Test seam; production always reads the real `dependencyDashboard` upgrade configuration — see defaultGetUpgradeConfiguration. */
   getUpgradeConfiguration?: () => { ignoreScripts: boolean; verificationScripts: unknown[] };
+  /** Reuses UsageReferenceStore for finding navigation; returns one opaque usage id for the supplied host-owned references. */
+  storeProjectCompatibilityReferences?(
+    packageName: string,
+    references: readonly DependencyReference[],
+    folder: vscode.WorkspaceFolder
+  ): string | null;
+  /** Monotonic generation advanced synchronously by relevant source/config watcher events. */
+  projectCompatibilitySourceGeneration?: () => number;
 }
 
 /** Removal review retention is unchanged; Upgrade Review has its own longer, soft-stale-aware retention. */
@@ -232,6 +264,122 @@ function toRemediationOutcomeStatus(status: SecurityOutcomeStatus): RemediationO
   return 'remains';
 }
 
+function projectCompatibilityFingerprint(project: ResolvedProject, evidenceFingerprint: string): string {
+  const fingerprint = computeSourceFingerprint({
+    manifestText: project.manifestText,
+    lockfileText: project.lockfileText,
+    lockfilePath: project.lockfilePath,
+    packageManager: project.packageManager,
+    importerId: project.importerId,
+  });
+  // Do not send an absolute lockfile path to the webview; hashes + topology identity are sufficient correlation.
+  return [
+    fingerprint.manifestHash,
+    fingerprint.lockfileHash ?? 'no-lockfile',
+    project.packageManager,
+    project.importerId,
+    project.lockfileName ?? 'no-lockfile',
+    evidenceFingerprint,
+  ].join(':');
+}
+
+function resolvedProjectSourceMatches(left: ResolvedProject, right: ResolvedProject): boolean {
+  return left.root === right.root &&
+    left.manifestText === right.manifestText &&
+    left.lockfileText === right.lockfileText &&
+    left.lockfilePath === right.lockfilePath &&
+    left.registry === right.registry &&
+    left.packageManager === right.packageManager &&
+    left.importerId === right.importerId &&
+    JSON.stringify(left.peerPolicy) === JSON.stringify(right.peerPolicy) &&
+    JSON.stringify(left.resolvedRegistry) === JSON.stringify(right.resolvedRegistry);
+}
+
+function waitForAnalysisWork<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException('Upgrade analysis cancelled.', 'AbortError'));
+  return new Promise<T>((resolve, reject) => {
+    const abort = (): void => reject(new DOMException('Upgrade analysis cancelled.', 'AbortError'));
+    signal.addEventListener('abort', abort, { once: true });
+    void work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
+
+async function loadToolingPackageEvidence(input: {
+  graph: ReturnType<typeof buildDependencyGraph>;
+  declarations: Readonly<Record<string, string>>;
+  metadataProvider: RegistryPackageMetadataProvider;
+}): Promise<{ packages: ToolingPackageEvidence[]; incomplete: boolean }> {
+  const relevant = ['@typescript-eslint/eslint-plugin', '@typescript-eslint/parser']
+    .filter((name) => input.declarations[name] !== undefined);
+  if (relevant.length === 0) return { packages: [], incomplete: false };
+  const directByName = new Map(directNodes(input.graph).map((node) => [node.name, node]));
+  const packages: ToolingPackageEvidence[] = [];
+  let incomplete = false;
+  for (const name of relevant) {
+    const node = directByName.get(name);
+    if (node?.version === null || node?.version === undefined) {
+      packages.push({ name, resolvedVersion: null, declaredRange: input.declarations[name] ?? null, peerDependencies: {} });
+      incomplete = true;
+      continue;
+    }
+    try {
+      const metadata = await input.metadataProvider.getPackageVersionMetadata(name, node.version);
+      packages.push({
+        name,
+        resolvedVersion: node.version,
+        declaredRange: input.declarations[name] ?? null,
+        peerDependencies: metadata.peerDependencies,
+        optionalPeers: Object.entries(metadata.peerDependenciesMeta)
+          .filter(([, value]) => value.optional)
+          .map(([peer]) => peer),
+      });
+    } catch {
+      packages.push({ name, resolvedVersion: node.version, declaredRange: input.declarations[name] ?? null, peerDependencies: {} });
+      incomplete = true;
+    }
+  }
+  return { packages, incomplete };
+}
+
+function attachTrustedProjectCompatibilityNavigation(input: {
+  analysis: ProjectCompatibilityAnalysis;
+  packageName: string;
+  folder: vscode.WorkspaceFolder;
+  store?: UpgradeAssistantCoordinatorOptions['storeProjectCompatibilityReferences'];
+}): void {
+  if (input.store === undefined) return;
+  const navigable: Array<{ evidence: ProjectCompatibilityAnalysis['findings'][number]['evidence'][number]; reference: DependencyReference }> = [];
+  const MAX_NAVIGABLE_PROJECT_EVIDENCE = 500;
+  outer: for (const finding of input.analysis.findings) {
+    for (const evidence of finding.evidence) {
+      if (evidence.filePath === undefined) continue;
+      const kind = evidence.kind === 'package-script'
+        ? 'script' as const
+        : evidence.kind === 'project-config'
+          ? 'config' as const
+          : 'import' as const;
+      navigable.push({
+        evidence,
+        reference: {
+          filePath: evidence.filePath,
+          line: evidence.line ?? 1,
+          column: evidence.column ?? 1,
+          snippet: evidence.snippet ?? evidence.context ?? evidence.filePath,
+          kind,
+          ...(evidence.context === undefined ? {} : { context: evidence.context }),
+        },
+      });
+      if (navigable.length >= MAX_NAVIGABLE_PROJECT_EVIDENCE) break outer;
+    }
+  }
+  const usageId = input.store(input.packageName, navigable.map((entry) => entry.reference), input.folder);
+  if (usageId === null) return;
+  navigable.forEach((entry, referenceIndex) => {
+    entry.evidence.usageId = usageId;
+    entry.evidence.referenceIndex = referenceIndex;
+  });
+}
+
 export function compatibilitySummary(analysis: Awaited<ReturnType<typeof analyzeCompatibility>>): string[] {
   const important = analysis.findings.filter((finding) => finding.status !== 'compatible').slice(0, 4);
   return [
@@ -261,6 +409,8 @@ interface StoredAnalysis {
   smartPlanProposal: UpgradeProposal | null;
   ignoreScripts: boolean;
   verificationScripts: VerificationScript[];
+  /** Source/config evidence consumed by project compatibility, re-read before execution. */
+  projectCompatibilityEvidenceFingerprint: string | null;
   expiresAt: number;
 }
 
@@ -287,6 +437,9 @@ interface SharedRemediationWork {
 
 export class UpgradeAssistantCoordinator {
   private readonly session = new UpgradeExecutionSession();
+  private readonly reservation: OperationReservation;
+  /** Advanced synchronously by host watcher/HEAD notifications. */
+  private readonly sourceGeneration = new SourceGenerationGuard();
   private readonly projectLoader: (candidate: DiscoveredProject) => Promise<ResolvedProject>;
   private readonly withCompatibilityProgress: <T>(title: string, run: (signal: AbortSignal) => Promise<T>) => Promise<T>;
   private readonly getUpgradeConfiguration: () => { ignoreScripts: boolean; verificationScripts: unknown[] };
@@ -296,9 +449,26 @@ export class UpgradeAssistantCoordinator {
   private pendingAnalyzePackage: string | null = null;
   /** Set by a cancel-upgrade with `analysisId: null` that arrived mid-analysis — handleAnalyzeUpgrade checks this right before storing/posting its result and drops it instead. */
   private cancelRequestedFor: string | null = null;
+  /**
+   * Host source invalidation is terminal for the webview, unlike its own
+   * quiet Cancel action. Retain the package through the analysis finally
+   * block so a watcher burst posts exactly one terminal message.
+   */
+  private sourceInvalidatedAnalyzePackage: string | null = null;
   private activeRemediationAbort: AbortController | undefined;
+  private activeUpgradeAnalysisAbort: AbortController | undefined;
+  /** One exact deep inventory is enough to make immediate re-analysis/cache reuse cheap without retaining many large file lists. */
+  private readonly targetPackageSurfaceCache = new TargetPackageSurfaceCache();
 
   constructor(private readonly options: UpgradeAssistantCoordinatorOptions) {
+    this.reservation = new OperationReservation({
+      reserve: (packageName) => this.session.reserve(packageName),
+      release: (packageName) => this.session.release(packageName),
+      flushDeferredChanges: () => options.flushDeferredChanges(),
+      resumePendingBackground: () => options.onMutationLockReleased?.(),
+      isDisposed: () => options.isDisposed(),
+      dispose: () => this.session.dispose(),
+    });
     this.projectLoader = options.loadProject ?? loadProject;
     this.withCompatibilityProgress = options.withCompatibilityProgress ?? defaultWithCompatibilityProgress;
     this.getUpgradeConfiguration = options.getUpgradeConfiguration ?? defaultGetUpgradeConfiguration;
@@ -308,6 +478,11 @@ export class UpgradeAssistantCoordinator {
     return this.session.isBusy();
   }
 
+  /** File reloads defer only while a package-manager transaction can write. */
+  isMutationBusy(): boolean {
+    return this.reservation.isMutationBusy;
+  }
+
   isRemediationBusy(): boolean {
     return this.activeRemediationAbort !== undefined;
   }
@@ -315,13 +490,84 @@ export class UpgradeAssistantCoordinator {
   /** Dispose immediately only when no mutation is in flight. */
   disposeWhenIdle(): void {
     this.activeRemediationAbort?.abort();
-    if (!this.session.isBusy()) this.session.dispose();
+    this.activeUpgradeAnalysisAbort?.abort();
+    if (this.reservation.isMutationBusy) return;
+    this.analysis = undefined;
+    this.removal = undefined;
+    void this.reservation
+      .releaseCurrent()
+      .then((released) => {
+        if (!released) this.reservation.disposeIfIdle();
+      })
+      .catch(() => {});
+  }
+
+  private reserve(packageName: string): boolean {
+    return this.reservation.reserve(packageName);
+  }
+
+  /**
+   * The single release path for cancellation, failures, TTL reclamation,
+   * controller-unavailable exits, and mutation completion. The reservation
+   * is cleared synchronously; host follow-up work is failure-contained so a
+   * rejected reload can neither become unhandled nor poison later releases.
+   */
+  private async releaseReservation(packageName: string): Promise<void> {
+    await this.reservation.release(packageName);
+  }
+
+  /**
+   * Called synchronously for watched source/dependency changes and genuine
+   * HEAD changes. Read-only reviews are revoked immediately; a transaction
+   * already inside its mutation boundary remains the sole deferral owner.
+   */
+  handleProjectSourceChanged(): void {
+    this.sourceGeneration.advance();
+    if (this.reservation.isMutationBusy) return;
+
+    if (this.pendingAnalyzePackage !== null) {
+      const packageName = this.pendingAnalyzePackage;
+      const webviewAlreadyCancelled =
+        this.cancelRequestedFor === packageName && this.sourceInvalidatedAnalyzePackage !== packageName;
+      this.cancelRequestedFor = packageName;
+      if (!webviewAlreadyCancelled && this.sourceInvalidatedAnalyzePackage !== packageName) {
+        this.sourceInvalidatedAnalyzePackage = packageName;
+        this.options.sink.postMessage({
+          status: 'upgrade-error',
+          package: packageName,
+          error: {
+            code: 'STALE_SOURCE',
+            message: 'Project files changed while upgrade analysis was running. Analyze again.',
+          },
+        });
+      }
+      this.activeUpgradeAnalysisAbort?.abort();
+    }
+    if (this.analysis !== undefined) {
+      const stored = this.analysis;
+      this.analysis = undefined;
+      this.options.sink.postMessage({ status: 'upgrade-analysis-stale', analysisId: stored.id });
+      void this.releaseReservation(stored.eligibility.packageName);
+    }
+    if (this.removal !== undefined) {
+      const stored = this.removal;
+      this.removal = undefined;
+      this.options.sink.postMessage({
+        status: 'remove-error',
+        package: stored.eligibility.packageName,
+        error: {
+          code: 'STALE_SOURCE',
+          message: 'Project files changed while the removal review was open. Analyze again.',
+        },
+      });
+      void this.releaseReservation(stored.eligibility.packageName);
+    }
   }
 
   /** An abandoned analysis (modal left open, never confirmed or cancelled) reclaims its lock once its TTL passes, so a later analyze request is never permanently blocked by it. */
   private reclaimExpiredAnalysis(): void {
     if (this.analysis !== undefined && Date.now() >= this.analysis.expiresAt) {
-      this.session.release(this.analysis.eligibility.packageName);
+      void this.releaseReservation(this.analysis.eligibility.packageName);
       this.analysis = undefined;
     }
   }
@@ -329,7 +575,7 @@ export class UpgradeAssistantCoordinator {
   /** Same reclaim as reclaimExpiredAnalysis, for an abandoned removal review. */
   private reclaimExpiredRemoval(): void {
     if (this.removal !== undefined && Date.now() >= this.removal.expiresAt) {
-      this.session.release(this.removal.eligibility.packageName);
+      void this.releaseReservation(this.removal.eligibility.packageName);
       this.removal = undefined;
     }
   }
@@ -521,7 +767,7 @@ export class UpgradeAssistantCoordinator {
     // open, not merely process execution: forged requests cannot stack
     // analyses or race package managers, and only one package can be under
     // analysis for the whole panel at a time.
-    if (!this.session.reserve(eligibility.packageName)) {
+    if (!this.reserve(eligibility.packageName)) {
       this.options.sink.postMessage({
         status: 'upgrade-error',
         package: eligibility.packageName,
@@ -530,6 +776,8 @@ export class UpgradeAssistantCoordinator {
       return;
     }
     this.pendingAnalyzePackage = eligibility.packageName;
+    const analysisAbort = new AbortController();
+    this.activeUpgradeAnalysisAbort = analysisAbort;
 
     // Set true only on the success path, right before the final return —
     // `finally` below releases the lock on every other exit (an early
@@ -603,6 +851,33 @@ export class UpgradeAssistantCoordinator {
           verification: buildUpgradeAnalysisVerification(verificationScripts.map((script) => script.scriptName)),
           files: buildUpgradeAnalysisFiles(manifestPath, expectedLockfilePath),
         },
+      });
+
+      // Project source collection starts beside dependency-tree preflight so
+      // neither blocks the other's first useful result. A scan failure is
+      // represented as partial evidence later; it never fails Upgrade Review.
+      const manifestProjectEvidence = parseProjectManifestCompatibilityEvidence(preflightProject.manifestText);
+      const endProjectFirstResult = performance.start('project compatibility time to first result');
+      const endProjectTotal = performance.start('project compatibility total analysis');
+      const projectEvidencePromise = collectProjectCompatibilityEvidence({
+        folder: selected.folder,
+        dir: selected.dir,
+        manifestText: preflightProject.manifestText,
+        packageName: eligibility.packageName,
+        signal: analysisAbort.signal,
+      }).catch(() => ({
+        ...manifestProjectEvidence,
+        imports: [],
+        ruleFiles: [],
+        scannedFileCount: 0,
+        truncated: true,
+        evidenceFingerprint: 'unavailable',
+      }));
+      this.options.sink.postMessage({
+        status: 'upgrade-analyzing',
+        package: eligibility.packageName,
+        phase: 'project-compatibility',
+        requestId,
       });
 
       // Security's real cost (a resolver-graph materialization) only applies
@@ -695,18 +970,96 @@ export class UpgradeAssistantCoordinator {
         eligibilities.length === 1
           ? `Checking compatibility for ${eligibility.packageName}@${eligibility.target}`
           : `Checking compatibility for ${eligibilities.length} dependency upgrades`;
-      const analysis = await this.withCompatibilityProgress(compatibilityTitle, (signal) =>
-        analyzeCompatibility({
-          graph,
-          proposal,
-          metadataProvider,
-          policy: preflightProject.peerPolicy,
-          ...(resolverVerifier === undefined ? {} : { resolverVerifier }),
-          signal,
-        })
+      const compatibilityResultPromise = this.withCompatibilityProgress(compatibilityTitle, async (signal) => {
+        const combined = new AbortController();
+        const abort = (): void => combined.abort();
+        signal.addEventListener('abort', abort, { once: true });
+        analysisAbort.signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted || analysisAbort.signal.aborted) combined.abort();
+        try {
+          return await analyzeCompatibility({
+            graph,
+            proposal,
+            metadataProvider,
+            policy: preflightProject.peerPolicy,
+            ...(resolverVerifier === undefined ? {} : { resolverVerifier }),
+            signal: combined.signal,
+          });
+        } finally {
+          signal.removeEventListener('abort', abort);
+          analysisAbort.signal.removeEventListener('abort', abort);
+        }
+      }
+      ).then(
+        (analysis) => ({ ok: true as const, analysis }),
+        (cause: unknown) => ({ ok: false as const, cause })
       );
-      endCompatibility({ status: analysis.status });
 
+      // --- project compatibility, fast then enriched medium then deep ---
+      // The source scan above is local and bounded. Exact metadata normally
+      // reuses the compatibility provider's in-flight/cache entry.
+      const projectEvidence = await projectEvidencePromise;
+      const readMetadata = async (version: string): Promise<PackageVersionMetadata | undefined> => {
+        try {
+          return await metadataProvider.getPackageVersionMetadata(eligibility.packageName, version);
+        } catch {
+          return undefined;
+        }
+      };
+      const hasScripts = Object.keys(projectEvidence.scripts).length > 0;
+      const hasToolingDeclarations = ['@typescript-eslint/eslint-plugin', '@typescript-eslint/parser']
+        .some((name) => projectEvidence.declaredDependencies[name] !== undefined);
+      const targetMetadataPromise = readMetadata(eligibility.target);
+      const currentMetadataPromise = hasScripts
+        ? readMetadata(eligibility.currentVersion)
+        : Promise.resolve(undefined);
+      const toolingPromise = hasToolingDeclarations
+        ? loadToolingPackageEvidence({
+          graph,
+          declarations: projectEvidence.declaredDependencies,
+          metadataProvider,
+        })
+        : Promise.resolve({ packages: [], incomplete: false });
+      const targetMetadata = await waitForAnalysisWork(targetMetadataPromise, analysisAbort.signal);
+      const projectIdentity: ProjectCompatibilityIdentity = {
+        packageName: eligibility.packageName,
+        currentVersion: eligibility.currentVersion,
+        targetVersion: eligibility.target,
+        requestId,
+        sourceFingerprint: projectCompatibilityFingerprint(preflightProject, projectEvidence.evidenceFingerprint),
+      };
+      const endProjectFast = performance.start('project compatibility fast analysis');
+      let projectCompatibility = await analyzeProjectCompatibilityMedium({
+        identity: projectIdentity,
+        project: projectEvidence,
+        ...(targetMetadata === undefined ? {} : { targetMetadata }),
+        toolingPackages: [],
+        toolingMetadataIncomplete: hasToolingDeclarations,
+        ...(hasScripts ? {} : { targetCommands: [] }),
+      });
+      endProjectFast({ findings: projectCompatibility.findings.length });
+      endProjectFirstResult({ findings: projectCompatibility.findings.length });
+      attachTrustedProjectCompatibilityNavigation({
+        analysis: projectCompatibility,
+        packageName: eligibility.packageName,
+        folder: selected.folder,
+        store: this.options.storeProjectCompatibilityReferences,
+      });
+      if (this.droppedByCancellation(eligibility.packageName)) return;
+      this.options.sink.postMessage({
+        status: 'upgrade-analysis-partial',
+        requestId,
+        package: eligibility.packageName,
+        section: { kind: 'project-compatibility', projectCompatibility },
+      });
+
+      // Dependency-tree resolution remains independent: fast local/metadata
+      // project findings above can render while its resolver work is still
+      // running, then the ordinary compatibility section settles normally.
+      const compatibilityResult = await compatibilityResultPromise;
+      if (!compatibilityResult.ok) throw compatibilityResult.cause;
+      const analysis = compatibilityResult.analysis;
+      endCompatibility({ status: analysis.status });
       if (this.droppedByCancellation(eligibility.packageName)) return;
       this.options.sink.postMessage({
         status: 'upgrade-analysis-partial',
@@ -723,6 +1076,113 @@ export class UpgradeAssistantCoordinator {
         },
       });
 
+      if (hasScripts || hasToolingDeclarations) {
+        const [currentMetadata, tooling] = await waitForAnalysisWork(
+          Promise.all([currentMetadataPromise, toolingPromise]),
+          analysisAbort.signal
+        );
+        const targetCommands = hasScripts
+          ? removedTargetPackageCommands({
+              packageName: eligibility.packageName,
+              ...(currentMetadata === undefined ? {} : { currentMetadata }),
+              ...(targetMetadata === undefined ? {} : { targetMetadata }),
+            })
+          : [];
+        const endProjectMedium = performance.start('project compatibility medium analysis');
+        projectCompatibility = await analyzeProjectCompatibilityMedium({
+          identity: projectIdentity,
+          project: projectEvidence,
+          ...(targetMetadata === undefined ? {} : { targetMetadata }),
+          toolingPackages: tooling.packages,
+          toolingMetadataIncomplete: tooling.incomplete,
+          ...(targetCommands === undefined ? {} : { targetCommands }),
+        });
+        endProjectMedium({ findings: projectCompatibility.findings.length });
+        attachTrustedProjectCompatibilityNavigation({
+          analysis: projectCompatibility,
+          packageName: eligibility.packageName,
+          folder: selected.folder,
+          store: this.options.storeProjectCompatibilityReferences,
+        });
+        if (this.droppedByCancellation(eligibility.packageName)) return;
+        this.options.sink.postMessage({
+          status: 'upgrade-analysis-partial',
+          requestId,
+          package: eligibility.packageName,
+          section: { kind: 'project-compatibility', projectCompatibility },
+        });
+      }
+
+      let targetSurface: Parameters<typeof appendProjectCompatibilityImportAnalysis>[0]['targetSurface'];
+      let importUnavailableReason: string | undefined;
+      if (targetMetadata === undefined) {
+        importUnavailableReason = 'target-metadata-unavailable';
+      } else {
+        const exports = targetExportsEvidence(targetMetadata.exports, targetMetadata.exportsTruncated !== true);
+        const needsCompleteFiles =
+          exports.status !== 'known' &&
+          projectEvidence.imports.some((reference) => reference.specifier !== eligibility.packageName);
+        if (!needsCompleteFiles) {
+          targetSurface = {
+            packageName: eligibility.packageName,
+            version: eligibility.target,
+            exports,
+            privateSubpathPrefixes: targetPrivateSubpathPrefixes(eligibility.packageName),
+          };
+        } else if (!npmResolution.ok) {
+          importUnavailableReason = 'target-package-inspector-unavailable';
+        } else {
+          try {
+            const endTargetInventory = performance.start('project compatibility target package inventory');
+            const packageRegistry = registryForPackage(preflightProject.resolvedRegistry, eligibility.packageName);
+            const cacheKey = `${packageRegistry}\0${eligibility.packageName}\0${eligibility.target}`;
+            const cachedSurface = this.targetPackageSurfaceCache.get(cacheKey);
+            const surface = cachedSurface ?? await new TargetPackageInspector(
+                {
+                  executable: npmResolution.invocation.node,
+                  prefixArgs: [npmResolution.invocation.npmCliJs],
+                  version: npmResolution.invocation.version,
+                },
+                packageRegistry
+              ).inspect(eligibility.packageName, eligibility.target, analysisAbort.signal);
+            if (cachedSurface === undefined) this.targetPackageSurfaceCache.set(cacheKey, surface);
+            endTargetInventory({ files: surface.files.length, cached: cachedSurface !== undefined });
+            targetSurface = {
+              packageName: surface.packageName,
+              version: surface.version,
+              exports,
+              files: { completeness: 'complete', paths: surface.files },
+              privateSubpathPrefixes: targetPrivateSubpathPrefixes(eligibility.packageName),
+            };
+          } catch {
+            importUnavailableReason = 'target-package-inventory-unavailable';
+          }
+        }
+      }
+      const endProjectDeep = performance.start('project compatibility import analysis');
+      projectCompatibility = await appendProjectCompatibilityImportAnalysis({
+        analysis: projectCompatibility,
+        project: projectEvidence,
+        ...(targetSurface === undefined ? {} : { targetSurface }),
+        ...(importUnavailableReason === undefined ? {} : { unavailableReason: importUnavailableReason }),
+        signal: analysisAbort.signal,
+      });
+      endProjectDeep({ findings: projectCompatibility.findings.length });
+      endProjectTotal({ findings: projectCompatibility.findings.length });
+      attachTrustedProjectCompatibilityNavigation({
+        analysis: projectCompatibility,
+        packageName: eligibility.packageName,
+        folder: selected.folder,
+        store: this.options.storeProjectCompatibilityReferences,
+      });
+      if (this.droppedByCancellation(eligibility.packageName)) return;
+      this.options.sink.postMessage({
+        status: 'upgrade-analysis-partial',
+        requestId,
+        package: eligibility.packageName,
+        section: { kind: 'project-compatibility', projectCompatibility },
+      });
+
       // --- security outcome (best-effort; never blocks the rest of the
       // analysis) — relocated here, right after compatibility, since its
       // only real data dependency is `analysis.status`, not the smart-plan
@@ -731,19 +1191,21 @@ export class UpgradeAssistantCoordinator {
       let security: SecurityOutcome | null = null;
       if (!securityPosted) {
         let after: Parameters<typeof evaluateSecurityOutcome>[0]['after'] = 'no-resolver-evidence';
+        let proposedSecurityGraph: ReturnType<typeof buildDependencyGraph> | undefined;
         if (analysis.status !== 'conflict' && resolverVerifier !== undefined) {
           try {
             const endSecurityResolver = performance.start('security graph materialization');
             const materialized = await resolverVerifier.materializeResolvedGraph(proposal);
             endSecurityResolver({ resolved: materialized.ok });
             if (materialized.ok) {
+              proposedSecurityGraph = materialized.graph;
               after = { graph: materialized.graph, advisoriesByName: advisoriesByNameFromRows(rows) };
             }
           } catch {
             // Left as 'no-resolver-evidence' — never a hard failure of the analysis.
           }
         }
-        security = combineSecurityOutcomes(
+        const combinedSecurity = combineSecurityOutcomes(
           securityInputs.map(({ item, before }) =>
             evaluateSecurityOutcome({
               before,
@@ -753,6 +1215,18 @@ export class UpgradeAssistantCoordinator {
             })
           )
         );
+        security = combinedSecurity === null
+          ? null
+          : {
+              ...combinedSecurity,
+              contexts: buildVulnerabilityContexts({
+                graph,
+                attributedAdvisories: securityInputs.flatMap(({ before }) => before),
+                ...(proposedSecurityGraph === undefined
+                  ? {}
+                  : { proposed: { graph: proposedSecurityGraph, proposal } }),
+              }),
+            };
 
         if (this.droppedByCancellation(eligibility.packageName)) return;
         this.options.sink.postMessage({
@@ -833,6 +1307,44 @@ export class UpgradeAssistantCoordinator {
       // final partial and final assembly.
       if (this.droppedByCancellation(eligibility.packageName)) return;
 
+      // Source/config files are not part of the dependency lock snapshot, so
+      // re-read their bounded evidence once before retaining an actionable
+      // review. A change during medium/deep analysis invalidates the result
+      // instead of silently attaching findings to an older source state.
+      const finalReadGeneration = this.options.projectCompatibilitySourceGeneration?.() ?? 0;
+      const [finalProjectEvidence, finalDiskSnapshot] = await Promise.all([
+        collectProjectCompatibilityEvidence({
+          folder: selected.folder,
+          dir: selected.dir,
+          manifestText: preflightProject.manifestText,
+          packageName: eligibility.packageName,
+          signal: analysisAbort.signal,
+        }).catch(() => null),
+        this.projectLoader(selected).catch(() => null),
+      ]);
+      if (
+        !projectCompatibilityFinalReadIsCurrent({
+          generationBeforeRead: finalReadGeneration,
+          generationAfterRead: this.options.projectCompatibilitySourceGeneration?.() ?? 0,
+          expectedFingerprint: projectEvidence.evidenceFingerprint === 'unavailable'
+            ? null
+            : projectEvidence.evidenceFingerprint,
+          observedFingerprint: finalProjectEvidence?.evidenceFingerprint ?? null,
+        }) ||
+        finalDiskSnapshot === null ||
+        !resolvedProjectSourceMatches(finalDiskSnapshot, preflightProject)
+      ) {
+        this.options.sink.postMessage({
+          status: 'upgrade-error',
+          package: eligibility.packageName,
+          error: {
+            code: 'STALE_SOURCE',
+            message: 'Project source changed during compatibility analysis. Refresh and try again.',
+          },
+        });
+        return;
+      }
+
       const analysisId = randomBytes(16).toString('hex');
       const analyzedAt = new Date().toISOString();
       const expiresAt = Date.now() + UPGRADE_ANALYSIS_RETENTION_MS;
@@ -847,6 +1359,8 @@ export class UpgradeAssistantCoordinator {
         smartPlanProposal,
         ignoreScripts: upgradeConfiguration.ignoreScripts,
         verificationScripts,
+        projectCompatibilityEvidenceFingerprint:
+          projectEvidence.evidenceFingerprint === 'unavailable' ? null : projectEvidence.evidenceFingerprint,
         expiresAt,
       };
 
@@ -873,6 +1387,7 @@ export class UpgradeAssistantCoordinator {
             findings: analysis.findings,
             ...(analysis.resolverVerification === undefined ? {} : { resolverVerification: analysis.resolverVerification }),
           },
+          projectCompatibility,
           security,
           smartPlan,
           verificationScriptNames: verificationScripts.map((script) => script.scriptName),
@@ -885,6 +1400,10 @@ export class UpgradeAssistantCoordinator {
       succeeded = true;
       return;
     } catch (cause) {
+      if (analysisAbort.signal.aborted) {
+        this.droppedByCancellation(eligibility.packageName);
+        return;
+      }
       if (!this.options.isDisposed()) {
         this.options.sink.postMessage({
           status: 'upgrade-error',
@@ -897,9 +1416,13 @@ export class UpgradeAssistantCoordinator {
       }
       return;
     } finally {
-      if (!succeeded) this.session.release(eligibility.packageName);
+      if (!succeeded) await this.releaseReservation(eligibility.packageName);
       if (this.pendingAnalyzePackage === eligibility.packageName) this.pendingAnalyzePackage = null;
       if (this.cancelRequestedFor === eligibility.packageName) this.cancelRequestedFor = null;
+      if (this.sourceInvalidatedAnalyzePackage === eligibility.packageName) {
+        this.sourceInvalidatedAnalyzePackage = null;
+      }
+      if (this.activeUpgradeAnalysisAbort === analysisAbort) this.activeUpgradeAnalysisAbort = undefined;
       performance.finish({ completed: succeeded });
     }
   }
@@ -918,18 +1441,21 @@ export class UpgradeAssistantCoordinator {
       // handleAnalyzeUpgrade drops its own result instead of storing/posting
       // it. The lock itself is released by that method's own `finally`, not
       // here — nothing to release yet if it's still running.
-      if (this.pendingAnalyzePackage !== null) this.cancelRequestedFor = this.pendingAnalyzePackage;
+      if (this.pendingAnalyzePackage !== null) {
+        this.cancelRequestedFor = this.pendingAnalyzePackage;
+        this.activeUpgradeAnalysisAbort?.abort();
+      }
       return;
     }
     if (this.analysis === undefined || this.analysis.id !== message.analysisId) return;
-    this.session.release(this.analysis.eligibility.packageName);
+    void this.releaseReservation(this.analysis.eligibility.packageName);
     this.analysis = undefined;
   }
 
   /**
-   * Called (debounced, via dashboardPanel.ts's own file-watcher timer) after
-   * a manifest/lockfile/configuration change. If an analysis is currently
-   * open, re-reads disk with the same projectLoader used by the
+   * Called (debounced, via dashboardPanel.ts's watcher timers) after a
+   * manifest/lockfile/configuration or analyzed source change. If an analysis
+   * is currently open, re-reads disk with the same projectLoader used by the
    * authoritative STALE_SOURCE recheck and compares against the exact same
    * fields executeStoredAnalysis compares below — never a second, looser
    * definition of "changed." A mismatch posts a lightweight,
@@ -953,16 +1479,22 @@ export class UpgradeAssistantCoordinator {
     // Re-check after the await: a confirm/cancel/TTL-reclaim may have
     // superseded this exact stored analysis while disk was being re-read.
     if (this.analysis !== stored || this.options.isDisposed()) return;
-    const matches =
-      disk.root === stored.snapshot.root &&
-      disk.manifestText === stored.snapshot.manifestText &&
-      disk.lockfileText === stored.snapshot.lockfileText &&
-      disk.lockfilePath === stored.snapshot.lockfilePath &&
-      disk.registry === stored.snapshot.registry &&
-      disk.packageManager === stored.snapshot.packageManager &&
-      disk.importerId === stored.snapshot.importerId &&
-      JSON.stringify(disk.peerPolicy) === JSON.stringify(stored.snapshot.peerPolicy) &&
-      JSON.stringify(disk.resolvedRegistry) === JSON.stringify(stored.snapshot.resolvedRegistry);
+    let matches = resolvedProjectSourceMatches(disk, stored.snapshot);
+    if (matches && stored.projectCompatibilityEvidenceFingerprint !== null) {
+      const evidence = await collectProjectCompatibilityEvidence({
+        folder: selected.folder,
+        dir: selected.dir,
+        manifestText: disk.manifestText,
+        packageName: stored.eligibility.packageName,
+      }).catch(() => null);
+      // A confirm/cancel/new analysis may supersede this one during the
+      // bounded source scan; never stale a newer retained review.
+      if (this.analysis !== stored || this.options.isDisposed()) return;
+      matches = projectCompatibilityEvidenceIsCurrent(
+        stored.projectCompatibilityEvidenceFingerprint,
+        evidence?.evidenceFingerprint ?? null
+      );
+    }
     if (!matches) {
       this.options.sink.postMessage({ status: 'upgrade-analysis-stale', analysisId: stored.id });
     }
@@ -1015,7 +1547,7 @@ export class UpgradeAssistantCoordinator {
 
     // Same reservation discipline as an upgrade — held across analysis and
     // however long the review modal stays open, not merely execution.
-    if (!this.session.reserve(eligibility.packageName)) {
+    if (!this.reserve(eligibility.packageName)) {
       this.options.sink.postMessage({
         status: 'remove-error',
         package: eligibility.packageName,
@@ -1027,6 +1559,7 @@ export class UpgradeAssistantCoordinator {
       });
       return;
     }
+    const analysisSourceGeneration = this.sourceGeneration.capture();
 
     let succeeded = false;
     try {
@@ -1082,7 +1615,7 @@ export class UpgradeAssistantCoordinator {
       const verificationScripts = selectVerificationScripts(source.manifestText, configuredVerification);
 
       const analysisId = randomBytes(16).toString('hex');
-      this.removal = {
+      const removal: StoredRemoval = {
         id: analysisId,
         requests: [...message.changes],
         eligibility,
@@ -1092,6 +1625,19 @@ export class UpgradeAssistantCoordinator {
         verificationScripts,
         expiresAt: Date.now() + REMOVAL_ANALYSIS_TTL_MS,
       };
+      if (!this.sourceGeneration.commitIfCurrent(analysisSourceGeneration, () => {
+        this.removal = removal;
+      })) {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: eligibility.packageName,
+          error: {
+            code: 'STALE_SOURCE',
+            message: 'Project files changed while removal impact was being analyzed. Analyze again.',
+          },
+        });
+        return;
+      }
 
       this.options.sink.postMessage({
         status: 'remove-analysis',
@@ -1113,7 +1659,7 @@ export class UpgradeAssistantCoordinator {
       }
       return;
     } finally {
-      if (!succeeded) this.session.release(eligibility.packageName);
+      if (!succeeded) await this.releaseReservation(eligibility.packageName);
     }
   }
 
@@ -1127,7 +1673,7 @@ export class UpgradeAssistantCoordinator {
     // delivered analysis is ever cancellable.
     if (message.analysisId === null) return;
     if (this.removal === undefined || this.removal.id !== message.analysisId) return;
-    this.session.release(this.removal.eligibility.packageName);
+    void this.releaseReservation(this.removal.eligibility.packageName);
     this.removal = undefined;
   }
 
@@ -1415,6 +1961,7 @@ export class UpgradeAssistantCoordinator {
    */
   private async executeStoredAnalysis(analysisId: string, wantsSmartPlan: boolean): Promise<void> {
     const stored = this.analysis;
+    const now = Date.now();
     const lookup = resolveAnalysisForExecution({
       stored:
         stored === undefined
@@ -1426,7 +1973,7 @@ export class UpgradeAssistantCoordinator {
               expiresAt: stored.expiresAt,
             },
       requestedAnalysisId: analysisId,
-      now: Date.now(),
+      now,
       wantsSmartPlan,
     });
     if (!lookup.ok || stored === undefined) {
@@ -1435,6 +1982,10 @@ export class UpgradeAssistantCoordinator {
         package: stored?.eligibility.packageName ?? 'unknown',
         error: ANALYSIS_LOOKUP_ERRORS[lookup.ok ? 'STALE_ANALYSIS' : lookup.reason],
       });
+      if (stored !== undefined && now >= stored.expiresAt) {
+        this.analysis = undefined;
+        await this.releaseReservation(stored.eligibility.packageName);
+      }
       return;
     }
     // `wantsSmartPlan` guarantees `hasSmartPlan` was true for `lookup.ok` to
@@ -1442,6 +1993,7 @@ export class UpgradeAssistantCoordinator {
     // fallback below only exists to satisfy the type checker, not because
     // this path is reachable.
     const proposal = wantsSmartPlan ? (stored.smartPlanProposal ?? stored.proposal) : stored.proposal;
+    const executionSourceGeneration = this.sourceGeneration.capture();
 
     // Single-use: cleared now, regardless of outcome, so a retry always goes
     // through a fresh handleAnalyzeUpgrade.
@@ -1449,7 +2001,7 @@ export class UpgradeAssistantCoordinator {
 
     const controller = await this.options.ensureController();
     if (controller === undefined) {
-      this.session.release(stored.eligibility.packageName);
+      await this.releaseReservation(stored.eligibility.packageName);
       return;
     }
 
@@ -1461,27 +2013,30 @@ export class UpgradeAssistantCoordinator {
       // and repeat the host-owned eligibility check immediately before the
       // snapshot; the stored analysis is never execution authority.
       const disk = await this.projectLoader(selected);
-      const sourceStillMatches =
-        disk.root === controller.root &&
-        disk.manifestText === stored.snapshot.manifestText &&
-        disk.lockfileText === stored.snapshot.lockfileText &&
-        disk.lockfilePath === stored.snapshot.lockfilePath &&
-        disk.registry === stored.snapshot.registry &&
-        disk.packageManager === stored.snapshot.packageManager &&
-        disk.importerId === stored.snapshot.importerId &&
-        JSON.stringify(disk.peerPolicy) === JSON.stringify(stored.snapshot.peerPolicy) &&
-        JSON.stringify(disk.resolvedRegistry) === JSON.stringify(stored.snapshot.resolvedRegistry);
+      const sourceStillMatches = disk.root === controller.root && resolvedProjectSourceMatches(disk, stored.snapshot);
       const rechecked = controller.validateBulkUpgradeRequest(
         stored.requests,
         stored.publishedTargetsByPackage
       );
-      if (!sourceStillMatches || !rechecked.ok) {
+      const currentProjectEvidence = sourceStillMatches && stored.projectCompatibilityEvidenceFingerprint !== null
+        ? await collectProjectCompatibilityEvidence({
+            folder: selected.folder,
+            dir: selected.dir,
+            manifestText: disk.manifestText,
+            packageName: stored.eligibility.packageName,
+          }).catch(() => null)
+        : null;
+      const projectEvidenceStillMatches = projectCompatibilityEvidenceIsCurrent(
+        stored.projectCompatibilityEvidenceFingerprint,
+        currentProjectEvidence?.evidenceFingerprint ?? null
+      );
+      if (!sourceStillMatches || !projectEvidenceStillMatches || !rechecked.ok) {
         this.options.sink.postMessage({
           status: 'upgrade-error',
           package: stored.eligibility.packageName,
           error: {
             code: 'STALE_SOURCE',
-            message: 'Project dependency files changed while the analysis was open. Refresh and try again.',
+            message: 'Project dependency or analyzed source files changed while the analysis was open. Refresh and try again.',
           },
         });
         return;
@@ -1545,6 +2100,18 @@ export class UpgradeAssistantCoordinator {
         executeInstall = () => this.session.run(runParams);
       }
 
+      if (!this.sourceGeneration.isCurrent(executionSourceGeneration)) {
+        this.options.sink.postMessage({
+          status: 'upgrade-error',
+          package: stored.eligibility.packageName,
+          error: {
+            code: 'STALE_SOURCE',
+            message: 'Project files changed before the upgrade could begin. Refresh and try again.',
+          },
+        });
+        return;
+      }
+      if (!this.reservation.beginMutation(stored.eligibility.packageName)) return;
       const transaction = await runUpgradeTransaction({
         allowlistedPaths,
         files,
@@ -1704,11 +2271,7 @@ export class UpgradeAssistantCoordinator {
         });
       }
     } finally {
-      this.session.release(stored.eligibility.packageName);
-      this.options.onMutationLockReleased?.();
-      // Watcher events received during the lock are deferred, never dropped.
-      await this.options.flushDeferredChanges();
-      if (this.options.isDisposed()) this.session.dispose();
+      await this.releaseReservation(stored.eligibility.packageName);
     }
   }
 
@@ -1724,21 +2287,27 @@ export class UpgradeAssistantCoordinator {
    */
   private async executeStoredRemoval(analysisId: string): Promise<void> {
     const stored = this.removal;
-    if (stored === undefined || stored.id !== analysisId || Date.now() >= stored.expiresAt) {
+    const now = Date.now();
+    if (stored === undefined || stored.id !== analysisId || now >= stored.expiresAt) {
       this.options.sink.postMessage({
         status: 'remove-error',
         package: stored?.eligibility.packageName ?? 'unknown',
         error: { code: 'STALE_ANALYSIS', message: 'This removal analysis is no longer current. Analyze again.' },
       });
+      if (stored !== undefined && now >= stored.expiresAt) {
+        this.removal = undefined;
+        await this.releaseReservation(stored.eligibility.packageName);
+      }
       return;
     }
+    const executionSourceGeneration = this.sourceGeneration.capture();
 
     // Single-use: cleared now, regardless of outcome, so a retry always goes through a fresh handleAnalyzeBulkRemove.
     this.removal = undefined;
 
     const controller = await this.options.ensureController();
     if (controller === undefined) {
-      this.session.release(stored.eligibility.packageName);
+      await this.releaseReservation(stored.eligibility.packageName);
       return;
     }
 
@@ -1799,6 +2368,18 @@ export class UpgradeAssistantCoordinator {
         return;
       }
 
+      if (!this.sourceGeneration.isCurrent(executionSourceGeneration)) {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: stored.eligibility.packageName,
+          error: {
+            code: 'STALE_SOURCE',
+            message: 'Project files changed before removal could begin. Refresh and try again.',
+          },
+        });
+        return;
+      }
+      if (!this.reservation.beginMutation(stored.eligibility.packageName)) return;
       const transaction = await runUpgradeTransaction({
         allowlistedPaths,
         files,
@@ -1876,10 +2457,7 @@ export class UpgradeAssistantCoordinator {
         });
       }
     } finally {
-      this.session.release(stored.eligibility.packageName);
-      this.options.onMutationLockReleased?.();
-      await this.options.flushDeferredChanges();
-      if (this.options.isDisposed()) this.session.dispose();
+      await this.releaseReservation(stored.eligibility.packageName);
     }
   }
 }

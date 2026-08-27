@@ -58,10 +58,12 @@ function severityCounts(advisories: readonly AttributedAdvisory[]): [Severity, n
 function VulnerabilityDetailCard({
   entry,
   rootPackageName,
+  rootPackageVersion,
   onOpenAdvisory,
 }: {
   entry: AttributedAdvisory;
   rootPackageName: string;
+  rootPackageVersion: string | null;
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
 }): ReactElement {
   return (
@@ -92,7 +94,7 @@ function VulnerabilityDetailCard({
           </dd>
         </div>
         <div className="vuln-card__meta-col">
-          <dt>Fixed in</dt>
+          <dt>Fixed in {entry.flaggedPackage}</dt>
           <dd className={entry.patchedVersion.status === 'known' ? 'vuln-card__fixed' : undefined}>
             {patchedVersionText(entry.patchedVersion)}
           </dd>
@@ -111,6 +113,10 @@ function VulnerabilityDetailCard({
               </span>
             ))}
           </dd>
+        </div>
+        <div className="vuln-card__meta-col">
+          <dt>Direct dependency</dt>
+          <dd><code>{rootPackageName}{rootPackageVersion === null ? '' : `@${rootPackageVersion}`}</code></dd>
         </div>
       </dl>
     </li>
@@ -321,6 +327,7 @@ export function VulnerabilitiesPanel({
             <VulnerabilityDetailCard
               entry={entry}
               rootPackageName={row.name}
+              rootPackageVersion={row.current}
               onOpenAdvisory={onOpenAdvisory}
               key={`${String(entry.advisory.id)}:${entry.path.join('>')}:${index}`}
             />

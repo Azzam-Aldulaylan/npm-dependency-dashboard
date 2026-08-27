@@ -15,6 +15,20 @@ import {
   buildUpgradeAnalysisVerification,
 } from '../out/host/upgradeAnalysisPresentation.js';
 
+const PROJECT_COMPATIBILITY = {
+  identity: {
+    packageName: 'react-toastify',
+    currentVersion: '10.0.6',
+    targetVersion: '11.1.0',
+    requestId: 'request-1',
+    sourceFingerprint: 'source-1',
+  },
+  analyzers: [],
+  findings: [],
+  startedAt: '2026-08-26T12:00:00.000Z',
+  completedAt: '2026-08-26T12:00:00.001Z',
+};
+
 function baseOptions(overrides) {
   return {
     analysisId: 'abc123',
@@ -25,6 +39,7 @@ function baseOptions(overrides) {
     targetVersion: '11.1.0',
     classification: 'prod',
     compatibility: { status: 'compatible', completeness: 'complete', findings: [] },
+    projectCompatibility: PROJECT_COMPATIBILITY,
     security: null,
     smartPlan: null,
     verificationScriptNames: [],
@@ -65,7 +80,7 @@ test('files always report rollback as available — every execution path this fe
   });
 });
 
-test('compatibility, security, and smartPlan are passed through structurally unchanged', () => {
+test('compatibility, project compatibility, security, and smartPlan are passed through structurally unchanged', () => {
   const compatibility = {
     status: 'warning',
     completeness: 'partial',
@@ -88,9 +103,14 @@ test('compatibility, security, and smartPlan are passed through structurally unc
   };
   const smartPlan = { changes: [{ packageName: 'x', currentVersion: '1.0.0', targetVersion: '2.0.0' }], reasonFindingIds: [] };
 
-  const result = buildUpgradeAnalysisPresentation(baseOptions({ compatibility, security, smartPlan }));
+  const projectCompatibility = {
+    ...PROJECT_COMPATIBILITY,
+    analyzers: [{ analyzerId: 'runtime-compatibility', status: 'complete', findings: [] }],
+  };
+  const result = buildUpgradeAnalysisPresentation(baseOptions({ compatibility, projectCompatibility, security, smartPlan }));
 
   assert.deepEqual(result.compatibility, compatibility);
+  assert.deepEqual(result.projectCompatibility, projectCompatibility);
   assert.deepEqual(result.security, security);
   assert.deepEqual(result.smartPlan, smartPlan);
 });

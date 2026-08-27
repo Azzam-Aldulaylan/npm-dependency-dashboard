@@ -126,10 +126,27 @@ export interface RemainingVulnerability {
   patchedVersion: PatchedVersionResult;
 }
 
+export interface VulnerabilityContext {
+  advisory: Advisory;
+  flaggedPackage: string;
+  flaggedVersion: string | null;
+  /** Patch metadata for the flagged package only, never a direct-root target. */
+  patchedVersion: PatchedVersionResult;
+  primaryPath: { nodes: Array<{ packageName: string; version: string | null }> };
+  paths: Array<{ nodes: Array<{ packageName: string; version: string | null }> }>;
+  pathsTruncated?: boolean;
+  directRoots: Array<{ packageName: string; version: string | null; pathCount: number }>;
+  provenResolution: {
+    directDependencyChanges: Array<{ packageName: string; fromVersion: string | null; targetVersion: string }>;
+  } | null;
+}
+
 export interface SecurityOutcome {
   status: SecurityOutcomeStatus;
   resolvedAdvisories: AttributedAdvisory[];
   remaining: RemainingVulnerability[];
+  /** Optional richer graph context; older/remediation outcomes remain protocol-compatible without it. */
+  contexts?: VulnerabilityContext[];
 }
 
 export type DependencyClassification = 'prod' | 'dev' | 'optional';
@@ -199,6 +216,74 @@ export interface UpgradeAnalysisCompatibility {
   resolverVerification?: ResolverVerification;
 }
 
+export type ProjectCompatibilityConfidence = 'confirmed' | 'likely' | 'review';
+export type ProjectCompatibilityCategory =
+  | 'import'
+  | 'private-api'
+  | 'runtime'
+  | 'config'
+  | 'script'
+  | 'tooling'
+  | 'compiler'
+  | 'framework-migration';
+
+export interface ProjectCompatibilityEvidence {
+  kind:
+    | 'source-reference'
+    | 'package-script'
+    | 'project-engine'
+    | 'runtime-version'
+    | 'target-metadata'
+    | 'target-package-surface'
+    | 'manifest-dependency'
+    | 'project-config';
+  filePath?: string;
+  line?: number;
+  column?: number;
+  snippet?: string;
+  context?: string;
+  specifier?: string;
+  /** Existing UsageReferenceStore trust tuple; display paths never authorize navigation. */
+  usageId?: string;
+  referenceIndex?: number;
+}
+
+export interface ProjectCompatibilityFinding {
+  id: string;
+  category: ProjectCompatibilityCategory;
+  confidence: ProjectCompatibilityConfidence;
+  packageName: string;
+  targetVersion: string;
+  title: string;
+  explanation: string;
+  migrationHint?: string;
+  evidence: ProjectCompatibilityEvidence[];
+  source: 'generic' | 'framework-rule';
+  ruleId?: string;
+}
+
+export interface ProjectCompatibilityAnalyzerResult {
+  analyzerId: string;
+  status: 'complete' | 'partial' | 'unavailable' | 'cancelled';
+  findings: ProjectCompatibilityFinding[];
+  unavailableReason?: string;
+  durationMs?: number;
+}
+
+export interface ProjectCompatibilityAnalysis {
+  identity: {
+    packageName: string;
+    currentVersion: string;
+    targetVersion: string;
+    requestId: string;
+    sourceFingerprint: string;
+  };
+  analyzers: ProjectCompatibilityAnalyzerResult[];
+  findings: ProjectCompatibilityFinding[];
+  startedAt: string;
+  completedAt: string;
+}
+
 export interface UpgradeAnalysisPresentation {
   analysisId: string;
   /** ISO timestamp this analysis was produced — the basis for the Upgrade review panel's one-hour soft age hint. Structural staleness is signalled separately by `upgrade-analysis-stale`. */
@@ -213,6 +298,7 @@ export interface UpgradeAnalysisPresentation {
   /** Every host-validated change in the requested coordinated proposal. */
   changes: UpgradeAnalysisChange[];
   compatibility: UpgradeAnalysisCompatibility;
+  projectCompatibility: ProjectCompatibilityAnalysis;
   security: SecurityOutcome | null;
   smartPlan: UpgradeAnalysisSmartPlan | null;
   verification: UpgradeAnalysisVerification;
@@ -286,6 +372,8 @@ export type UpgradeAnalysisPartialSection =
       files: UpgradeAnalysisFiles;
     }
   | { kind: 'compatibility'; compatibility: UpgradeAnalysisCompatibility }
+  /** May arrive more than once as fast/medium/deep analyzers settle; the latest identity-matching value replaces the previous one. */
+  | { kind: 'project-compatibility'; projectCompatibility: ProjectCompatibilityAnalysis }
   | { kind: 'security'; security: SecurityOutcome | null }
   | { kind: 'smart-plan'; smartPlan: UpgradeAnalysisSmartPlan | null };
 
@@ -422,7 +510,7 @@ export type HostToWebviewMessage =
    * UpgradeAnalysisPartialSection's own doc for why a request-scoped id is
    * needed here rather than reusing `package`/`analysisId`.
    */
-  | { status: 'upgrade-analyzing'; package: string; phase: 'compatibility' | 'smart-plan'; requestId: string }
+  | { status: 'upgrade-analyzing'; package: string; phase: 'compatibility' | 'project-compatibility' | 'smart-plan'; requestId: string }
   /**
    * One real, already-computed section of an in-progress Upgrade review
    * analysis, streamed as soon as it's ready rather than held back for the
@@ -804,6 +892,32 @@ const SECURITY_OUTCOME_STATUSES: ReadonlySet<string> = new Set<SecurityOutcomeSt
   'not-applicable',
 ]);
 
+const PROJECT_COMPATIBILITY_CATEGORIES: ReadonlySet<string> = new Set<ProjectCompatibilityCategory>([
+  'import',
+  'private-api',
+  'runtime',
+  'config',
+  'script',
+  'tooling',
+  'compiler',
+  'framework-migration',
+]);
+const PROJECT_COMPATIBILITY_CONFIDENCES: ReadonlySet<string> = new Set<ProjectCompatibilityConfidence>([
+  'confirmed',
+  'likely',
+  'review',
+]);
+const PROJECT_COMPATIBILITY_EVIDENCE_KINDS = new Set<ProjectCompatibilityEvidence['kind']>([
+  'source-reference',
+  'package-script',
+  'project-engine',
+  'runtime-version',
+  'target-metadata',
+  'target-package-surface',
+  'manifest-dependency',
+  'project-config',
+]);
+
 const PACKAGE_MANAGERS: ReadonlySet<string> = new Set<SupportedPackageManager>(['npm', 'pnpm']);
 const CLASSIFICATIONS: ReadonlySet<string> = new Set<DependencyClassification>(['prod', 'dev', 'optional']);
 
@@ -911,8 +1025,59 @@ function isRemainingVulnerability(value: unknown): value is RemainingVulnerabili
   );
 }
 
+function isVulnerabilityPath(value: unknown): boolean {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['nodes'])) return false;
+  const nodes = value['nodes'];
+  return Array.isArray(nodes) && nodes.length > 0 && nodes.length <= 100 && nodes.every((node) =>
+    isRecord(node) &&
+    hasOnlyKeys(node, ['packageName', 'version']) &&
+    isNonEmptyString(node['packageName']) &&
+    isStringOrNullField(node['version'])
+  );
+}
+
+function isVulnerabilityContext(value: unknown): value is VulnerabilityContext {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'advisory', 'flaggedPackage', 'flaggedVersion', 'patchedVersion', 'primaryPath',
+    'paths', 'pathsTruncated', 'directRoots', 'provenResolution',
+  ])) return false;
+  const paths = value['paths'];
+  const roots = value['directRoots'];
+  const resolution = value['provenResolution'];
+  const resolutionOk = resolution === null || (
+    isRecord(resolution) &&
+    hasOnlyKeys(resolution, ['directDependencyChanges']) &&
+    Array.isArray(resolution['directDependencyChanges']) &&
+    resolution['directDependencyChanges'].length > 0 &&
+    resolution['directDependencyChanges'].every((change) =>
+      isRecord(change) &&
+      hasOnlyKeys(change, ['packageName', 'fromVersion', 'targetVersion']) &&
+      isNonEmptyString(change['packageName']) &&
+      isStringOrNullField(change['fromVersion']) &&
+      isNonEmptyString(change['targetVersion'])
+    )
+  );
+  return (
+    isAdvisory(value['advisory']) &&
+    isNonEmptyString(value['flaggedPackage']) &&
+    isStringOrNullField(value['flaggedVersion']) &&
+    isPatchedVersionResult(value['patchedVersion']) &&
+    isVulnerabilityPath(value['primaryPath']) &&
+    Array.isArray(paths) && paths.length > 0 && paths.length <= 100 && paths.every(isVulnerabilityPath) &&
+    isAbsentOr(value['pathsTruncated'], (entry) => typeof entry === 'boolean') &&
+    Array.isArray(roots) && roots.length > 0 && roots.length <= 100 && roots.every((root) =>
+      isRecord(root) &&
+      hasOnlyKeys(root, ['packageName', 'version', 'pathCount']) &&
+      isNonEmptyString(root['packageName']) &&
+      isStringOrNullField(root['version']) &&
+      typeof root['pathCount'] === 'number' && Number.isInteger(root['pathCount']) && root['pathCount'] > 0
+    ) &&
+    resolutionOk
+  );
+}
+
 function isSecurityOutcome(value: unknown): value is SecurityOutcome {
-  if (!isRecord(value) || !hasOnlyKeys(value, ['status', 'resolvedAdvisories', 'remaining'])) return false;
+  if (!isRecord(value) || !hasOnlyKeys(value, ['status', 'resolvedAdvisories', 'remaining', 'contexts'])) return false;
   const status = value['status'];
   const resolvedAdvisories = value['resolvedAdvisories'];
   const remaining = value['remaining'];
@@ -922,7 +1087,8 @@ function isSecurityOutcome(value: unknown): value is SecurityOutcome {
     Array.isArray(resolvedAdvisories) &&
     resolvedAdvisories.every(isAttributedAdvisory) &&
     Array.isArray(remaining) &&
-    remaining.every(isRemainingVulnerability)
+    remaining.every(isRemainingVulnerability) &&
+    isAbsentOr(value['contexts'], (contexts) => Array.isArray(contexts) && contexts.length <= 500 && contexts.every(isVulnerabilityContext))
   );
 }
 
@@ -938,6 +1104,91 @@ function isUpgradeAnalysisCompatibilityValue(value: unknown): value is UpgradeAn
     Array.isArray(findings) &&
     findings.every(isCompatibilityFinding) &&
     isAbsentOr(value['resolverVerification'], isResolverVerification)
+  );
+}
+
+function isProjectCompatibilityEvidence(value: unknown): value is ProjectCompatibilityEvidence {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'kind', 'filePath', 'line', 'column', 'snippet', 'context', 'specifier', 'usageId', 'referenceIndex',
+  ])) return false;
+  const usageId = value['usageId'];
+  const referenceIndex = value['referenceIndex'];
+  const hasNavigation = usageId !== undefined || referenceIndex !== undefined;
+  return (
+    typeof value['kind'] === 'string' &&
+    PROJECT_COMPATIBILITY_EVIDENCE_KINDS.has(value['kind'] as ProjectCompatibilityEvidence['kind']) &&
+    isAbsentOr(value['filePath'], (entry) => typeof entry === 'string') &&
+    isAbsentOr(value['line'], (entry) => typeof entry === 'number' && Number.isInteger(entry) && entry >= 0) &&
+    isAbsentOr(value['column'], (entry) => typeof entry === 'number' && Number.isInteger(entry) && entry >= 0) &&
+    isAbsentOr(value['snippet'], (entry) => typeof entry === 'string') &&
+    isAbsentOr(value['context'], (entry) => typeof entry === 'string') &&
+    isAbsentOr(value['specifier'], (entry) => typeof entry === 'string') &&
+    (!hasNavigation || (isNonEmptyString(usageId) && typeof referenceIndex === 'number' && Number.isInteger(referenceIndex) && referenceIndex >= 0))
+  );
+}
+
+function isProjectCompatibilityFinding(value: unknown): value is ProjectCompatibilityFinding {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'id', 'category', 'confidence', 'packageName', 'targetVersion', 'title', 'explanation',
+    'migrationHint', 'evidence', 'source', 'ruleId',
+  ])) return false;
+  const evidence = value['evidence'];
+  return (
+    isNonEmptyString(value['id']) &&
+    typeof value['category'] === 'string' && PROJECT_COMPATIBILITY_CATEGORIES.has(value['category']) &&
+    typeof value['confidence'] === 'string' && PROJECT_COMPATIBILITY_CONFIDENCES.has(value['confidence']) &&
+    isNonEmptyString(value['packageName']) &&
+    isNonEmptyString(value['targetVersion']) &&
+    isNonEmptyString(value['title']) &&
+    isNonEmptyString(value['explanation']) &&
+    isAbsentOr(value['migrationHint'], (entry) => typeof entry === 'string') &&
+    Array.isArray(evidence) && evidence.length <= 20 && evidence.every(isProjectCompatibilityEvidence) &&
+    (value['source'] === 'generic' || value['source'] === 'framework-rule') &&
+    isAbsentOr(value['ruleId'], (entry) => typeof entry === 'string')
+  );
+}
+
+function isProjectCompatibilityAnalysis(value: unknown): value is ProjectCompatibilityAnalysis {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['identity', 'analyzers', 'findings', 'startedAt', 'completedAt'])) return false;
+  const identity = value['identity'];
+  const analyzers = value['analyzers'];
+  const findings = value['findings'];
+  if (!isRecord(identity) || !hasOnlyKeys(identity, [
+    'packageName', 'currentVersion', 'targetVersion', 'requestId', 'sourceFingerprint',
+  ])) return false;
+  if (!Array.isArray(findings) || findings.length > 500 || !findings.every(isProjectCompatibilityFinding)) return false;
+  if (!Array.isArray(analyzers) || analyzers.length > 30) return false;
+  const analyzerOk = analyzers.every((analyzer) => {
+    if (!isRecord(analyzer) || !hasOnlyKeys(analyzer, [
+      'analyzerId', 'status', 'findings', 'unavailableReason', 'durationMs',
+    ])) return false;
+    const status = analyzer['status'];
+    const analyzerFindings = analyzer['findings'];
+    return (
+      isNonEmptyString(analyzer['analyzerId']) &&
+      (status === 'complete' || status === 'partial' || status === 'unavailable' || status === 'cancelled') &&
+      Array.isArray(analyzerFindings) && analyzerFindings.length <= 500 && analyzerFindings.every(isProjectCompatibilityFinding) &&
+      isAbsentOr(analyzer['unavailableReason'], (entry) => typeof entry === 'string') &&
+      isAbsentOr(analyzer['durationMs'], (entry) => typeof entry === 'number' && Number.isFinite(entry) && entry >= 0)
+    );
+  });
+  if (!analyzerOk) return false;
+  const startedAt = value['startedAt'];
+  const completedAt = value['completedAt'];
+  if (typeof startedAt !== 'string' || typeof completedAt !== 'string') return false;
+  const startedMs = Date.parse(startedAt);
+  const completedMs = Date.parse(completedAt);
+  return (
+    isNonEmptyString(identity['packageName']) &&
+    isNonEmptyString(identity['currentVersion']) &&
+    isNonEmptyString(identity['targetVersion']) &&
+    isNonEmptyString(identity['requestId']) &&
+    isNonEmptyString(identity['sourceFingerprint']) &&
+    Number.isFinite(startedMs) && Number.isFinite(completedMs) &&
+    new Date(startedMs).toISOString() === startedAt &&
+    new Date(completedMs).toISOString() === completedAt &&
+    completedMs >= startedMs &&
+    findings.every((finding) => finding.packageName === identity['packageName'] && finding.targetVersion === identity['targetVersion'])
   );
 }
 
@@ -1011,6 +1262,7 @@ function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysis
       'majorUpdate',
       'changes',
       'compatibility',
+      'projectCompatibility',
       'security',
       'smartPlan',
       'verification',
@@ -1021,6 +1273,8 @@ function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysis
   }
 
   if (!isUpgradeAnalysisCompatibilityValue(value['compatibility'])) return false;
+  if (!isProjectCompatibilityAnalysis(value['projectCompatibility'])) return false;
+  const projectCompatibility = value['projectCompatibility'];
 
   const changes = value['changes'];
   if (!isUpgradeAnalysisChangesValue(changes)) return false;
@@ -1056,7 +1310,10 @@ function isUpgradeAnalysisPresentation(value: unknown): value is UpgradeAnalysis
     firstChange['currentVersion'] === value['currentVersion'] &&
     firstChange['targetVersion'] === value['targetVersion'] &&
     firstChange['classification'] === value['classification'] &&
-    firstChange['majorUpdate'] === value['majorUpdate']
+    firstChange['majorUpdate'] === value['majorUpdate'] &&
+    projectCompatibility.identity.packageName === value['package'] &&
+    projectCompatibility.identity.currentVersion === value['currentVersion'] &&
+    projectCompatibility.identity.targetVersion === value['targetVersion']
   );
 }
 
@@ -1088,6 +1345,9 @@ function isUpgradeAnalysisPartialSection(value: unknown): value is UpgradeAnalys
   }
   if (kind === 'compatibility') {
     return hasOnlyKeys(value, ['kind', 'compatibility']) && isUpgradeAnalysisCompatibilityValue(value['compatibility']);
+  }
+  if (kind === 'project-compatibility') {
+    return hasOnlyKeys(value, ['kind', 'projectCompatibility']) && isProjectCompatibilityAnalysis(value['projectCompatibility']);
   }
   if (kind === 'security') {
     const security = value['security'];
@@ -1366,23 +1626,29 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
       hasOnlyKeys(value, ['status', 'package', 'phase', 'requestId']) &&
       isNonEmptyString(value['package']) &&
       isNonEmptyString(value['requestId']) &&
-      (phase === 'compatibility' || phase === 'smart-plan')
+      (phase === 'compatibility' || phase === 'project-compatibility' || phase === 'smart-plan')
     );
   }
   if (status === 'upgrade-analysis-partial') {
-    return (
+    if (!(
       hasOnlyKeys(value, ['status', 'requestId', 'package', 'section']) &&
       isNonEmptyString(value['requestId']) &&
       isNonEmptyString(value['package']) &&
       isUpgradeAnalysisPartialSection(value['section'])
+    )) return false;
+    const section = value['section'];
+    return section.kind !== 'project-compatibility' || (
+      section.projectCompatibility.identity.requestId === value['requestId'] &&
+      section.projectCompatibility.identity.packageName === value['package']
     );
   }
   if (status === 'upgrade-analysis') {
-    return (
+    if (!(
       hasOnlyKeys(value, ['status', 'analysis', 'requestId']) &&
       isUpgradeAnalysisPresentation(value['analysis']) &&
       isNonEmptyString(value['requestId'])
-    );
+    )) return false;
+    return value['analysis'].projectCompatibility.identity.requestId === value['requestId'];
   }
   if (status === 'upgrade-analysis-stale') {
     return hasOnlyKeys(value, ['status', 'analysisId']) && isNonEmptyString(value['analysisId']);

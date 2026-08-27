@@ -28,6 +28,7 @@ import type {
   UpgradeAnalysisCompatibility,
   UpgradeAnalysisFiles,
   UpgradeAnalysisPresentation,
+  ProjectCompatibilityAnalysis,
   UpgradeAnalysisSmartPlan,
   UpgradeAnalysisVerification,
 } from './webviewProtocol.js';
@@ -91,6 +92,7 @@ export interface BuildUpgradeAnalysisPresentationOptions extends BuildUpgradeAna
   /** ISO timestamp derived from the exact stored-analysis retention deadline. */
   expiresAt: string;
   compatibility: UpgradeAnalysisCompatibility;
+  projectCompatibility: ProjectCompatibilityAnalysis;
   security: SecurityOutcome | null;
   smartPlan: UpgradeAnalysisSmartPlan | null;
   verificationScriptNames: readonly string[];
@@ -113,6 +115,7 @@ export function buildUpgradeAnalysisPresentation(
     majorUpdate: isMajorUpgrade(options.currentVersion, options.targetVersion),
     changes,
     compatibility: options.compatibility,
+    projectCompatibility: options.projectCompatibility,
     security: options.security,
     smartPlan: options.smartPlan,
     verification: buildUpgradeAnalysisVerification(options.verificationScriptNames),

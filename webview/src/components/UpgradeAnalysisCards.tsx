@@ -3,11 +3,13 @@ import type { ReactElement } from 'react';
 import type { PackageRow } from '../../../src/core/types.js';
 import type {
   CompatibilityFindingKind,
+  ProjectCompatibilityAnalysis,
   UpgradeAnalysisPresentation,
   UpgradeAnalysisSmartPlan,
   UpgradeAnalysisVerification,
 } from '../../../src/host/webviewProtocol.js';
 import { compatibilityOutcomeDisplay, securityOutcomeDisplay } from '../../../src/host/outcomeCopy.js';
+import { summarizeProjectCompatibility } from '../../../src/host/projectCompatibilityUiState.js';
 import {
   plannerAddedUpgradeChanges,
   remainingVulnerabilityPatchedVersionLabel,
@@ -52,19 +54,17 @@ const PEER_FINDING_KINDS: ReadonlySet<CompatibilityFindingKind> = new Set([
 ]);
 
 /**
- * The 4-check compact grid. Only two of these four categories have a real
- * signal anywhere in this codebase today (peer dependencies, from
- * `compatibility.findings`; breaking changes, from the `major-version-change`
- * finding kind / `majorUpdate`) — engine-requirement and deprecated-API
- * detection do not exist in the analysis pipeline at all, so both render
- * "Not checked" rather than a fabricated "Compatible"/"None detected".
+ * The compact compatibility grid. Peer results remain dependency-tree facts;
+ * runtime and project compatibility come only from the new host analyzers.
+ * A major version alone is deliberately not rendered as a breaking-change
+ * claim. Deprecated API analysis is still not implemented and stays honest.
  */
 export function CompatibilityCheckCard({
   compatibility,
-  majorUpdate,
+  projectCompatibility,
 }: {
   compatibility: UpgradeAnalysisPresentation['compatibility'];
-  majorUpdate: boolean;
+  projectCompatibility?: ProjectCompatibilityAnalysis | undefined;
 }): ReactElement {
   const summary = overallStatusDetail({ compatibility });
   const summaryTone = compatibilityOutcomeDisplay(compatibility.status).className;
@@ -83,7 +83,41 @@ export function CompatibilityCheckCard({
         ? `${peerProblems.length} conflict${peerProblems.length === 1 ? '' : 's'}`
         : 'No conflicts';
 
-  const hasMajorFinding = compatibility.findings.some((finding) => finding.kind === 'major-version-change') || majorUpdate;
+  const projectSummary = projectCompatibility === undefined ? null : summarizeProjectCompatibility(projectCompatibility);
+  const hasProjectAnalyzers = projectCompatibility !== undefined && projectCompatibility.analyzers.length > 0;
+  const runtimeFindings = projectCompatibility?.findings.filter((finding) => finding.category === 'runtime') ?? [];
+  const runtimeTone: CompatCheckTone =
+    projectSummary === null || projectSummary.runtimeStatus === 'missing' || projectSummary.runtimeStatus === 'unavailable' || projectSummary.runtimeStatus === 'cancelled'
+      ? 'unknown'
+      : runtimeFindings.length > 0
+        ? 'warn'
+        : projectSummary.runtimeStatus === 'partial'
+          ? 'unknown'
+          : 'ok';
+  const runtimeValue =
+    projectSummary === null || projectSummary.runtimeStatus === 'missing'
+      ? 'Not checked'
+      : projectSummary.runtimeStatus === 'unavailable' || projectSummary.runtimeStatus === 'cancelled'
+        ? 'Could not verify'
+        : runtimeFindings.length > 0
+          ? `${runtimeFindings.length} issue${runtimeFindings.length === 1 ? '' : 's'}`
+          : projectSummary.runtimeStatus === 'partial'
+            ? 'Partially checked'
+            : 'No conflicts found';
+  const projectTone: CompatCheckTone =
+    projectSummary === null || !hasProjectAnalyzers || projectSummary.incompleteAnalyzers.length > 0
+      ? projectSummary !== null && projectSummary.total > 0 ? 'warn' : 'unknown'
+      : projectSummary.total > 0
+        ? 'warn'
+        : 'ok';
+  const projectValue =
+    projectSummary === null || !hasProjectAnalyzers
+      ? 'Not checked'
+      : projectSummary.total > 0
+        ? `${projectSummary.total} finding${projectSummary.total === 1 ? '' : 's'}`
+        : projectSummary.incompleteAnalyzers.length > 0
+          ? 'Checks incomplete'
+          : 'No issues found';
 
   return (
     <section className="analysis-card" aria-labelledby="upgrade-compat-heading">
@@ -105,8 +139,8 @@ export function CompatibilityCheckCard({
       ) : null}
       <div className="hygiene-strip">
         <CompatCheckItem tone={peerTone} label="Peer dependencies" value={peerValue} />
-        <CompatCheckItem tone="unknown" label="Engine requirements" value="Not checked" />
-        <CompatCheckItem tone={hasMajorFinding ? 'warn' : 'ok'} label="Breaking changes" value={hasMajorFinding ? 'Major version change' : 'No major version change'} />
+        <CompatCheckItem tone={runtimeTone} label="Engine requirements" value={runtimeValue} />
+        <CompatCheckItem tone={projectTone} label="Project compatibility" value={projectValue} />
         <CompatCheckItem tone="unknown" label="Deprecated APIs" value="Not checked" />
       </div>
     </section>
@@ -254,6 +288,7 @@ export function SecurityOutcomeCard({
     },
   ].filter((group) => group.entries.length > 0);
   const after = securityOutcomeDisplay(security.status);
+  const contexts = security.contexts ?? [];
   const subtitle =
     security.status === 'resolved'
       ? 'This upgrade will improve your security posture.'
@@ -295,6 +330,76 @@ export function SecurityOutcomeCard({
           <p className="security-outcome__detail">{after.label}</p>
         </div>
       </div>
+      {contexts.length > 0 ? (
+        <details className="vulnerability-contexts">
+          <summary className="vulnerability-contexts__summary">
+            Dependency paths and remediation evidence
+          </summary>
+          <ul className="vulnerability-contexts__list">
+            {contexts.map((context) => {
+              const primaryPath = context.primaryPath.nodes.map((node) => node.packageName);
+              const contextRootPackage = primaryPath[0] ?? row.name;
+              return (
+                <li className="vulnerability-context" key={`${String(context.advisory.id)}:${context.flaggedPackage}:${context.flaggedVersion ?? ''}`}>
+                  <div className="vulnerability-context__head">
+                    <SeverityBadge severity={context.advisory.severity} />
+                    <strong>{context.advisory.title}</strong>
+                  </div>
+                  <dl className="vulnerability-context__meta">
+                    <dt>Flagged package</dt>
+                    <dd><code>{context.flaggedPackage}{context.flaggedVersion === null ? '' : `@${context.flaggedVersion}`}</code></dd>
+                    <dt>Introduced through</dt>
+                    <dd><code>{context.primaryPath.nodes.map((node) => `${node.packageName}${node.version === null ? '' : `@${node.version}`}`).join(' → ')}</code></dd>
+                    <dt>Direct {context.directRoots.length === 1 ? 'dependency' : 'dependencies'}</dt>
+                    <dd>
+                      {context.directRoots.map((root) => (
+                        <code key={`${root.packageName}:${root.version ?? ''}`}>{root.packageName}{root.version === null ? '' : `@${root.version}`}</code>
+                      ))}
+                    </dd>
+                    <dt>{remainingVulnerabilityPatchedVersionLabel(context.flaggedPackage)}</dt>
+                    <dd><code>{patchedVersionText(context.patchedVersion)}</code></dd>
+                  </dl>
+                  {context.paths.length > 1 ? (
+                    <details className="vulnerability-context__paths">
+                      <summary>
+                        View {context.pathsTruncated === true ? `first ${context.paths.length}` : `all ${context.paths.length}`} dependency paths
+                      </summary>
+                      <ol>
+                        {context.paths.map((path, index) => (
+                          <li key={`${String(context.advisory.id)}:path:${index}`}>
+                            <code>{path.nodes.map((node) => node.packageName).join(' → ')}</code>
+                          </li>
+                        ))}
+                      </ol>
+                    </details>
+                  ) : null}
+                  {context.provenResolution !== null ? (
+                    <p className="vulnerability-context__resolution">
+                      <IconCheck aria-hidden="true" />
+                      {context.provenResolution.directDependencyChanges.length === 1 ? 'Resolved by upgrading ' : 'Resolved by coordinated upgrades: '}
+                      {context.provenResolution.directDependencyChanges.map((change, index) => (
+                        <span key={change.packageName}>
+                          {index > 0 ? ', ' : ''}<code>{change.packageName}</code> to <code>{change.targetVersion}</code>
+                        </span>
+                      ))}
+                    </p>
+                  ) : null}
+                  {onOpenAdvisory !== undefined ? (
+                    <button
+                      type="button"
+                      className="advisory__source"
+                      onClick={() => onOpenAdvisory(contextRootPackage, context.advisory.id, primaryPath)}
+                    >
+                      View advisory source
+                      <IconExternalLink />
+                    </button>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </details>
+      ) : null}
       {security.remaining.length > 0 ? (
         <details className="security-remaining">
           <summary className="security-remaining__summary">

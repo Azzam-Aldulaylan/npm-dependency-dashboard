@@ -82,6 +82,20 @@ export function manageRemovalReplacesUpgradeReview(
 }
 
 /**
+ * Symmetric handoff for the other direction: a completed removal review
+ * opened inside Manage may yield its retained project lock when the user
+ * deliberately starts an upgrade review for that same package. Dashboard
+ * removals and reviews for another package are never cancelled implicitly.
+ */
+export function manageUpgradeReplacesRemovalReview(
+  packageName: string,
+  activeRemove: string | null,
+  removeOrigin: 'dashboard' | 'manage-dependency' | null
+): boolean {
+  return removeOrigin === 'manage-dependency' && activeRemove === packageName;
+}
+
+/**
  * UPGRADE_IN_PROGRESS means a *different* request than the one this webview
  * is currently tracking was rejected — a race between a rapid duplicate
  * click and React's own re-render (the disabled attribute lands one tick

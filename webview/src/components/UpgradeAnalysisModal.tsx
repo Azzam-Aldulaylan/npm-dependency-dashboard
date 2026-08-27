@@ -9,6 +9,7 @@ import { IconRefresh, IconX } from '../icons.js';
 import { CompatibilitySection } from './CompatibilitySection.js';
 import { FilesSection } from './FilesSection.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
+import { ProjectCompatibilitySection } from './ProjectCompatibilitySection.js';
 import { SecuritySection } from './SecuritySection.js';
 import { SmartPlanSection } from './SmartPlanSection.js';
 import { UpgradeAnalysisLoading } from './UpgradeAnalysisLoading.js';
@@ -52,14 +53,16 @@ export function UpgradeAnalysisBody({
   analyzingPhase,
   analysis,
   onOpenAdvisory,
+  onOpenUsageReference,
   onConfigureVerification,
   pendingChanges,
 }: {
   packageName: string;
   targetVersion: string;
-  analyzingPhase: 'compatibility' | 'smart-plan' | null;
+  analyzingPhase: 'compatibility' | 'project-compatibility' | 'smart-plan' | null;
   analysis: UpgradeAnalysisPresentation | null;
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenUsageReference?: ((usageId: string, referenceIndex: number) => void) | undefined;
   onConfigureVerification: () => void;
   pendingChanges?: readonly { packageName: string; targetVersion: string }[] | undefined;
 }): ReactElement {
@@ -116,6 +119,7 @@ export function UpgradeAnalysisBody({
           compatibility={analysis.compatibility}
           context={{ package: analysis.package, currentVersion: analysis.currentVersion }}
         />
+        <ProjectCompatibilitySection analysis={analysis.projectCompatibility} onOpenUsageReference={onOpenUsageReference} />
         <SecuritySection
           security={analysis.security}
           rootPackageName={analysis.package}
@@ -155,11 +159,12 @@ export function UpgradeAnalysisModal({
   onRefresh,
   onConfigureVerification,
   onOpenAdvisory,
+  onOpenUsageReference,
   pendingChanges,
 }: {
   packageName: string;
   targetVersion: string;
-  analyzingPhase: 'compatibility' | 'smart-plan' | null;
+  analyzingPhase: 'compatibility' | 'project-compatibility' | 'smart-plan' | null;
   analysis: UpgradeAnalysisPresentation | null;
   busy: boolean;
   hardStale: boolean;
@@ -170,6 +175,7 @@ export function UpgradeAnalysisModal({
   onRefresh: () => void;
   onConfigureVerification: () => void;
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenUsageReference?: ((usageId: string, referenceIndex: number) => void) | undefined;
   pendingChanges?: readonly { packageName: string; targetVersion: string }[];
 }): ReactElement {
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -295,6 +301,7 @@ export function UpgradeAnalysisModal({
             analyzingPhase={analyzingPhase}
             analysis={analysis}
             onOpenAdvisory={onOpenAdvisory}
+            onOpenUsageReference={onOpenUsageReference}
             onConfigureVerification={onConfigureVerification}
             pendingChanges={pendingChanges}
           />

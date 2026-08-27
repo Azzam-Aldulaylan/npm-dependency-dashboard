@@ -76,6 +76,54 @@ const DATA = {
   builtAt: '2026-08-01T09:00:00.000Z',
 };
 
+const MINIMAL_PROJECT_COMPATIBILITY = {
+  identity: {
+    packageName: 'react-toastify',
+    currentVersion: '10.0.6',
+    targetVersion: '11.1.0',
+    requestId: 'req-1',
+    sourceFingerprint: 'source-1',
+  },
+  analyzers: [],
+  findings: [],
+  startedAt: '2026-08-01T09:00:00.000Z',
+  completedAt: '2026-08-01T09:00:01.000Z',
+};
+
+const PROJECT_COMPATIBILITY_FINDING = {
+  id: 'next:15.5.24:removed-import',
+  category: 'import',
+  confidence: 'confirmed',
+  packageName: 'react-toastify',
+  targetVersion: '11.1.0',
+  title: 'Import compatibility issue',
+  explanation: 'The imported subpath is not published by the selected target.',
+  migrationHint: 'Use a public package entry point.',
+  evidence: [{
+    kind: 'source-reference',
+    filePath: 'src/example.ts',
+    line: 4,
+    column: 18,
+    snippet: `import x from 'react-toastify/private';`,
+    specifier: 'react-toastify/private',
+    usageId: 'host-usage-1',
+    referenceIndex: 0,
+  }],
+  source: 'generic',
+  ruleId: 'target-package-file-missing',
+};
+
+const STRUCTURED_PROJECT_COMPATIBILITY = {
+  ...MINIMAL_PROJECT_COMPATIBILITY,
+  analyzers: [{
+    analyzerId: 'import-compatibility',
+    status: 'complete',
+    findings: [PROJECT_COMPATIBILITY_FINDING],
+    durationMs: 1.25,
+  }],
+  findings: [PROJECT_COMPATIBILITY_FINDING],
+};
+
 const MINIMAL_ANALYSIS = {
   analysisId: 'abc123',
   analyzedAt: '2026-08-01T09:00:00.000Z',
@@ -93,6 +141,7 @@ const MINIMAL_ANALYSIS = {
     majorUpdate: true,
   }],
   compatibility: { status: 'compatible', completeness: 'complete', findings: [] },
+  projectCompatibility: MINIMAL_PROJECT_COMPATIBILITY,
   security: null,
   smartPlan: null,
   verification: { configured: false },
@@ -368,6 +417,10 @@ test('every host-to-webview variant is accepted', () => {
     true
   );
   assert.equal(
+    isHostToWebviewMessage({ status: 'upgrade-analyzing', package: 'react-toastify', phase: 'project-compatibility', requestId: 'req-1' }),
+    true
+  );
+  assert.equal(
     isHostToWebviewMessage({ status: 'upgrade-analysis', analysis: MINIMAL_ANALYSIS, requestId: 'req-1' }),
     true
   );
@@ -584,6 +637,90 @@ test('upgrade-analysis accepts one structurally valid compatibility finding, and
   );
 });
 
+test('upgrade-analysis accepts structured project findings with only a host-issued navigation tuple', () => {
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-analysis',
+    requestId: 'req-1',
+    analysis: { ...MINIMAL_ANALYSIS, projectCompatibility: STRUCTURED_PROJECT_COMPATIBILITY },
+  }), true);
+
+  const evidence = PROJECT_COMPATIBILITY_FINDING.evidence[0];
+  for (const malformedEvidence of [
+    { ...evidence, usageId: undefined },
+    { ...evidence, referenceIndex: undefined },
+    { ...evidence, referenceIndex: -1 },
+    { ...evidence, url: 'https://untrusted.example/open' },
+  ]) {
+    const finding = { ...PROJECT_COMPATIBILITY_FINDING, evidence: [malformedEvidence] };
+    const projectCompatibility = {
+      ...STRUCTURED_PROJECT_COMPATIBILITY,
+      findings: [finding],
+      analyzers: [{ ...STRUCTURED_PROJECT_COMPATIBILITY.analyzers[0], findings: [finding] }],
+    };
+    assert.equal(isHostToWebviewMessage({
+      status: 'upgrade-analysis', requestId: 'req-1',
+      analysis: { ...MINIMAL_ANALYSIS, projectCompatibility },
+    }), false, `${JSON.stringify(malformedEvidence)} accepted`);
+  }
+});
+
+test('project compatibility protocol rejects malformed confidence, analyzer state, target identity, and timestamps', () => {
+  const malformedFinding = { ...PROJECT_COMPATIBILITY_FINDING, confidence: 'high' };
+  const cases = [
+    {
+      ...STRUCTURED_PROJECT_COMPATIBILITY,
+      findings: [malformedFinding],
+      analyzers: [{ ...STRUCTURED_PROJECT_COMPATIBILITY.analyzers[0], findings: [malformedFinding] }],
+    },
+    {
+      ...STRUCTURED_PROJECT_COMPATIBILITY,
+      analyzers: [{ ...STRUCTURED_PROJECT_COMPATIBILITY.analyzers[0], status: 'compatible' }],
+    },
+    {
+      ...STRUCTURED_PROJECT_COMPATIBILITY,
+      analyzers: [{ ...STRUCTURED_PROJECT_COMPATIBILITY.analyzers[0], durationMs: -1 }],
+    },
+    {
+      ...STRUCTURED_PROJECT_COMPATIBILITY,
+      findings: [{ ...PROJECT_COMPATIBILITY_FINDING, targetVersion: '12.0.0' }],
+    },
+    {
+      ...STRUCTURED_PROJECT_COMPATIBILITY,
+      startedAt: 'not-a-date',
+    },
+    {
+      ...STRUCTURED_PROJECT_COMPATIBILITY,
+      startedAt: '2026-08-01T09:00:02.000Z',
+      completedAt: '2026-08-01T09:00:01.000Z',
+    },
+  ];
+  for (const projectCompatibility of cases) {
+    assert.equal(isHostToWebviewMessage({
+      status: 'upgrade-analysis', requestId: 'req-1',
+      analysis: { ...MINIMAL_ANALYSIS, projectCompatibility },
+    }), false, `${JSON.stringify(projectCompatibility)} accepted`);
+  }
+});
+
+test('final project compatibility identity is correlated to the containing analysis and request', () => {
+  const identityCases = [
+    { packageName: 'other-package' },
+    { currentVersion: '10.0.7' },
+    { targetVersion: '12.0.0' },
+    { requestId: 'superseded-request' },
+  ];
+  for (const identityOverride of identityCases) {
+    const projectCompatibility = {
+      ...MINIMAL_PROJECT_COMPATIBILITY,
+      identity: { ...MINIMAL_PROJECT_COMPATIBILITY.identity, ...identityOverride },
+    };
+    assert.equal(isHostToWebviewMessage({
+      status: 'upgrade-analysis', requestId: 'req-1',
+      analysis: { ...MINIMAL_ANALYSIS, projectCompatibility },
+    }), false, `${JSON.stringify(identityOverride)} escaped final-result correlation`);
+  }
+});
+
 test('upgrade-analysis accepts a well-formed security outcome, and rejects one with a malformed remaining vulnerability', () => {
   const security = {
     status: 'remains',
@@ -617,6 +754,76 @@ test('upgrade-analysis accepts a well-formed security outcome, and rejects one w
     isHostToWebviewMessage({ status: 'upgrade-analysis', requestId: 'req-1', analysis: { ...MINIMAL_ANALYSIS, security: malformed } }),
     false
   );
+});
+
+test('upgrade-analysis accepts graph-proven vulnerability context and rejects malformed path/remediation claims', () => {
+  const remaining = {
+    advisory: {
+      id: 'GHSA-context', severity: 'high', title: 'Nested issue',
+      url: 'https://example.invalid/GHSA-context', vulnerableVersions: '<3.3.8',
+    },
+    flaggedPackage: 'nanoid',
+    path: ['next', 'postcss', 'nanoid'],
+    status: 'remains',
+    resolvedVersion: '3.3.7',
+    patchedVersion: { status: 'known', version: '3.3.8' },
+  };
+  const context = {
+    advisory: remaining.advisory,
+    flaggedPackage: 'nanoid',
+    flaggedVersion: '3.3.7',
+    patchedVersion: { status: 'known', version: '3.3.8' },
+    primaryPath: { nodes: [
+      { packageName: 'next', version: '14.2.35' },
+      { packageName: 'postcss', version: '8.4.0' },
+      { packageName: 'nanoid', version: '3.3.7' },
+    ] },
+    paths: [
+      { nodes: [
+        { packageName: 'next', version: '14.2.35' },
+        { packageName: 'postcss', version: '8.4.0' },
+        { packageName: 'nanoid', version: '3.3.7' },
+      ] },
+      { nodes: [
+        { packageName: 'storybook', version: '8.0.0' },
+        { packageName: 'nanoid', version: '3.3.7' },
+      ] },
+    ],
+    directRoots: [
+      { packageName: 'next', version: '14.2.35', pathCount: 1 },
+      { packageName: 'storybook', version: '8.0.0', pathCount: 1 },
+    ],
+    provenResolution: {
+      directDependencyChanges: [{ packageName: 'next', fromVersion: '14.2.35', targetVersion: '15.5.24' }],
+    },
+  };
+  const security = { status: 'remains', resolvedAdvisories: [], remaining: [remaining], contexts: [context] };
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-analysis', requestId: 'req-1', analysis: { ...MINIMAL_ANALYSIS, security },
+  }), true);
+  assert.equal(isHostToWebviewMessage({
+    status: 'upgrade-analysis', requestId: 'req-1',
+    analysis: {
+      ...MINIMAL_ANALYSIS,
+      security: { ...security, contexts: [{ ...context, pathsTruncated: true }] },
+    },
+  }), true);
+  assert.notEqual(context.patchedVersion.version, context.provenResolution.directDependencyChanges[0].targetVersion,
+    'the accepted shape keeps the transitive patch distinct from a proven direct dependency target');
+
+  for (const malformedContext of [
+    { ...context, primaryPath: { nodes: [] } },
+    { ...context, paths: [] },
+    { ...context, directRoots: [{ ...context.directRoots[0], pathCount: 0 }] },
+    { ...context, provenResolution: { directDependencyChanges: [] } },
+    { ...context, pathsTruncated: 'yes' },
+    { ...context, openUrl: 'https://untrusted.example' },
+  ]) {
+    assert.equal(isHostToWebviewMessage({
+      status: 'upgrade-analysis', requestId: 'req-1',
+      analysis: { ...MINIMAL_ANALYSIS, security: { ...security, contexts: [malformedContext] } },
+    }), false, `${JSON.stringify(malformedContext)} accepted`);
+  }
 });
 
 test('upgrade-analysis accepts a well-formed smart plan, and rejects one with a missing field on a change', () => {
@@ -680,6 +887,15 @@ test('upgrade-analysis-partial accepts a well-formed section of every kind', () 
       status: 'upgrade-analysis-partial',
       requestId: 'req-1',
       package: 'react-toastify',
+      section: { kind: 'project-compatibility', projectCompatibility: MINIMAL_PROJECT_COMPATIBILITY },
+    }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'upgrade-analysis-partial',
+      requestId: 'req-1',
+      package: 'react-toastify',
       section: { kind: 'security', security: null },
     }),
     true
@@ -693,6 +909,28 @@ test('upgrade-analysis-partial accepts a well-formed section of every kind', () 
     }),
     true
   );
+});
+
+test('project compatibility partials cannot cross request or package identity boundaries', () => {
+  const message = {
+    status: 'upgrade-analysis-partial',
+    requestId: 'req-1',
+    package: 'react-toastify',
+    section: { kind: 'project-compatibility', projectCompatibility: MINIMAL_PROJECT_COMPATIBILITY },
+  };
+  assert.equal(isHostToWebviewMessage(message), true);
+  assert.equal(isHostToWebviewMessage({ ...message, requestId: 'req-2' }), false);
+  assert.equal(isHostToWebviewMessage({ ...message, package: 'other-package' }), false);
+  assert.equal(isHostToWebviewMessage({
+    ...message,
+    section: {
+      kind: 'project-compatibility',
+      projectCompatibility: {
+        ...MINIMAL_PROJECT_COMPATIBILITY,
+        identity: { ...MINIMAL_PROJECT_COMPATIBILITY.identity, sourceFingerprint: '' },
+      },
+    },
+  }), false);
 });
 
 test('upgrade-analysis-partial rejects a missing requestId/package, an unknown section kind, and extra top-level keys', () => {

@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { findPackageInScripts } from '../out/core/usage/packageScripts.js';
-import { configReferencesPackage } from '../out/core/usage/configHeuristics.js';
+import { CONFIG_FILE_GLOBS, configReferencesPackage } from '../out/core/usage/configHeuristics.js';
 import { isFrameworkConventionPackage } from '../out/core/usage/frameworkConventions.js';
 import { buildUnusedFinding } from '../out/core/usage/unused.js';
 
@@ -41,6 +41,11 @@ test('invalid manifest JSON degrades to no scripts rather than throwing', () => 
 });
 
 // --------------------------------------------------------------- config
+
+test('usage config discovery includes extensionless ESLint and Babel inputs', () => {
+  assert.equal(CONFIG_FILE_GLOBS.includes('.eslintrc'), true);
+  assert.equal(CONFIG_FILE_GLOBS.includes('.babelrc'), true);
+});
 
 test('a package referenced in a config file body is found', () => {
   assert.equal(configReferencesPackage(`module.exports = { plugins: ['tailwindcss'] };`, 'tailwindcss'), true);

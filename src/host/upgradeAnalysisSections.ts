@@ -14,6 +14,7 @@ import type {
   UpgradeAnalysisCompatibility,
   UpgradeAnalysisFiles,
   UpgradeAnalysisPartialSection,
+  ProjectCompatibilityAnalysis,
   UpgradeAnalysisSmartPlan,
   UpgradeAnalysisVerification,
   DependencyClassification,
@@ -39,6 +40,7 @@ export interface UpgradeOverviewSection {
 export interface UpgradeAnalysisSections {
   overview: SectionStatus<UpgradeOverviewSection>;
   compatibility: SectionStatus<UpgradeAnalysisCompatibility>;
+  projectCompatibility: SectionStatus<ProjectCompatibilityAnalysis>;
   security: SectionStatus<SecurityOutcome | null>;
   smartPlan: SectionStatus<UpgradeAnalysisSmartPlan | null>;
 }
@@ -47,6 +49,7 @@ export interface UpgradeAnalysisSections {
 export const WAITING_UPGRADE_ANALYSIS_SECTIONS: UpgradeAnalysisSections = {
   overview: { status: 'waiting' },
   compatibility: { status: 'waiting' },
+  projectCompatibility: { status: 'waiting' },
   security: { status: 'waiting' },
   smartPlan: { status: 'waiting' },
 };
@@ -59,10 +62,15 @@ export const WAITING_UPGRADE_ANALYSIS_SECTIONS: UpgradeAnalysisSections = {
  */
 export function markPhaseLoading(
   prev: UpgradeAnalysisSections,
-  phase: 'compatibility' | 'smart-plan'
+  phase: 'compatibility' | 'project-compatibility' | 'smart-plan'
 ): UpgradeAnalysisSections {
   if (phase === 'compatibility') {
     return prev.compatibility.status === 'waiting' ? { ...prev, compatibility: { status: 'loading' } } : prev;
+  }
+  if (phase === 'project-compatibility') {
+    return prev.projectCompatibility.status === 'waiting'
+      ? { ...prev, projectCompatibility: { status: 'loading' } }
+      : prev;
   }
   return prev.smartPlan.status === 'waiting' ? { ...prev, smartPlan: { status: 'loading' } } : prev;
 }
@@ -104,6 +112,12 @@ export function applyPartialSection(
       next.smartPlan = { status: 'not-applicable' };
     }
     return next;
+  }
+  if (section.kind === 'project-compatibility') {
+    return {
+      ...prev,
+      projectCompatibility: { status: 'complete', value: section.projectCompatibility },
+    };
   }
   if (section.kind === 'security') {
     return { ...prev, security: { status: 'complete', value: section.security } };

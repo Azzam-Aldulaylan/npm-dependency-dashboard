@@ -35,7 +35,7 @@ interface UpgradeReviewState {
   targetState: UpgradeTargetLoadState;
   /** True exactly when this row's own upgrade is the one App.tsx currently has loaded. */
   active: boolean;
-  analyzingPhase: 'compatibility' | 'smart-plan' | null;
+  analyzingPhase: 'compatibility' | 'project-compatibility' | 'smart-plan' | null;
   analysis: UpgradeAnalysisPresentation | null;
   /** Per-section progressive state, rendered while `analysis` is still null — see src/host/upgradeAnalysisSections.ts. */
   sections: UpgradeAnalysisSections;
@@ -479,6 +479,7 @@ export function ManageDependencyModal({
         onRefresh={upgrade.onRefresh}
         onChangeTab={onChangeTab}
         onOpenAdvisory={onOpenAdvisory}
+        onOpenUsageReference={onOpenUsageReference}
       />
     );
   } else {

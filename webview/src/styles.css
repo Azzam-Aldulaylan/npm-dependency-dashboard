@@ -1837,7 +1837,7 @@ button {
 }
 
 .manage-modal .manage-tabs__tab {
-  min-height: 2.25rem;
+  min-height: 2.5rem;
   padding: 0.5rem 0.65rem;
   font-size: 0.78em;
 }
@@ -1945,13 +1945,18 @@ button {
 
 .manage-tabs__icon {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
-  font-size: 0.95em;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 4px;
+  color: var(--vscode-descriptionForeground);
 }
 
 .manage-tabs__icon svg {
-  width: 1em;
-  height: 1em;
+  width: 1.1rem;
+  height: 1.1rem;
 }
 
 .manage-tabs__tab:hover {
@@ -1968,6 +1973,11 @@ button {
   border-bottom-color: var(--accent-total);
   color: var(--vscode-foreground);
   font-weight: 600;
+}
+
+.manage-tabs__tab--active .manage-tabs__icon {
+  color: var(--accent-total);
+  background: color-mix(in srgb, var(--accent-total) 14%, transparent);
 }
 
 .manage-tabs__dot {
@@ -3187,13 +3197,13 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.3rem;
-  height: 2.3rem;
+  width: 2.8rem;
+  height: 2.8rem;
   margin-bottom: 0.2rem;
   border-radius: 999px;
   color: var(--review-empty-accent, var(--vscode-descriptionForeground));
   background: color-mix(in srgb, var(--review-empty-accent, transparent) 16%, transparent);
-  font-size: 1.1rem;
+  font-size: 1.35rem;
 }
 
 .review-panel__empty-heading {
@@ -4400,6 +4410,335 @@ button {
   margin-top: 0.55rem;
 }
 
+/* Project compatibility is an evidence ledger, not another status-card grid.
+   The three-part rail maps directly to the analyzer confidence model; every
+   color remains owned by the active VS Code theme. */
+.project-compat {
+  gap: 0.65rem;
+}
+
+.project-compat__heading-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.45rem 0.8rem;
+}
+
+.project-compat__heading-row .analysis-card__title {
+  margin-bottom: 0;
+}
+
+.project-compat__target {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.76em;
+}
+
+.project-compat__target code,
+.project-compat__evidence code,
+.project-compat__specifier code {
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.project-compat__confidence-rail {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 5px;
+}
+
+.project-compat__confidence {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 0.45rem 0.55rem;
+  border-left: 2px solid var(--vscode-descriptionForeground);
+  color: var(--vscode-descriptionForeground);
+}
+
+.project-compat__confidence + .project-compat__confidence {
+  border-top: none;
+}
+
+.project-compat__confidence--confirmed {
+  border-left-color: var(--vscode-editorError-foreground);
+}
+
+.project-compat__confidence--likely {
+  border-left-color: var(--vscode-editorWarning-foreground);
+}
+
+.project-compat__confidence--review {
+  border-left-color: var(--vscode-editorInfo-foreground);
+}
+
+.project-compat__confidence-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.project-compat__confidence-icon svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.project-compat__confidence--confirmed .project-compat__confidence-icon,
+.project-compat__confidence--confirmed > summary .project-compat__confidence-icon {
+  color: var(--vscode-editorError-foreground);
+}
+
+.project-compat__confidence--likely .project-compat__confidence-icon,
+.project-compat__confidence--likely > summary .project-compat__confidence-icon {
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.project-compat__confidence--review .project-compat__confidence-icon,
+.project-compat__confidence--review > summary .project-compat__confidence-icon {
+  color: var(--vscode-editorInfo-foreground);
+}
+
+.project-compat__confidence-count {
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+  font-weight: 700;
+}
+
+.project-compat__confidence-label {
+  overflow: hidden;
+  font-size: 0.73em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-compat__empty {
+  margin: 0;
+  color: var(--vscode-editorWarning-foreground);
+  font-size: 0.82em;
+}
+
+.project-compat__empty--complete {
+  color: var(--vscode-charts-green, var(--vscode-foreground));
+}
+
+.project-compat__groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.project-compat__group {
+  overflow: hidden;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-left: 2px solid var(--vscode-descriptionForeground);
+  border-radius: 5px;
+}
+
+.project-compat__group.project-compat__confidence--confirmed {
+  border-left-color: var(--vscode-editorError-foreground);
+}
+
+.project-compat__group.project-compat__confidence--likely {
+  border-left-color: var(--vscode-editorWarning-foreground);
+}
+
+.project-compat__group.project-compat__confidence--review {
+  border-left-color: var(--vscode-editorInfo-foreground);
+}
+
+.project-compat__group > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 0.55rem;
+  color: var(--vscode-foreground);
+  font-size: 0.82em;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.project-compat__group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.project-compat__group > summary::after {
+  content: '›';
+  margin-left: 0.1rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 1.2em;
+  transform: rotate(90deg);
+}
+
+.project-compat__group[open] > summary::after {
+  transform: rotate(-90deg);
+}
+
+.project-compat__group > summary:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.project-compat__group > summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -2px;
+}
+
+.project-compat__group-count {
+  order: 3;
+  min-width: 1.4rem;
+  margin-left: auto;
+  padding: 0.05rem 0.35rem;
+  border-radius: 999px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.82em;
+  text-align: center;
+}
+
+.project-compat__finding-list,
+.project-compat__evidence-list,
+.project-compat__unavailable ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-compat__finding-list {
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.project-compat__finding {
+  padding: 0.6rem;
+}
+
+.project-compat__finding + .project-compat__finding {
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.project-compat__finding-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.84em;
+}
+
+.project-compat__category {
+  padding: 0.08rem 0.35rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  border-radius: 999px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.76em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.project-compat__explanation,
+.project-compat__migration {
+  margin: 0.4rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
+  line-height: 1.45;
+}
+
+.project-compat__migration span {
+  color: var(--vscode-foreground);
+  font-weight: 600;
+}
+
+.project-compat__evidence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+}
+
+.project-compat__evidence {
+  min-width: 0;
+  padding-left: 0.55rem;
+  border-left: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.76em;
+}
+
+.project-compat__evidence-main,
+.project-compat__specifier {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.project-compat__source {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--vscode-textLink-foreground);
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-compat__source:hover {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  text-decoration: underline;
+}
+
+.project-compat__source:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.project-compat__source svg {
+  flex-shrink: 0;
+}
+
+.project-compat__snippet {
+  overflow-x: auto;
+  margin: 0.35rem 0 0;
+  padding: 0.35rem 0.45rem;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.12));
+  color: var(--vscode-editor-foreground, var(--vscode-foreground));
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.95em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.project-compat__unavailable {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  padding: 0.5rem 0.55rem;
+  border: 1px solid color-mix(in srgb, var(--vscode-editorWarning-foreground) 45%, transparent);
+  border-radius: 5px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+}
+
+.project-compat__unavailable > svg {
+  flex-shrink: 0;
+  color: var(--vscode-editorWarning-foreground);
+}
+
+.project-compat__unavailable strong {
+  color: var(--vscode-foreground);
+}
+
+.project-compat__unavailable ul {
+  margin-top: 0.25rem;
+}
+
+.project-compat__unavailable li + li {
+  margin-top: 0.15rem;
+}
+
 .finding-list {
   display: flex;
   flex-direction: column;
@@ -4493,6 +4832,102 @@ button {
 
 .analysis-card__vulnerabilities .advisory + .advisory {
   margin-top: 0.5rem;
+}
+
+.vulnerability-contexts {
+  margin-top: 0.55rem;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.vulnerability-contexts__summary,
+.vulnerability-context__paths > summary {
+  color: var(--vscode-textLink-foreground);
+  font-size: 0.8em;
+  cursor: pointer;
+}
+
+.vulnerability-contexts__summary {
+  padding-top: 0.55rem;
+  font-weight: 600;
+}
+
+.vulnerability-contexts__summary:focus-visible,
+.vulnerability-context__paths > summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.vulnerability-contexts__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.55rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vulnerability-context {
+  padding: 0.55rem;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 5px;
+}
+
+.vulnerability-context__head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82em;
+}
+
+.vulnerability-context__meta {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.3rem 0.6rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.78em;
+}
+
+.vulnerability-context__meta dt {
+  color: var(--vscode-descriptionForeground);
+  font-weight: 600;
+}
+
+.vulnerability-context__meta dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.vulnerability-context__paths {
+  margin-top: 0.5rem;
+}
+
+.vulnerability-context__paths ol {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.76em;
+}
+
+.vulnerability-context__resolution {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0.5rem 0 0;
+  color: var(--vscode-charts-green, var(--vscode-foreground));
+  font-size: 0.8em;
+  font-weight: 600;
+}
+
+.vulnerability-context__resolution svg {
+  flex-shrink: 0;
 }
 
 /* ---------------------------------------------------------- smart-plan banner */
@@ -4944,7 +5379,7 @@ button {
   }
 
   .manage-modal .manage-tabs__tab {
-    min-height: 2.35rem;
+    min-height: 2.65rem;
     padding-inline: 0.6rem;
   }
 
@@ -5049,6 +5484,18 @@ button {
   .manage-panel-empty {
     padding: 1.6rem 0.7rem;
   }
+
+  .project-compat__confidence-rail {
+    grid-template-columns: 1fr;
+  }
+
+  .project-compat__confidence + .project-compat__confidence {
+    border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  }
+
+  .project-compat__confidence-label {
+    white-space: normal;
+  }
 }
 
 /* Extremely narrow editor groups need label/value pairs and secondary
@@ -5097,6 +5544,12 @@ button {
 
   .upgrade-files-list__item .status-badge {
     margin-left: 0;
+  }
+
+  .project-compat__heading-row,
+  .project-compat__finding-head {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

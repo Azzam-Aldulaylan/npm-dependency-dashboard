@@ -54,9 +54,11 @@ test('hard analysis expiry is visible and disables both embedded action surfaces
 test('compatibility summary is separated from checks and unsupported checks stay honest', () => {
   assert.match(cards, /upgrade-compatibility__summary/);
   assert.match(styles, /\.upgrade-tab \.upgrade-compatibility__summary \{\s*margin-bottom: 0\.8rem;/);
-  assert.match(cards, /label="Engine requirements" value="Not checked"/);
+  assert.match(cards, /label="Engine requirements" value=\{runtimeValue\}/);
+  assert.match(cards, /runtimeStatus === 'partial'/);
+  assert.match(cards, /label="Project compatibility" value=\{projectValue\}/);
   assert.match(cards, /label="Deprecated APIs" value="Not checked"/);
-  assert.match(cards, /label="Breaking changes" value=\{hasMajorFinding \? 'Major version change' : 'No major version change'\}/);
+  assert.doesNotMatch(cards, /label="Breaking changes"|No major version change/);
 });
 
 test('static transaction files and rollback are compact metadata in Upgrade Preview', () => {

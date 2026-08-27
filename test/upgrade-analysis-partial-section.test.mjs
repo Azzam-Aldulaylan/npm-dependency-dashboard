@@ -31,6 +31,7 @@ test('a fresh attempt starts every section waiting', () => {
   assert.deepEqual(WAITING_UPGRADE_ANALYSIS_SECTIONS, {
     overview: { status: 'waiting' },
     compatibility: { status: 'waiting' },
+    projectCompatibility: { status: 'waiting' },
     security: { status: 'waiting' },
     smartPlan: { status: 'waiting' },
   });
@@ -51,6 +52,7 @@ test('overview settles to complete with its own value, leaving every other secti
     },
   });
   assert.deepEqual(next.compatibility, { status: 'waiting' });
+  assert.deepEqual(next.projectCompatibility, { status: 'waiting' });
   assert.deepEqual(next.security, { status: 'waiting' });
   assert.deepEqual(next.smartPlan, { status: 'waiting' });
 });
@@ -99,6 +101,54 @@ test('markPhaseLoading moves only the named, still-waiting section to loading', 
   const next = markPhaseLoading(WAITING_UPGRADE_ANALYSIS_SECTIONS, 'compatibility');
   assert.deepEqual(next.compatibility, { status: 'loading' });
   assert.deepEqual(next.smartPlan, { status: 'waiting' });
+});
+
+test('project compatibility can load and settle repeatedly as medium and deep analyzers arrive', () => {
+  const loading = markPhaseLoading(WAITING_UPGRADE_ANALYSIS_SECTIONS, 'project-compatibility');
+  assert.deepEqual(loading.projectCompatibility, { status: 'loading' });
+  const mediumFinding = {
+    id: 'next:15.5.24:config',
+    category: 'config',
+    confidence: 'confirmed',
+    packageName: 'next',
+    targetVersion: '15.5.24',
+    title: 'Configuration migration required',
+    explanation: 'The selected target renamed this configuration key.',
+    evidence: [],
+    source: 'framework-rule',
+  };
+  const medium = {
+    identity: { packageName: 'next', currentVersion: '14.2.35', targetVersion: '15.5.24', requestId: 'req-1', sourceFingerprint: 'source-1' },
+    findings: [mediumFinding],
+    analyzers: [{ analyzerId: 'next-migration-rules', status: 'complete', findings: [mediumFinding] }],
+    startedAt: '2026-08-26T10:00:00.000Z',
+    completedAt: '2026-08-26T10:00:00.010Z',
+  };
+  const mediumState = applyPartialSection(loading, { kind: 'project-compatibility', projectCompatibility: medium });
+  assert.equal(mediumState.projectCompatibility.value.analyzers.length, 1);
+  assert.deepEqual(mediumState.projectCompatibility.value.findings, [mediumFinding],
+    'medium findings are immediately inspectable before deep import resolution settles');
+  const importFinding = {
+    ...mediumFinding,
+    id: 'next:15.5.24:import',
+    category: 'import',
+    title: 'Import compatibility issue',
+    explanation: 'The imported target file is absent.',
+    source: 'generic',
+  };
+  const deep = {
+    ...medium,
+    findings: [mediumFinding, importFinding],
+    analyzers: [
+      ...medium.analyzers,
+      { analyzerId: 'import-compatibility', status: 'complete', findings: [importFinding] },
+    ],
+    completedAt: '2026-08-26T10:00:00.020Z',
+  };
+  const deepState = applyPartialSection(mediumState, { kind: 'project-compatibility', projectCompatibility: deep });
+  assert.deepEqual(deepState.projectCompatibility, { status: 'complete', value: deep });
+  assert.equal(deepState.projectCompatibility.value.findings.filter((finding) => finding.id === mediumFinding.id).length, 1,
+    'the repeated partial replaces the settled value instead of duplicating medium findings');
 });
 
 test('markPhaseLoading is a no-op once the section has already settled', () => {

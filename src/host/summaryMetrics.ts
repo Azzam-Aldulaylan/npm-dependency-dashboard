@@ -19,6 +19,9 @@ export interface SummaryMetrics {
   total: number;
   updatesAvailable: number;
   majorUpdates: number;
+  minorUpdates: number;
+  patchUpdates: number;
+  otherUpdates: number;
   vulnerable: number;
   criticalVulnerabilities: number;
   highVulnerabilities: number;
@@ -94,6 +97,9 @@ function countSeverity(rows: readonly PackageRow[], severity: Severity): number 
 export function summaryMetrics(rows: readonly PackageRow[]): SummaryMetrics {
   let updatesAvailable = 0;
   let majorUpdates = 0;
+  let minorUpdates = 0;
+  let patchUpdates = 0;
+  let otherUpdates = 0;
   let vulnerable = 0;
   let needsAttention = 0;
   let deprecatedCount = 0;
@@ -101,7 +107,11 @@ export function summaryMetrics(rows: readonly PackageRow[]): SummaryMetrics {
   for (const row of rows) {
     if (rowHasUpdate(row)) {
       updatesAvailable += 1;
-      if (rowIsMajorUpdate(row)) majorUpdates += 1;
+      const updateKind = classifyRowUpdate(row);
+      if (updateKind === 'major') majorUpdates += 1;
+      else if (updateKind === 'minor') minorUpdates += 1;
+      else if (updateKind === 'patch') patchUpdates += 1;
+      else otherUpdates += 1;
     }
     if (rowHasVulnerability(row)) vulnerable += 1;
     if (rowNeedsAttention(row)) needsAttention += 1;
@@ -112,6 +122,9 @@ export function summaryMetrics(rows: readonly PackageRow[]): SummaryMetrics {
     total: rows.length,
     updatesAvailable,
     majorUpdates,
+    minorUpdates,
+    patchUpdates,
+    otherUpdates,
     vulnerable,
     criticalVulnerabilities: countSeverity(rows, 'critical'),
     highVulnerabilities: countSeverity(rows, 'high'),
@@ -131,10 +144,16 @@ export function summaryMetrics(rows: readonly PackageRow[]): SummaryMetrics {
 
 export function updatesCardSubtitle(metrics: SummaryMetrics): string {
   if (metrics.updatesAvailable === 0) return 'Up to date';
-  if (metrics.majorUpdates > 0) return `${metrics.majorUpdates} major`;
-  if (metrics.total === 0) return '';
-  const percent = Math.round((metrics.updatesAvailable / metrics.total) * 100);
-  return `${percent}% of dependencies`;
+  const counts: [string, number][] = [
+    ['major', metrics.majorUpdates],
+    ['minor', metrics.minorUpdates],
+    ['patch', metrics.patchUpdates],
+    ['other', metrics.otherUpdates],
+  ];
+  return counts
+    .filter(([, count]) => count > 0)
+    .map(([category, count]) => `${count} ${category}`)
+    .join(' · ');
 }
 
 function incompleteCount(known: number): string {

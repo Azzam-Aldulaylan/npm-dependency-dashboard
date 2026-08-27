@@ -9,12 +9,13 @@
  * or losing writes to overlapping saves.
  *
  * How: `get`/`set` only ever touch an in-memory `Map` — always synchronous,
- * always immediately consistent for the caller. `set` additionally *queues*
- * a persistence flush; the queue is a single chained Promise, so a flush
- * never starts before the previous one finishes, and every flush persists
- * whatever is in the Map *at the moment it actually runs* (not a snapshot
- * captured back when it was scheduled) — so a burst of `set` calls while a
- * flush is in flight is never lost, just coalesced into the next flush.
+ * always immediately consistent for the caller. `set` additionally schedules
+ * a persistence flush, either immediately or through an opt-in trailing/max
+ * delay policy. The persistence queue is a single chained Promise, so a flush
+ * never starts before the previous one finishes, and ordinary flushes persist
+ * whatever is in the Map *at the moment they actually run* (not a snapshot
+ * captured back when scheduled) — so a burst of `set` calls while a flush is
+ * in flight is never lost, just coalesced into the next flush.
  *
  * Eviction is deterministic FIFO-by-most-recent-write: `set`ting a key
  * (new or existing) moves it to the "freshest" end of insertion order: the
@@ -29,20 +30,59 @@ export interface WriteBackCacheOptions<V> {
   maxEntries: number;
   /** Called with the *current* full entry list every time a flush actually runs. Persistence failures are the caller's concern (e.g. log and drop) — a failed flush does not retry on its own, but the next `set` schedules a fresh one with current data. */
   persist: (entries: Array<[string, V]>) => Promise<void>;
+  /** Optional write batching. Omitted by stores that require the original immediate persistence semantics. */
+  batching?: WriteBackCacheBatchingOptions;
 }
+
+export type WriteBackCacheTimerHandle = object | number;
+
+export interface WriteBackCacheScheduler {
+  now(): number;
+  schedule(callback: () => void, delayMs: number): WriteBackCacheTimerHandle;
+  cancel(handle: WriteBackCacheTimerHandle): void;
+}
+
+export interface WriteBackCacheBatchingOptions {
+  /** Flush after writes have been quiet for this long. */
+  trailingDelayMs: number;
+  /** Flush no later than this long after the first write in a continuous burst. */
+  maxDelayMs: number;
+  /** Injectable so batching behavior can be tested without wall-clock sleeps. */
+  scheduler?: WriteBackCacheScheduler;
+}
+
+const DEFAULT_SCHEDULER: WriteBackCacheScheduler = {
+  now: () => Date.now(),
+  schedule: (callback, delayMs) => setTimeout(callback, delayMs),
+  cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
 
 export class WriteBackCache<V> {
   private readonly entries: Map<string, V>;
   private readonly maxEntries: number;
   private readonly persistFn: (entries: Array<[string, V]>) => Promise<void>;
+  private readonly batching: {
+    trailingDelayMs: number;
+    maxDelayMs: number;
+    scheduler: WriteBackCacheScheduler;
+  } | undefined;
   private writeQueue: Promise<void> = Promise.resolve();
   private dirty = false;
   private disposed = false;
+  private batchStartedAt: number | undefined;
+  private scheduledFlush: WriteBackCacheTimerHandle | undefined;
 
   constructor(options: WriteBackCacheOptions<V>) {
     this.entries = new Map(options.initialEntries ?? []);
     this.maxEntries = Math.max(0, options.maxEntries);
     this.persistFn = options.persist;
+    this.batching = options.batching === undefined
+      ? undefined
+      : {
+          trailingDelayMs: Math.max(0, options.batching.trailingDelayMs),
+          maxDelayMs: Math.max(0, options.batching.maxDelayMs),
+          scheduler: options.batching.scheduler ?? DEFAULT_SCHEDULER,
+        };
     this.evictIfNeeded();
   }
 
@@ -90,6 +130,28 @@ export class WriteBackCache<V> {
   private scheduleFlush(): void {
     if (this.disposed) return; // disposal prevents later writes — see dispose()
     this.dirty = true;
+    if (this.batching === undefined) {
+      this.enqueueFlush();
+      return;
+    }
+
+    const now = this.batching.scheduler.now();
+    this.batchStartedAt ??= now;
+    const deadline = Math.min(
+      now + this.batching.trailingDelayMs,
+      this.batchStartedAt + this.batching.maxDelayMs
+    );
+    if (this.scheduledFlush !== undefined) {
+      this.batching.scheduler.cancel(this.scheduledFlush);
+    }
+    this.scheduledFlush = this.batching.scheduler.schedule(() => {
+      this.scheduledFlush = undefined;
+      this.batchStartedAt = undefined;
+      this.enqueueFlush();
+    }, Math.max(0, deadline - now));
+  }
+
+  private enqueueFlush(): void {
     this.writeQueue = this.writeQueue.then(() => this.flush());
   }
 
@@ -102,6 +164,10 @@ export class WriteBackCache<V> {
     if (!this.dirty) return;
     this.dirty = false;
     const snapshot: Array<[string, V]> = [...this.entries];
+    await this.persistSnapshot(snapshot);
+  }
+
+  private async persistSnapshot(snapshot: Array<[string, V]>): Promise<void> {
     try {
       await this.persistFn(snapshot);
     } catch {
@@ -119,10 +185,23 @@ export class WriteBackCache<V> {
    * Stops scheduling further persistence writes. Does not clear the
    * in-memory Map (a disposed controller/panel simply stops writing
    * through; there is no meaningful reader left to serve stale data to).
-   * Any flush already queued is left to finish on its own rather than
-   * cancelled mid-write.
+   * Any flush already running is left to finish, while dirty state waiting on
+   * either the queue or a batch timer is captured as one final snapshot.
    */
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
+    if (this.batching !== undefined && this.scheduledFlush !== undefined) {
+      this.batching.scheduler.cancel(this.scheduledFlush);
+      this.scheduledFlush = undefined;
+      this.batchStartedAt = undefined;
+    }
+    if (this.dirty) {
+      // Capture now: post-disposal writes remain synchronously visible in
+      // memory, but they must neither schedule nor leak into this final write.
+      this.dirty = false;
+      const finalSnapshot: Array<[string, V]> = [...this.entries];
+      this.writeQueue = this.writeQueue.then(() => this.persistSnapshot(finalSnapshot));
+    }
   }
 }

@@ -17,23 +17,68 @@ import {
 
 function fakeKeyValueStore(initial) {
   const data = new Map(initial ? [[REGISTRY_CACHE_STORAGE_KEY, initial]] : []);
+  const updates = [];
   return {
     raw: data,
+    updates,
     get(key) {
       return data.get(key);
     },
     async update(key, value) {
+      updates.push({ key, value, bytes: Buffer.byteLength(JSON.stringify(value)) });
       data.set(key, value);
     },
   };
 }
 
+function microtaskScheduler() {
+  return {
+    now: () => 0,
+    schedule(callback) {
+      const handle = { cancelled: false };
+      queueMicrotask(() => {
+        if (!handle.cancelled) callback();
+      });
+      return handle;
+    },
+    cancel(handle) {
+      handle.cancelled = true;
+    },
+  };
+}
+
+function heldScheduler() {
+  let nextId = 1;
+  const scheduled = new Map();
+  return {
+    now: () => 0,
+    schedule(callback) {
+      const id = nextId;
+      nextId += 1;
+      scheduled.set(id, callback);
+      return id;
+    },
+    cancel(handle) {
+      scheduled.delete(handle);
+    },
+    runPending() {
+      const callbacks = [...scheduled.values()];
+      scheduled.clear();
+      callbacks.forEach((callback) => callback());
+    },
+  };
+}
+
+function persistentEtagStore(store, initialEntries) {
+  return new PersistentEtagStore(store, initialEntries, { scheduler: microtaskScheduler() });
+}
+
 async function flushed() {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
 test('set/get round-trip in memory, synchronously — the sync EtagStore contract is preserved', () => {
-  const store = new PersistentEtagStore(fakeKeyValueStore());
+  const store = persistentEtagStore(fakeKeyValueStore());
   store.set('https://registry.npmjs.org/clean-pkg', { etag: 'W/"1"', body: '{"version":"1.0.0"}' });
   assert.deepEqual(store.get('https://registry.npmjs.org/clean-pkg'), {
     etag: 'W/"1"',
@@ -42,7 +87,7 @@ test('set/get round-trip in memory, synchronously — the sync EtagStore contrac
 });
 
 test('two different registries never collide, because the full request URL — including host — is the key', () => {
-  const store = new PersistentEtagStore(fakeKeyValueStore());
+  const store = persistentEtagStore(fakeKeyValueStore());
   const publicUrl = 'https://registry.npmjs.org/clean-pkg/latest';
   const mirrorUrl = 'https://mirror.example.com/clean-pkg/latest';
 
@@ -54,7 +99,7 @@ test('two different registries never collide, because the full request URL — i
 });
 
 test('safe version data is reusable across projects — one shared panel-level store serves every controller', () => {
-  const sharedStore = new PersistentEtagStore(fakeKeyValueStore());
+  const sharedStore = persistentEtagStore(fakeKeyValueStore());
   const url = 'https://registry.npmjs.org/clean-pkg/latest';
   sharedStore.set(url, { etag: 'W/"1"', body: '{"version":"1.0.0"}' });
 
@@ -67,7 +112,7 @@ test('safe version data is reusable across projects — one shared panel-level s
 
 test('a credential-bearing URL is kept in memory for this session but never reaches persistence', async () => {
   const kv = fakeKeyValueStore();
-  const store = new PersistentEtagStore(kv);
+  const store = persistentEtagStore(kv);
   const credentialedUrl = 'https://user:pass@registry.example/clean-pkg/latest';
 
   store.set(credentialedUrl, { etag: 'W/"1"', body: '{}' });
@@ -80,7 +125,7 @@ test('a credential-bearing URL is kept in memory for this session but never reac
 
 test('a credential-bearing entry does not block an unrelated safe entry from being persisted in the same flush', async () => {
   const kv = fakeKeyValueStore();
-  const store = new PersistentEtagStore(kv);
+  const store = persistentEtagStore(kv);
 
   store.set('https://user:pass@registry.example/pkg', { etag: 'W/"1"', body: '{}' });
   store.set('https://registry.npmjs.org/clean-pkg/latest', { etag: 'W/"2"', body: '{}' });
@@ -90,15 +135,39 @@ test('a credential-bearing entry does not block an unrelated safe entry from bei
   assert.deepEqual(persisted.entries, [['https://registry.npmjs.org/clean-pkg/latest', { etag: 'W/"2"', body: '{}' }]]);
 });
 
+test('a 150-response registry burst produces one bounded persistence update with the complete newest state', async () => {
+  const kv = fakeKeyValueStore();
+  const scheduler = heldScheduler();
+  const store = new PersistentEtagStore(kv, undefined, { scheduler });
+
+  for (let index = 0; index < 150; index += 1) {
+    store.set(`https://registry.npmjs.org/pkg-${index}/latest`, {
+      etag: `W/"${index}"`,
+      body: `{"version":"1.0.${index}"}`,
+    });
+  }
+  assert.equal(kv.updates.length, 0, 'in-memory writes are batched before persistence');
+  assert.equal(store.get('https://registry.npmjs.org/pkg-149/latest').etag, 'W/"149"');
+
+  scheduler.runPending();
+  await flushed();
+
+  assert.equal(kv.updates.length, 1);
+  const persisted = kv.raw.get(REGISTRY_CACHE_STORAGE_KEY);
+  assert.equal(persisted.entries.length, 150);
+  assert.equal(persisted.entries.at(-1)[0], 'https://registry.npmjs.org/pkg-149/latest');
+  assert.ok(serializedEtagCacheBytes(persisted.entries) <= MAX_REGISTRY_CACHE_SERIALIZED_BYTES);
+});
+
 test('a corrupt persisted blob degrades to an empty store rather than throwing, so a fresh fetch just proceeds normally', () => {
   const corrupt = fakeKeyValueStore({ schemaVersion: 1, entries: 'not-an-array' });
-  assert.doesNotThrow(() => new PersistentEtagStore(corrupt));
-  assert.equal(new PersistentEtagStore(corrupt).get('anything'), undefined);
+  assert.doesNotThrow(() => persistentEtagStore(corrupt));
+  assert.equal(persistentEtagStore(corrupt).get('anything'), undefined);
 });
 
 test('the store is bounded — entries beyond MAX_REGISTRY_CACHE_ENTRIES are evicted deterministically', async () => {
   const kv = fakeKeyValueStore();
-  const store = new PersistentEtagStore(kv);
+  const store = persistentEtagStore(kv);
 
   for (let i = 0; i < 520; i += 1) {
     store.set(`https://registry.npmjs.org/pkg-${i}`, { etag: `W/"${i}"`, body: '{}' });
@@ -113,7 +182,7 @@ test('the store is bounded — entries beyond MAX_REGISTRY_CACHE_ENTRIES are evi
 
 test('an individually oversized response is omitted from persistence without evicting otherwise valid entries', async () => {
   const kv = fakeKeyValueStore();
-  const store = new PersistentEtagStore(kv);
+  const store = persistentEtagStore(kv);
   const retainedUrl = 'https://registry.npmjs.org/small/latest';
   const oversizedUrl = 'https://registry.npmjs.org/oversized';
 
@@ -181,7 +250,7 @@ test('schema-v2 loading remains compatible, applies the byte bound, and heals ov
   const kv = fakeKeyValueStore({ schemaVersion: 2, entries: [valid, oversized] });
 
   assert.deepEqual(loadPersistedEtagEntries(kv), [valid]);
-  const store = new PersistentEtagStore(kv);
+  const store = persistentEtagStore(kv);
   assert.deepEqual(store.get(valid[0]), valid[1]);
   assert.equal(store.get(oversized[0]), undefined);
   await flushed();
@@ -190,7 +259,7 @@ test('schema-v2 loading remains compatible, applies the byte bound, and heals ov
 
 test('credential filtering and the byte bound are applied before every safe persisted snapshot', async () => {
   const kv = fakeKeyValueStore();
-  const store = new PersistentEtagStore(kv);
+  const store = persistentEtagStore(kv);
   store.set('https://user:secret@registry.example/private', { etag: 'W/"secret"', body: 'x'.repeat(100) });
   for (let i = 0; i < 30; i += 1) {
     store.set(`https://registry.npmjs.org/safe-${i}`, { etag: `W/"${i}"`, body: 'x'.repeat(200_000) });

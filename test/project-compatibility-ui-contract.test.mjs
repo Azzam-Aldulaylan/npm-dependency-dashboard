@@ -10,6 +10,8 @@ const review = read('webview/src/components/UpgradeReviewPanel.tsx');
 const cards = read('webview/src/components/UpgradeAnalysisCards.tsx');
 const vulnerabilities = read('webview/src/components/VulnerabilitiesPanel.tsx');
 const vulnerabilityCard = read('webview/src/components/VulnerabilityCard.tsx');
+const advisoryDetails = read('webview/src/components/AdvisoryDetails.tsx');
+const packageTable = read('webview/src/components/PackageTable.tsx');
 const styles = read('webview/src/styles.css');
 
 test('project compatibility uses the three host-provided confidence classes', () => {
@@ -72,4 +74,18 @@ test('the dashboard vulnerability dropdown exposes every available advisory iden
   assert.match(vulnerabilityCard, /vulnerabilityIdentifiers\(advisory\)/);
   assert.match(vulnerabilityCard, /<dt>Vulnerability ID<\/dt>/);
   assert.match(vulnerabilityCard, /identifiers\.map/);
+});
+
+test('the dashboard vulnerability dropdown groups duplicate paths under one advisory card', () => {
+  assert.match(advisoryDetails, /filterDashboardAdvisoryContexts\(row, searchQuery\)/);
+  assert.match(advisoryDetails, /paths=\{context\.paths\}/);
+  assert.match(vulnerabilityCard, /knownPaths\.length > 1/);
+  assert.match(vulnerabilityCard, /dependency paths/);
+});
+
+test('vulnerability-level dashboard searches automatically expand matching rows without removing manual control', () => {
+  assert.match(packageTable, /dependencyRowSearchTargetsAdvisory\(row, searchQuery\)/);
+  assert.match(packageTable, /expanded\.has\(row\.name\) \|\| autoExpanded/);
+  assert.match(packageTable, /toggle\(row\.name, isOpen, autoExpansionEligible\)/);
+  assert.match(packageTable, /setSuppressedSearchExpansion/);
 });

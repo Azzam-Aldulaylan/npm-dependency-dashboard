@@ -1750,6 +1750,7 @@ function Dashboard({
                 rows={pageResult.pageRows}
                 unavailableUpdatePackages={unavailableUpdatePackages}
                 advisoriesAvailable={data.availability.advisories === 'complete'}
+                searchQuery={search}
                 onOpenAdvisory={onOpenAdvisory}
                 sortState={sortState}
                 onSort={onSort}

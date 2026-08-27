@@ -1053,6 +1053,37 @@ button {
   color: var(--vscode-descriptionForeground);
 }
 
+.advisory__paths {
+  margin-top: 0.55rem;
+  max-width: 100%;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.86em;
+}
+
+.advisory__paths > summary {
+  width: fit-content;
+  color: var(--vscode-textLink-foreground);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.advisory__paths > summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.advisory__paths ol {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0.45rem 0 0;
+  padding-inline-start: 1.4rem;
+}
+
+.advisory__paths code {
+  overflow-wrap: anywhere;
+}
+
 .advisory__source {
   display: inline-flex;
   align-items: center;

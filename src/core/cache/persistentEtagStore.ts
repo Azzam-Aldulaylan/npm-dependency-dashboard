@@ -41,6 +41,15 @@ export const MAX_REGISTRY_CACHE_ENTRIES = 500;
  */
 export const MAX_REGISTRY_CACHE_SERIALIZED_BYTES = 5 * 1024 * 1024;
 
+/**
+ * CVE aliases are tiny but otherwise sit behind multi-megabyte packuments in
+ * the shared ETag cache's LRU order. Reserve a small slice so a few recent
+ * packuments cannot evict every alias and force the next scan to repeat (and
+ * eventually rate-limit) the same GitHub lookups.
+ */
+export const MAX_GITHUB_ADVISORY_CACHE_SERIALIZED_BYTES = 512 * 1024;
+const GITHUB_ADVISORY_CACHE_PREFIX = 'https://api.github.com/advisories/';
+
 /** Registry responses commonly settle on adjacent event-loop turns. Batch the
  * resulting full-cache writes briefly, while bounding a continuous stream so
  * persistence can never be postponed indefinitely. */
@@ -80,7 +89,6 @@ export function boundPersistedEtagEntries(
   const emptyCollectionBytes = serializedEtagCacheBytes([]);
   const seenKeys = new Set<string>();
   const newestFirst: Array<[string, CachedResponse]> = [];
-  let totalBytes = emptyCollectionBytes;
 
   // Walk newest-to-oldest so large persisted caches do not stringify every
   // old body merely to discover that the newest 5 MiB already fill the cap.
@@ -95,14 +103,41 @@ export function boundPersistedEtagEntries(
     if (hasUrlCredentials(key)) continue;
     if (newestFirst.length >= entryBudget) break;
 
-    const entryBytes = utf8Bytes(JSON.stringify([key, value]));
-    if (emptyCollectionBytes + entryBytes > byteBudget) continue;
-    const candidateBytes = totalBytes + entryBytes + (newestFirst.length === 0 ? 0 : 1);
-    if (candidateBytes > byteBudget) break;
     newestFirst.push([key, value]);
-    totalBytes = candidateBytes;
   }
-  return newestFirst.reverse();
+
+  const retained = new Set<string>();
+  let totalBytes = emptyCollectionBytes;
+  let githubBytes = 0;
+  const retain = ([key, value]: [string, CachedResponse], github: boolean): boolean => {
+    const entryBytes = utf8Bytes(JSON.stringify([key, value]));
+    const separatorBytes = retained.size === 0 ? 0 : 1;
+    if (emptyCollectionBytes + entryBytes > byteBudget) return false;
+    if (github && githubBytes + entryBytes + separatorBytes > MAX_GITHUB_ADVISORY_CACHE_SERIALIZED_BYTES) {
+      return false;
+    }
+    if (totalBytes + entryBytes + separatorBytes > byteBudget) return false;
+    retained.add(key);
+    totalBytes += entryBytes + separatorBytes;
+    if (github) githubBytes += entryBytes + separatorBytes;
+    return true;
+  };
+
+  // Advisory aliases are bounded, validated compact records written only for
+  // the fixed GitHub advisory API. Select those first, newest-first, then give
+  // the rest of the byte budget to ordinary registry responses using the
+  // existing strict LRU boundary.
+  for (const entry of newestFirst) {
+    if (entry[0].startsWith(GITHUB_ADVISORY_CACHE_PREFIX)) retain(entry, true);
+  }
+  for (const entry of newestFirst) {
+    if (entry[0].startsWith(GITHUB_ADVISORY_CACHE_PREFIX)) continue;
+    const entryBytes = utf8Bytes(JSON.stringify(entry));
+    if (emptyCollectionBytes + entryBytes > byteBudget) continue;
+    if (!retain(entry, false)) break;
+  }
+
+  return newestFirst.filter(([key]) => retained.has(key)).reverse();
 }
 
 function loadValidatedPersistedEtagEntries(store: KeyValueStore): Array<[string, CachedResponse]> {

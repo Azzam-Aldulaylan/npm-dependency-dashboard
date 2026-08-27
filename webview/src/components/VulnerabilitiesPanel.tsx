@@ -324,7 +324,7 @@ export function VulnerabilitiesPanel({
         <h3 className="manage-section-heading">Vulnerability details</h3>
         <p className="vuln-source-note">
           <IconInfo aria-hidden="true" />
-          Advisories come from npm’s security service. Dependency paths come from this project’s active lockfile.
+          Findings come from npm’s security service, CVE aliases from GitHub’s Advisory Database, and dependency paths from this project’s active lockfile.
         </p>
         <div className="vuln-filters" role="tablist" aria-label="Filter by severity">
           <button

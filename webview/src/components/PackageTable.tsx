@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 
 import type { PackageRow } from '../../../src/core/types.js';
 import type { DependencyFinding } from '../../../src/core/hygiene/types.js';
 import { introducedDuplicateFindings, ownDuplicateFinding } from '../../../src/host/dependencyDetailsCopy.js';
+import { dependencyRowSearchTargetsAdvisory } from '../../../src/host/vulnerabilityUiState.js';
 import type { SortColumn, TableSortState } from '../../../src/host/tableSort.js';
 import { IconChevronRight, IconSliders, IconSortArrow, IconSortNeutral } from '../icons.js';
 import { AdvisoryDetails } from './AdvisoryDetails.js';
@@ -161,6 +162,7 @@ export function PackageTable({
   rows,
   unavailableUpdatePackages,
   advisoriesAvailable,
+  searchQuery,
   sortState,
   onSort,
   onOpenAdvisory,
@@ -170,6 +172,7 @@ export function PackageTable({
   rows: readonly PackageRow[];
   unavailableUpdatePackages: ReadonlySet<string>;
   advisoriesAvailable: boolean;
+  searchQuery: string;
   sortState: TableSortState;
   onSort: (column: SortColumn) => void;
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
@@ -178,13 +181,33 @@ export function PackageTable({
   onOpenManage: (packageName: string) => void;
 }): ReactElement {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const [suppressedSearchExpansion, setSuppressedSearchExpansion] = useState<{
+    query: string;
+    packageNames: ReadonlySet<string>;
+  }>(() => ({ query: normalizedSearchQuery, packageNames: new Set() }));
 
-  const toggle = (name: string): void => {
+  useEffect(() => {
+    setSuppressedSearchExpansion({ query: normalizedSearchQuery, packageNames: new Set() });
+  }, [normalizedSearchQuery]);
+
+  const toggle = (name: string, isOpen: boolean, autoExpansionEligible: boolean): void => {
     setExpanded((previous) => {
       const next = new Set(previous);
-      if (!next.delete(name)) next.add(name);
+      if (isOpen) next.delete(name);
+      else next.add(name);
       return next;
     });
+    if (autoExpansionEligible) {
+      setSuppressedSearchExpansion((previous) => {
+        const packageNames = new Set(
+          previous.query === normalizedSearchQuery ? previous.packageNames : []
+        );
+        if (isOpen) packageNames.add(name);
+        else packageNames.delete(name);
+        return { query: normalizedSearchQuery, packageNames };
+      });
+    }
   };
 
   return (
@@ -233,7 +256,15 @@ export function PackageTable({
         </thead>
         {rows.map((row) => {
           const expandable = row.advisories.length > 0;
-          const isOpen = expandable && expanded.has(row.name);
+          const autoExpansionEligible =
+            expandable && dependencyRowSearchTargetsAdvisory(row, searchQuery);
+          const autoExpanded =
+            autoExpansionEligible &&
+            !(
+              suppressedSearchExpansion.query === normalizedSearchQuery &&
+              suppressedSearchExpansion.packageNames.has(row.name)
+            );
+          const isOpen = expandable && (expanded.has(row.name) || autoExpanded);
           const duplicateFinding = ownDuplicateFinding(hygieneFindings, row.name);
           const introducedDuplicates = introducedDuplicateFindings(hygieneFindings, row.name);
           const unusedFinding = hygieneFindings.find(
@@ -251,7 +282,7 @@ export function PackageTable({
                       aria-expanded={isOpen}
                       aria-label={`${isOpen ? 'Hide' : 'Show'} advisories for ${row.name}`}
                       onClick={() => {
-                        toggle(row.name);
+                        toggle(row.name, isOpen, autoExpansionEligible);
                       }}
                     >
                       <IconChevronRight />
@@ -317,7 +348,7 @@ export function PackageTable({
               {isOpen ? (
                 <tr className="packages__details">
                   <td colSpan={6}>
-                    <AdvisoryDetails packageName={row.name} advisories={row.advisories} onOpenAdvisory={onOpenAdvisory} />
+                    <AdvisoryDetails row={row} searchQuery={searchQuery} onOpenAdvisory={onOpenAdvisory} />
                   </td>
                 </tr>
               ) : null}

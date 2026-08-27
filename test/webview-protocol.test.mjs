@@ -1164,6 +1164,37 @@ test('a string id is accepted alongside a numeric one', () => {
   assert.equal(isHostToWebviewMessage({ status: 'ready', data: { ...DATA, rows } }), true);
 });
 
+test('bounded CVE and GHSA aliases are accepted while malformed advisory identifiers are rejected', () => {
+  const valid = {
+    ...ATTRIBUTED,
+    advisory: {
+      ...ADVISORY,
+      identifiers: [
+        { type: 'CVE', value: 'CVE-2026-67213' },
+        { type: 'GHSA', value: 'GHSA-2V37-7H3G-55P8' },
+      ],
+    },
+  };
+  assert.equal(isHostToWebviewMessage({
+    status: 'ready',
+    data: { ...DATA, rows: [{ ...CLEAN_ROW, advisories: [valid], worstSeverity: 'high' }] },
+  }), true);
+
+  for (const identifiers of [
+    [{ type: 'CVE', value: 42 }],
+    [{ type: 'NVD', value: 'CVE-2026-67213' }],
+    [{ type: 'CVE', value: 'GHSA-2V37-7H3G-55P8' }],
+    [{ type: 'GHSA', value: 'CVE-2026-67213' }],
+    Array.from({ length: 17 }, (_, index) => ({ type: 'CVE', value: `CVE-2026-${1000 + index}` })),
+  ]) {
+    const malformed = { ...ATTRIBUTED, advisory: { ...ADVISORY, identifiers } };
+    assert.equal(isHostToWebviewMessage({
+      status: 'ready',
+      data: { ...DATA, rows: [{ ...CLEAN_ROW, advisories: [malformed], worstSeverity: 'high' }] },
+    }), false);
+  }
+});
+
 // ---------------------------------------------- webview -> host: analyze-remediation
 
 test('a well-formed analyze-remediation request is accepted', () => {

@@ -48,6 +48,30 @@ test('isPersistedProjectCache accepts a well-formed record, including a null loc
     isPersistedProjectCache({ ...VALID_ENTRY, sourceFingerprint: { ...VALID_FINGERPRINT, lockfileHash: null, lockfilePath: null } }),
     true
   );
+  assert.equal(isPersistedProjectCache({
+    ...VALID_ENTRY,
+    rows: [{
+      ...ROW,
+      advisories: [{
+        advisory: {
+          id: 1,
+          severity: 'high',
+          title: 'Issue',
+          url: 'https://github.com/advisories/GHSA-2v37-7h3g-55p8',
+          vulnerableVersions: '<2',
+          identifiers: [
+            { type: 'CVE', value: 'CVE-2026-67213' },
+            { type: 'GHSA', value: 'GHSA-2V37-7H3G-55P8' },
+          ],
+        },
+        flaggedPackage: 'clean-pkg',
+        flaggedVersion: '1.0.0',
+        path: ['clean-pkg'],
+        patchedVersion: { status: 'known', version: '2.0.0' },
+      }],
+      worstSeverity: 'high',
+    }],
+  }), true);
 });
 
 test('isPersistedProjectCache rejects a malformed generatedAt, missing lockfilePath, a missing/malformed sourceFingerprint, or a row that fails validation', () => {

@@ -122,6 +122,7 @@ npm run package    # runs vscode:prepublish (a production build) automatically, 
 - Workspace-linked packages are identified but their member manifests are not traversed as registry packages during compatibility analysis.
 - Private-registry authentication is left to the package manager; the extension never reads or persists auth keys.
 - The table is direct-dependency-level: transitive vulnerabilities are attributed to the direct dependency that pulls them in, not listed as their own rows.
+- Container images, operating-system packages, and globally installed npm tooling are not scanned. A separate, opt-in design is recorded in [Future container and runtime vulnerability scanning](docs/future-container-runtime-vulnerability-scanning.md).
 - No dependency-tree visualization or changelog viewer yet.
 - Desktop-only: the extension spawns local `npm`/Node processes and hasn't been tested in vscode.dev or other web-extension contexts.
 

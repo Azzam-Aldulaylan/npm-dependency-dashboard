@@ -99,6 +99,15 @@ export interface Advisory {
   title: string;
   url: string;
   vulnerableVersions: string;
+  /** Public aliases supplied by an advisory database. npm's numeric id remains in `id`. */
+  identifiers?: AdvisoryIdentifier[];
+}
+
+export type AdvisoryIdentifierType = 'CVE' | 'GHSA';
+
+export interface AdvisoryIdentifier {
+  type: AdvisoryIdentifierType;
+  value: string;
 }
 
 /**

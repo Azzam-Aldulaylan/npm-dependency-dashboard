@@ -17,6 +17,7 @@ import { worstSeverity, resolveUpgradeTarget } from './advisories/aggregate.js';
 import { attributeAdvisories } from './advisories/attribution.js';
 import { attachPatchedVersions, distinctFlaggedPackages } from './advisories/remediation.js';
 import { buildBulkRequestBody, fetchBulkAdvisories } from './advisories/bulk.js';
+import { enrichAdvisoriesWithGitHubIdentifiers, GITHUB_ADVISORIES_API } from './advisories/githubIdentifiers.js';
 import { directNodes } from './lockfile/parse.js';
 import { buildDependencyGraph } from './lockfile/build.js';
 import { computeGraphHygieneFindings } from './hygiene/index.js';
@@ -120,10 +121,12 @@ function instrumentHttpClient(client: HttpClient, recorder: PerformanceRecorder)
   if (!recorder.enabled) return client;
   return {
     async get(url, options) {
-      recorder.increment('registry requests');
-      recorder.increment(url.endsWith('/latest') ? '/latest requests' : 'packument requests');
+      const isGitHubAdvisory =
+        url.startsWith(`${GITHUB_ADVISORIES_API}/`) || url.startsWith(`${GITHUB_ADVISORIES_API}?`);
+      recorder.increment(isGitHubAdvisory ? 'GitHub advisory requests' : 'registry requests');
+      if (!isGitHubAdvisory) recorder.increment(url.endsWith('/latest') ? '/latest requests' : 'packument requests');
       const response = await client.get(url, options);
-      recorder.increment('registry response wire bytes', response.wireBytes);
+      recorder.increment(isGitHubAdvisory ? 'GitHub advisory response wire bytes' : 'registry response wire bytes', response.wireBytes);
       if (response.status === 304) recorder.increment('304 responses');
       return response;
     },
@@ -215,7 +218,8 @@ export async function buildPackageRows(
     let advisoriesByName = new Map<string, Advisory[]>();
     let advisoriesError: FetchError | undefined;
     try {
-      advisoriesByName = await fetchBulkAdvisories(httpClient, bulkRequestBody, signal);
+      const npmAdvisories = await fetchBulkAdvisories(httpClient, bulkRequestBody, signal);
+      advisoriesByName = await enrichAdvisoriesWithGitHubIdentifiers(httpClient, etagStore, npmAdvisories, signal);
     } catch (cause) {
       advisoriesError =
         cause instanceof FetchError

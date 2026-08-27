@@ -18,6 +18,7 @@ import { currentVersionDisplay } from '../out/host/versionDisplay.js';
 
 const REGISTRY = 'https://registry.npmjs.org';
 const BULK = 'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk';
+const GITHUB_MINIMATCH = 'https://api.github.com/advisories?ecosystem=npm&affects=minimatch&per_page=100';
 const ROOT = '/tmp/project';
 
 function fakeClient(getRoutes, postRoute) {
@@ -85,6 +86,14 @@ const MINIMATCH_ADVISORY = {
 };
 
 const BULK_RESPONSE = json({ minimatch: [MINIMATCH_ADVISORY] });
+const GITHUB_MINIMATCH_RESPONSE = json([{
+  ghsa_id: 'GHSA-f8q6-p94x-37v3',
+  cve_id: 'CVE-2022-3517',
+  identifiers: [
+    { type: 'GHSA', value: 'GHSA-f8q6-p94x-37v3' },
+    { type: 'CVE', value: 'CVE-2022-3517' },
+  ],
+}]);
 
 const LATEST_ROUTES = {
   [`${REGISTRY}/clean-pkg/latest`]: json({ version: '1.0.1', description: 'A clean fixture package.', license: 'MIT' }),
@@ -145,7 +154,7 @@ const rowFor = (result, name) => result.rows.find((r) => r.name === name);
 // ------------------------------------------------------------ happy path
 
 test('a clean row and a vulnerable row are both fully populated', async () => {
-  const client = fakeClient(LATEST_ROUTES, BULK_RESPONSE);
+  const client = fakeClient({ ...LATEST_ROUTES, [GITHUB_MINIMATCH]: GITHUB_MINIMATCH_RESPONSE }, BULK_RESPONSE);
   const runner = fakeAuditRunner(AUDIT_MINIMATCH);
 
   const result = await buildPackageRows(baseOptions(client, { auditRunner: runner }));
@@ -179,6 +188,10 @@ test('a clean row and a vulnerable row are both fully populated', async () => {
   assert.equal(vulnerable.wanted, '3.1.5');
   assert.equal(vulnerable.worstSeverity, 'high');
   assert.equal(vulnerable.advisories.length, 1);
+  assert.deepEqual(vulnerable.advisories[0].advisory.identifiers, [
+    { type: 'CVE', value: 'CVE-2022-3517' },
+    { type: 'GHSA', value: 'GHSA-F8Q6-P94X-37V3' },
+  ]);
   assert.deepEqual(vulnerable.advisories[0].path, ['minimatch'], 'flagged at its own version');
   assert.equal(vulnerable.upgradeTo, '3.1.5', "audit's fixAvailable is authoritative");
   assert.equal(vulnerable.upgradeReason, 'security-fix', 'a verified fix wins over the general update path');
@@ -207,6 +220,7 @@ test('a usable fixAvailable suppresses the self-computed-fix packument escalatio
   assert.deepEqual(client.urls, [
     `${REGISTRY}/clean-pkg/latest`,
     `${REGISTRY}/minimatch/latest`,
+    GITHUB_MINIMATCH,
     `${REGISTRY}/minimatch`,
   ]);
 });
@@ -656,6 +670,9 @@ test('patched-version packuments respect the configured concurrency limit', asyn
   const client = {
     async get(url) {
       if (url.endsWith('/latest')) return json({ version: '1.2.0' });
+      if (url.startsWith('https://api.github.com/advisories')) {
+        return { status: 404, headers: {}, body: '', wireBytes: 0 };
+      }
       const name = url.slice(url.lastIndexOf('/') + 1);
       packumentCalls.set(name, (packumentCalls.get(name) ?? 0) + 1);
       packumentsInFlight += 1;
@@ -789,6 +806,7 @@ test('scan instrumentation reports request kinds and scan-local packument reuse 
   assert.equal(report.metadata['registry requests'], 4);
   assert.equal(report.metadata['/latest requests'], 2);
   assert.equal(report.metadata['packument requests'], 1);
+  assert.equal(report.metadata['GitHub advisory requests'], 1);
   assert.equal(report.metadata['bulk advisory requests'], 1);
   assert.ok(report.metadata['bulk advisory request bytes'] > 0);
   assert.ok(report.metadata['registry response wire bytes'] > 0);

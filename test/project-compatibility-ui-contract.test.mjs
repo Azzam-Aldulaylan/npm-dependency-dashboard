@@ -9,6 +9,7 @@ const progressive = read('webview/src/components/UpgradeAnalysisSections.tsx');
 const review = read('webview/src/components/UpgradeReviewPanel.tsx');
 const cards = read('webview/src/components/UpgradeAnalysisCards.tsx');
 const vulnerabilities = read('webview/src/components/VulnerabilitiesPanel.tsx');
+const vulnerabilityCard = read('webview/src/components/VulnerabilityCard.tsx');
 const styles = read('webview/src/styles.css');
 
 test('project compatibility uses the three host-provided confidence classes', () => {
@@ -59,7 +60,16 @@ test('transitive vulnerability copy keeps flagged-package patches separate from 
   assert.match(cards, /onOpenAdvisory\(contextRootPackage, context\.advisory\.id, primaryPath\)/,
     'coordinated contexts navigate through their own host-provided direct root, not always the primary managed row');
   assert.doesNotMatch(cards, /Resolved by upgrading[^\n]+patchedVersion/);
-  assert.match(vulnerabilities, /Fixed in \{entry\.flaggedPackage\}/);
-  assert.match(vulnerabilities, /<dt>Direct dependency<\/dt>/);
-  assert.match(vulnerabilities, /rootPackageName\}\{rootPackageVersion === null/);
+  assert.match(vulnerabilities, /Fixed in \{context\.flaggedPackage\}/);
+  assert.match(vulnerabilities, /context\.directRoots\.map/);
+  assert.match(vulnerabilities, /context\.pathsTruncated/);
+  assert.match(vulnerabilities, /context\.paths\.map/);
+  assert.match(vulnerabilities, /vulnerabilityIdentifiers\(context\.advisory\)/);
+  assert.doesNotMatch(vulnerabilities, /Resolved by upgrading[^\n]+patchedVersion/);
+});
+
+test('the dashboard vulnerability dropdown exposes every available advisory identifier', () => {
+  assert.match(vulnerabilityCard, /vulnerabilityIdentifiers\(advisory\)/);
+  assert.match(vulnerabilityCard, /<dt>Vulnerability ID<\/dt>/);
+  assert.match(vulnerabilityCard, /identifiers\.map/);
 });

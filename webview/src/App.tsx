@@ -13,6 +13,7 @@ import type { PageSize } from '../../src/host/pagination.js';
 import { DEFAULT_PAGE_SIZE, paginate } from '../../src/host/pagination.js';
 import type { SummaryFilterId } from '../../src/host/summaryMetrics.js';
 import { summaryFilterPredicate, summaryMetrics } from '../../src/host/summaryMetrics.js';
+import { dependencyRowMatchesSearch } from '../../src/host/vulnerabilityUiState.js';
 import type { SortColumn, TableSortState } from '../../src/host/tableSort.js';
 import { nextColumnSortState, sortRows } from '../../src/host/tableSort.js';
 import type { TransitiveRemediationUiState } from '../../src/host/upgradeAction.js';
@@ -1408,6 +1409,7 @@ export function App(): ReactElement {
             return (
               <ManageDependencyModal
                 row={row}
+                allRows={data.rows}
                 remediation={remediationByPackage.get(row.name)}
                 removalImpact={removalImpact}
                 usage={usageByPackage.get(row.name)}
@@ -1642,7 +1644,7 @@ function Dashboard({
         matchesCard(row) &&
         matchesType(row) &&
         matchesHygiene(row) &&
-        (query === '' || row.name.toLowerCase().includes(query))
+        dependencyRowMatchesSearch(row, query)
     );
     return sortRows(rows, sortState, selectedFilter);
   }, [data.rows, selectedFilter, dependencyType, hygieneFilter, hygieneFindings, query, sortState]);
@@ -1725,7 +1727,7 @@ function Dashboard({
               <DependencyEmptyState
                 icon="search"
                 title={`No dependencies match "${search.trim()}"`}
-                detail="Try another package name or clear the search."
+                detail="Try another package name, vulnerability ID, dependency path, or clear the search."
                 onClearSearch={() => {
                   onSearchChange('');
                 }}

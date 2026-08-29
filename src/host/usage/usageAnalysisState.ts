@@ -2,6 +2,9 @@ import { sourceFingerprintsMatch } from '../../core/cache/sourceFingerprint.js';
 import type { ProjectSourceFingerprint } from '../../core/cache/sourceFingerprint.js';
 import type { DependencyUsageResult } from '../../core/usage/types.js';
 
+/** One project-wide usage pass remains reusable for one hour unless its source identity changes. */
+export const USAGE_ANALYSIS_REUSE_MS = 60 * 60_000;
+
 export interface UsageSourceIdentity {
   fingerprint: ProjectSourceFingerprint;
   generation: number;
@@ -151,7 +154,7 @@ export class UsageAnalysisState {
   get(projectId: string, packageName: string, identity: UsageSourceIdentity): CachedUsage | undefined {
     const entry = this.cache.get(projectId)?.get(packageName);
     if (entry === undefined) return undefined;
-    if (this.now() - entry.cachedAt > this.ttlMs) return undefined;
+    if (this.now() - entry.cachedAt >= this.ttlMs) return undefined;
     if (!usageSourceIdentitiesMatch(entry.identity, identity)) return undefined;
     return entry;
   }

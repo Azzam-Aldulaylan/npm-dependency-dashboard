@@ -55,7 +55,7 @@ export function UpgradeAnalysisSections({
   sections: UpgradeAnalysisSectionsState;
   onChangeTab: (tab: ManageTabId) => void;
   onConfigureVerification: () => void;
-  onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[]) => void) | undefined;
+  onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[], reference?: string) => void) | undefined;
   onOpenUsageReference?: ((usageId: string, referenceIndex: number) => void) | undefined;
 }): ReactElement {
   const { overview, compatibility, projectCompatibility, security, smartPlan } = sections;

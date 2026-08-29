@@ -24,5 +24,5 @@ export function computeGraphHygieneFindings(
 export type { DependencyFinding, DependencyFindingKind, FindingConfidence, FindingSeverity } from './types.js';
 export { summarizeHygieneFindings } from './summary.js';
 export type { DependencyHygieneSummary } from './summary.js';
-export { whyInstalled } from './whyInstalled.js';
-export type { WhyInstalledResult } from './whyInstalled.js';
+export { buildWhyInstalledIndex, whyInstalled } from './whyInstalled.js';
+export type { WhyInstalledIndex, WhyInstalledResult } from './whyInstalled.js';

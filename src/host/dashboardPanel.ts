@@ -472,12 +472,18 @@ export class DashboardPanel {
       this.usageCoordinator.handleCancel();
       return;
     }
+    if (message.type === 'cancel-removal-impact') {
+      this.usageCoordinator.handleCancelRemovalImpact(message);
+      return;
+    }
     if (message.type === 'analyze-removal-impact') {
       // Same rule as where-used/analyze-cleanup: read-only, but a concurrent
       // read could still race an in-flight upgrade's file writes.
       if (this.upgradeCoordinator.isBusy()) {
         this.sink.postMessage({
           status: 'removal-impact-error',
+          requestId: message.requestId,
+          packages: [...message.packages].sort((left, right) => left.localeCompare(right)),
           error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
         });
         return;
@@ -542,7 +548,7 @@ export class DashboardPanel {
    * check) is silently a no-op: there is nothing unsafe about it, so there
    * is nothing worth surfacing as an error either.
    */
-  private openAdvisory(message: { package: string; advisoryId: string | number; path: string[] }): void {
+  private openAdvisory(message: { package: string; advisoryId: string | number; path: string[]; reference?: string }): void {
     const url = this.controller?.resolveAdvisoryUrl(message);
     if (url === null || url === undefined) return;
     void vscode.env.openExternal(vscode.Uri.parse(url));

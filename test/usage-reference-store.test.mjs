@@ -51,6 +51,24 @@ test('a stale (past-TTL) result is rejected even with the correct id and index',
   assert.equal(store.resolveReference(id, 0), null);
 });
 
+test('default reference authority matches the one-hour project analysis window', () => {
+  const originalNow = Date.now;
+  let now = 10_000;
+  Date.now = () => now;
+  try {
+    const store = new UsageReferenceStore();
+    const id = store.store('left-pad', result([
+      { filePath: 'a', line: 1, column: 1, snippet: '', kind: 'import' },
+    ]), FAKE_FOLDER);
+    now += 60 * 60_000 - 1;
+    assert.notEqual(store.resolveReference(id, 0), null);
+    now += 1;
+    assert.equal(store.resolveReference(id, 0), null);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test('clear() invalidates every previously stored id', () => {
   const store = new UsageReferenceStore();
   const id = store.store('left-pad', result([{ filePath: 'a', line: 1, column: 1, snippet: '', kind: 'import' }]), FAKE_FOLDER);

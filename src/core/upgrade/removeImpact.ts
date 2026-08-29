@@ -9,15 +9,17 @@
 
 import type { DeclaredDependency } from '../manifest/parse.js';
 import type { DependencyGraph } from '../types.js';
-import { whyInstalled } from '../hygiene/whyInstalled.js';
+import type { WhyInstalledIndex } from '../hygiene/whyInstalled.js';
+import { buildWhyInstalledIndex, whyInstalled } from '../hygiene/whyInstalled.js';
 
 export function stillRequiredBy(
   graph: DependencyGraph,
   declared: readonly DeclaredDependency[],
   packageName: string,
-  alsoRemoving: ReadonlySet<string>
+  alsoRemoving: ReadonlySet<string>,
+  index: WhyInstalledIndex = buildWhyInstalledIndex(graph)
 ): string[] {
-  const result = whyInstalled(graph, declared, packageName);
+  const result = whyInstalled(graph, declared, packageName, {}, index);
   const requiredBy = new Set<string>();
   for (const version of result.versions) {
     for (const path of version.paths) {

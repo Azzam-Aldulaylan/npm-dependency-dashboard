@@ -25,7 +25,7 @@ export interface DependencyReference {
 export interface DependencyUsageResult {
   packageName: string;
   references: DependencyReference[];
-  /** True when the scan stopped before covering every eligible file (a workspace size cap, or cancellation) — `references` may be incomplete. */
+  /** True when the scan did not cover every eligible file (a workspace size cap, cancellation, unreadable/missing file, or oversized file) — `references` may be incomplete. */
   truncated: boolean;
   scannedFileCount: number;
   scannedAt: string;

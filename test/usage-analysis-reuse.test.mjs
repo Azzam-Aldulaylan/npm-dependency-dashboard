@@ -5,6 +5,7 @@ import { computeSourceFingerprint } from '../out/core/cache/sourceFingerprint.js
 import { planWorkspaceAnalysisFiles } from '../out/core/usage/workspaceAnalysisPlan.js';
 import {
   ForegroundUsageOperationRegistry,
+  USAGE_ANALYSIS_REUSE_MS,
   UsageAnalysisState,
   canJoinBackgroundUsageScan,
   shouldCancelUnderlyingUsageScan,
@@ -55,6 +56,24 @@ test('cleanup results satisfy removal reuse only when every package is complete 
 
   now += 600_001;
   assert.equal(state.getComplete('project-a', ['a'], identity), undefined);
+});
+
+test('usage reuse is project-wide for one hour and expires atomically at the boundary', () => {
+  let now = 5_000;
+  const state = new UsageAnalysisState(USAGE_ANALYSIS_REUSE_MS, () => now);
+  const projectA = state.identity('project-a', fingerprint('{"name":"a"}'));
+  const projectB = state.identity('project-b', fingerprint('{"name":"b"}'));
+  state.set('project-a', 'alpha', projectA, usage('alpha'));
+  state.set('project-a', 'beta', projectA, usage('beta'));
+  state.set('project-b', 'alpha', projectB, usage('alpha'));
+
+  now += USAGE_ANALYSIS_REUSE_MS - 1;
+  assert.deepEqual([...state.getComplete('project-a', ['alpha', 'beta'], projectA).keys()], ['alpha', 'beta']);
+  assert.notEqual(state.get('project-b', 'alpha', projectB), undefined, 'another project keeps its own cache');
+
+  now += 1;
+  assert.equal(state.getComplete('project-a', ['alpha', 'beta'], projectA), undefined);
+  assert.equal(state.get('project-b', 'alpha', projectB), undefined);
 });
 
 test('source invalidation is project-scoped and supersedes old publication identity', () => {

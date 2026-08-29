@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent, ReactElement } from 'react';
 
-import { MAX_BULK_REMOVE_CHANGES, MAX_BULK_UPGRADE_CHANGES } from '../../../src/core/upgrade/validate.js';
+import {
+  bulkReviewStatus,
+  canBulkSelectBulkReviewRow,
+  canIndividuallySelectBulkReviewRow,
+  canonicalPackageSelectionMatches,
+  canonicalBulkReviewBatch,
+  deselectNonLowRiskRows,
+  selectedBulkReviewRows,
+  toggleSafeBulkReviewSelection,
+} from '../../../src/core/upgrade/bulkReviewSelection.js';
 import { rowIsMajorUpdate } from '../../../src/host/summaryMetrics.js';
 import type { DependencyFinding } from '../../../src/core/hygiene/types.js';
 import type { PackageRow } from '../../../src/core/types.js';
@@ -17,7 +26,6 @@ import {
   criteriaCounts,
   criteriaPredicate,
   criteriaSummaryLines,
-  emptyCriteria,
   hasAnyCriterionSelected,
   HEALTH_LABELS,
   matchReasonTags,
@@ -31,7 +39,6 @@ import {
   IconFilter,
   IconPackage,
   IconRefresh,
-  IconRoute,
   IconShield,
   IconTrendUp,
   IconX,
@@ -161,7 +168,7 @@ const TYPE_IDS = Object.keys(TYPE_LABELS) as TypeCriterion[];
  * bulk actions themselves — a destructive Remove in particular should never
  * be one click away before the user has seen exactly what it affects. Step 2
  * lists precisely what matched with individual checkboxes, and only there do
- * Upgrade/Remove/Check-fixes appear, scoped to whatever is still checked.
+ * Upgrade/Remove actions appear, scoped to whatever is still checked.
  *
  * Both `selected` (the criteria) and `deselected` (individually unchecked
  * packages) live in this component's own state, above the step branching —
@@ -172,12 +179,11 @@ const TYPE_IDS = Object.keys(TYPE_LABELS) as TypeCriterion[];
 export function ManageDependenciesModal({
   rows,
   hygieneFindings,
-  remediationEligibleNames,
+  initialCriteria,
   cleanupBusy,
   onRecheckHealth,
   onBulkUpgrade,
   onBulkRemove,
-  onAnalyzeRemediations,
   removalImpact,
   onAnalyzeRemovalImpact,
   onCancelRemovalImpact,
@@ -185,12 +191,12 @@ export function ManageDependenciesModal({
 }: {
   rows: readonly PackageRow[];
   hygieneFindings: readonly DependencyFinding[];
-  remediationEligibleNames: ReadonlySet<string>;
+  /** Dashboard filters active when the modal opened; local edits remain modal-owned afterward. */
+  initialCriteria: SelectedCriteria;
   cleanupBusy: boolean;
   onRecheckHealth: () => void;
   onBulkUpgrade: (changes: readonly BulkUpgradeCandidate[]) => void;
   onBulkRemove: (packageNames: readonly string[], matchTags: ReadonlyMap<string, readonly string[]>) => void;
-  onAnalyzeRemediations: (packages: readonly string[]) => void;
   /** The shared removal-impact preview state — see removalImpactState.ts. */
   removalImpact: RemovalImpactState;
   onAnalyzeRemovalImpact: (packages: readonly string[]) => void;
@@ -198,7 +204,7 @@ export function ManageDependenciesModal({
   onClose: () => void;
 }): ReactElement {
   const [step, setStep] = useState<Step>('select');
-  const [selected, setSelected] = useState<SelectedCriteria>(emptyCriteria());
+  const [selected, setSelected] = useState<SelectedCriteria>(() => initialCriteria);
   // Packages the user has individually unchecked on the review step — an
   // opt-out set, not an opt-in one, so a package newly entering the match
   // (criteria changed via Back, then Continue again) defaults to selected,
@@ -207,7 +213,10 @@ export function ManageDependenciesModal({
   const [deselected, setDeselected] = useState<ReadonlySet<string>>(() => new Set());
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
+  const titleRef = useRef<HTMLHeadingElement | null>(null);
+  const previousStep = useRef<Step>('select');
   const previouslyFocused = useRef<Element | null>(null);
+  const [impactAnnouncement, setImpactAnnouncement] = useState('');
 
   useEffect(() => {
     previouslyFocused.current = document.activeElement;
@@ -216,6 +225,12 @@ export function ManageDependenciesModal({
       if (previouslyFocused.current instanceof HTMLElement) previouslyFocused.current.focus();
     };
   }, []);
+
+  useEffect(() => {
+    if (previousStep.current === step) return;
+    previousStep.current = step;
+    titleRef.current?.focus();
+  }, [step]);
 
   useEffect(() => {
     const node = dialogRef.current;
@@ -258,14 +273,28 @@ export function ManageDependenciesModal({
     () => (anySelected ? rows.filter(criteriaPredicate(selected, hygieneFindings)) : []),
     [rows, hygieneFindings, selected, anySelected]
   );
+  const reviewBatch = useMemo(() => canonicalBulkReviewBatch(matched), [matched]);
+  const batchRows = reviewBatch.rows;
+  const completedAssessments = removalImpact.phase === 'done' ? removalImpact.assessments : undefined;
   const matchTags = useMemo(
-    () => new Map(matched.map((row) => [row.name, matchReasonTags(row, hygieneFindings, selected)])),
-    [matched, hygieneFindings, selected]
+    () => new Map(batchRows.map((row) => [row.name, matchReasonTags(row, hygieneFindings, selected)])),
+    [batchRows, hygieneFindings, selected]
   );
   // The individually-checked subset of `matched` — what Step 2's own
   // Upgrade/Remove/Check-fixes actions actually operate on, never the full
   // match a user may have already unchecked part of.
-  const reviewRows = useMemo(() => matched.filter((row) => !deselected.has(row.name)), [matched, deselected]);
+  const lastAutoDeselectedRequestId = useRef<string | null>(null);
+  const effectiveDeselected = useMemo(
+    () =>
+      removalImpact.phase === 'done' && lastAutoDeselectedRequestId.current !== removalImpact.requestId
+        ? deselectNonLowRiskRows(deselected, batchRows, removalImpact.assessments)
+        : deselected,
+    [deselected, batchRows, removalImpact]
+  );
+  const reviewRows = useMemo(
+    () => selectedBulkReviewRows(batchRows, effectiveDeselected, completedAssessments),
+    [batchRows, effectiveDeselected, completedAssessments]
+  );
   const upgradeCandidates = useMemo<readonly BulkUpgradeCandidate[]>(
     () =>
       reviewRows.flatMap((row) =>
@@ -275,42 +304,34 @@ export function ManageDependenciesModal({
       ),
     [reviewRows]
   );
-  const remediationNames = useMemo(
-    () => reviewRows.filter((row) => remediationEligibleNames.has(row.name)).map((row) => row.name),
-    [reviewRows, remediationEligibleNames]
-  );
-
-  // Blocked/unknown packages must never silently enter a destructive bulk
-  // removal — auto-unselect them the moment a fresh impact result names
-  // them, exactly once per result (`lastAutoDeselectedFor` keys off the
-  // result's own `generatedAt`, never re-running on every render). The user
-  // may still re-check an `unknown` row explicitly; `blocked` rows have a
-  // disabled checkbox below and can never be re-checked this way.
-  const lastAutoDeselectedFor = useRef<string | null>(null);
+  // A fresh impact result defaults the whole canonical batch to low-risk
+  // only, exactly once per result. Review findings can then be deliberately
+  // reselected one at a time; unknown and blocked findings remain disabled.
   useEffect(() => {
     if (removalImpact.phase !== 'done') return;
-    if (lastAutoDeselectedFor.current === removalImpact.generatedAt) return;
-    lastAutoDeselectedFor.current = removalImpact.generatedAt;
-    const toAutoDeselect = matched
-      .filter((row) => {
-        const entry = removalImpact.assessments.get(row.name);
-        return entry !== undefined && (entry.assessment.status === 'blocked' || entry.assessment.status === 'unknown');
-      })
-      .map((row) => row.name);
-    if (toAutoDeselect.length === 0) return;
-    setDeselected((previous) => {
-      const next = new Set(previous);
-      for (const name of toAutoDeselect) next.add(name);
-      return next;
-    });
-  }, [removalImpact, matched]);
+    if (lastAutoDeselectedRequestId.current === removalImpact.requestId) return;
+    lastAutoDeselectedRequestId.current = removalImpact.requestId;
+    const analyzedStatuses = batchRows
+      .map((row) => bulkReviewStatus(row.name, removalImpact.assessments))
+      .filter((status) => status !== undefined);
+    const lowRiskCount = analyzedStatuses.filter((status) => status === 'low-risk').length;
+    const unselectedCount = analyzedStatuses.length - lowRiskCount;
+    setDeselected((previous) => deselectNonLowRiskRows(previous, batchRows, removalImpact.assessments));
+    setImpactAnnouncement(
+      `Impact analysis complete. ${lowRiskCount} low-risk ${lowRiskCount === 1 ? 'dependency remains' : 'dependencies remain'} selected by default. ${unselectedCount} ${unselectedCount === 1 ? 'dependency was' : 'dependencies were'} unselected for safety.`
+    );
+  }, [removalImpact, batchRows]);
 
-  // True once every currently-checked row has a fresh impact assessment —
-  // the gate between "Analyze removal impact" and the real "Remove N"
-  // action. Toggling a checkbox after analysis never invalidates this: an
-  // already-analyzed row keeps its assessment regardless of check state.
+  // The destructive action is ready only when the result names exactly the
+  // current selection. Any checkbox change makes the result stale, even if
+  // the changed row happened to have an assessment in that result.
   const removalImpactCoversReview =
-    removalImpact.phase === 'done' && reviewRows.length > 0 && reviewRows.every((row) => removalImpact.assessments.has(row.name));
+    removalImpact.phase === 'done' &&
+    reviewRows.length > 0 &&
+    canonicalPackageSelectionMatches(
+      reviewRows.map((row) => row.name),
+      removalImpact.packages
+    );
   const removalAction = bulkRemovalAction(reviewRows.length, removalImpactCoversReview);
   const removalImpactCounts = useMemo(() => {
     if (removalImpact.phase !== 'done') return null;
@@ -318,16 +339,16 @@ export function ManageDependenciesModal({
     let review = 0;
     let blocked = 0;
     let unknown = 0;
-    for (const row of matched) {
+    for (const row of batchRows) {
       const entry = removalImpact.assessments.get(row.name);
-      if (entry === undefined) continue;
-      analyzed += 1;
-      if (entry.assessment.status === 'review') review += 1;
-      else if (entry.assessment.status === 'blocked') blocked += 1;
-      else if (entry.assessment.status === 'unknown') unknown += 1;
+      const status = bulkReviewStatus(row.name, removalImpact.assessments);
+      if (entry !== undefined) analyzed += 1;
+      if (status === 'review') review += 1;
+      else if (status === 'blocked') blocked += 1;
+      else if (status === 'unknown') unknown += 1;
     }
     return { analyzed, review, blocked, unknown };
-  }, [removalImpact, matched]);
+  }, [removalImpact, batchRows]);
 
   const toggleHealth = (criterion: HealthCriterion): void =>
     setSelected((previous) => ({ ...previous, health: toggleIn(previous.health, criterion) }));
@@ -338,13 +359,26 @@ export function ManageDependenciesModal({
   const toggleUpdates = (criterion: UpdateCriterion): void =>
     setSelected((previous) => ({ ...previous, updates: toggleIn(previous.updates, criterion) }));
 
-  const toggleRow = (name: string): void => setDeselected((previous) => toggleIn(previous, name));
-  const selectAll = (): void => setDeselected(new Set());
-  const clearSelection = (): void => setDeselected(new Set(matched.map((row) => row.name)));
+  const toggleRow = (name: string): void => {
+    if (!canIndividuallySelectBulkReviewRow(bulkReviewStatus(name, completedAssessments))) return;
+    setDeselected((previous) => toggleIn(previous, name));
+  };
+  const bulkSelectableRows = batchRows.filter((row) =>
+    canBulkSelectBulkReviewRow(bulkReviewStatus(row.name, completedAssessments))
+  );
+  const allBulkSelectableSelected =
+    bulkSelectableRows.length > 0 && bulkSelectableRows.every((row) => !effectiveDeselected.has(row.name));
+  const bulkSelectionScope =
+    removalImpact.phase === 'done' &&
+    bulkSelectableRows.every((row) => bulkReviewStatus(row.name, completedAssessments) === 'low-risk')
+      ? 'low-risk'
+      : 'eligible';
+  const toggleBulkSelection = (): void =>
+    setDeselected((previous) => toggleSafeBulkReviewSelection(previous, batchRows, completedAssessments));
 
   const submitUpgrade = (): void => {
     onClose();
-    onBulkUpgrade(upgradeCandidates.slice(0, MAX_BULK_UPGRADE_CHANGES));
+    onBulkUpgrade(upgradeCandidates);
   };
   // Only reached once removalImpactCoversReview is true — see
   // handleRemoveClick below. The user has already seen every currently-
@@ -352,11 +386,7 @@ export function ManageDependenciesModal({
   // this fires; only the final, editable selection is ever submitted.
   const submitRemove = (): void => {
     onClose();
-    onBulkRemove(reviewRows.slice(0, MAX_BULK_REMOVE_CHANGES).map((row) => row.name), matchTags);
-  };
-  const submitRemediation = (): void => {
-    onClose();
-    onAnalyzeRemediations(remediationNames.slice(0, MAX_BULK_UPGRADE_CHANGES));
+    onBulkRemove(reviewRows.map((row) => row.name), matchTags);
   };
   // The bulk Remove button is two-phase: the first click (or a selection
   // change since the last analysis) runs the read-only removal-impact
@@ -368,7 +398,7 @@ export function ManageDependenciesModal({
     if (removalImpactCoversReview) {
       submitRemove();
     } else {
-      onAnalyzeRemovalImpact(reviewRows.slice(0, MAX_BULK_REMOVE_CHANGES).map((row) => row.name));
+      onAnalyzeRemovalImpact(reviewRows.map((row) => row.name));
     }
   };
 
@@ -392,12 +422,14 @@ export function ManageDependenciesModal({
         <header className="modal__header">
           <div className="modal__header-text">
             <p className="modal__eyebrow">Project maintenance</p>
-            <h2 className="modal__title" id="manage-dependencies-title">
+            <h2 className="modal__title" id="manage-dependencies-title" ref={titleRef} tabIndex={-1}>
               {step === 'select' ? 'Manage dependencies' : 'Review dependencies'}
             </h2>
             {step === 'review' ? (
               <p className="modal__subtitle">
-                {matched.length} dependenc{matched.length === 1 ? 'y matches' : 'ies match'} your criteria
+                {reviewBatch.overflowCount > 0
+                  ? `Reviewing the first ${batchRows.length} of ${reviewBatch.totalCount} matching dependencies`
+                  : `${batchRows.length} dependenc${batchRows.length === 1 ? 'y matches' : 'ies match'} your criteria`}
               </p>
             ) : null}
           </div>
@@ -407,11 +439,19 @@ export function ManageDependenciesModal({
         </header>
 
         <ol className="bulk-modal__steps" id="manage-dependencies-step">
-          <li className="bulk-modal__step" data-active={step === 'select' ? 'true' : undefined}>
+          <li
+            className="bulk-modal__step"
+            data-active={step === 'select' ? 'true' : undefined}
+            aria-current={step === 'select' ? 'step' : undefined}
+          >
             <span className="bulk-modal__step-num">1</span>
             Select criteria
           </li>
-          <li className="bulk-modal__step" data-active={step === 'review' ? 'true' : undefined}>
+          <li
+            className="bulk-modal__step"
+            data-active={step === 'review' ? 'true' : undefined}
+            aria-current={step === 'review' ? 'step' : undefined}
+          >
             <span className="bulk-modal__step-num">2</span>
             Review dependencies
           </li>
@@ -499,8 +539,10 @@ export function ManageDependenciesModal({
                   {matched.length === 0
                     ? 'No dependencies match these criteria — try widening your selection.'
                     : `${matched.length} dependenc${matched.length === 1 ? 'y' : 'ies'} match`}
-                  {matched.length > MAX_BULK_REMOVE_CHANGES ? (
-                    <span className="bulk-modal__match-cap"> · showing the first {MAX_BULK_REMOVE_CHANGES}</span>
+                  {reviewBatch.overflowCount > 0 ? (
+                    <span className="bulk-modal__match-cap">
+                      {' '}· the review and its actions use the first {batchRows.length}; {reviewBatch.overflowCount} will not be included
+                    </span>
                   ) : null}
                 </p>
               </div>
@@ -510,17 +552,31 @@ export function ManageDependenciesModal({
           <div className="modal__body">
             <div className="review-controls">
               <div className="review-controls__buttons">
-                <button type="button" className="button button--secondary" onClick={selectAll}>
-                  Select all
-                </button>
-                <button type="button" className="button button--secondary" onClick={clearSelection}>
-                  Clear selection
+                <button
+                  type="button"
+                  className="button button--secondary"
+                  onClick={toggleBulkSelection}
+                  disabled={bulkSelectableRows.length === 0}
+                >
+                  {allBulkSelectableSelected ? 'Clear' : 'Select'}{' '}
+                  {bulkSelectionScope} ({bulkSelectableRows.length})
                 </button>
               </div>
               <p className="review-controls__count">
-                {reviewRows.length} of {matched.length} selected
+                {reviewRows.length} of {batchRows.length} selected
               </p>
             </div>
+
+            <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+              {impactAnnouncement}
+            </p>
+
+            {reviewBatch.overflowCount > 0 ? (
+              <p className="review-controls__batch-note">
+                This review is limited to the first {batchRows.length} matches. The remaining {reviewBatch.overflowCount}{' '}
+                {reviewBatch.overflowCount === 1 ? 'dependency is' : 'dependencies are'} not shown, analyzed, or included in an action.
+              </p>
+            ) : null}
 
             {removalImpact.phase === 'analyzing' ? (
               <div className="banner banner--info review-controls__impact-progress" role="status" aria-live="polite">
@@ -551,7 +607,7 @@ export function ManageDependenciesModal({
                 <button
                   type="button"
                   className="button button--subtle button--small"
-                  onClick={() => onAnalyzeRemovalImpact(reviewRows.slice(0, MAX_BULK_REMOVE_CHANGES).map((row) => row.name))}
+                  onClick={() => onAnalyzeRemovalImpact(reviewRows.map((row) => row.name))}
                   disabled={reviewRows.length === 0}
                 >
                   <IconRefresh />
@@ -560,12 +616,13 @@ export function ManageDependenciesModal({
               </p>
             ) : null}
 
-            <ul className="review-list" aria-label="Matched dependencies">
-              {matched.map((row) => {
+            <ul className="review-list" aria-label="Dependencies in this review batch">
+              {batchRows.map((row) => {
                 const tags = matchTags.get(row.name) ?? [];
-                const checked = !deselected.has(row.name);
                 const impactEntry = removalImpact.phase === 'done' ? removalImpact.assessments.get(row.name) : undefined;
-                const isBlocked = impactEntry?.assessment.status === 'blocked';
+                const impactStatus = bulkReviewStatus(row.name, completedAssessments);
+                const canSelect = canIndividuallySelectBulkReviewRow(impactStatus);
+                const checked = canSelect && !effectiveDeselected.has(row.name);
                 return (
                   <li className="review-list__item" key={row.name}>
                     <label className="review-list__label">
@@ -573,19 +630,26 @@ export function ManageDependenciesModal({
                         type="checkbox"
                         className="review-list__checkbox"
                         checked={checked}
-                        disabled={isBlocked}
+                        disabled={!canSelect}
                         onChange={() => toggleRow(row.name)}
+                        title={
+                          impactStatus === 'blocked'
+                            ? 'Removal is blocked by a required dependency.'
+                            : impactStatus === 'unknown'
+                              ? 'Removal impact is unknown and cannot be selected.'
+                              : undefined
+                        }
                       />
                       <span className="review-list__content">
                         <span className="review-list__name">{row.name}</span>
                         {tags.length > 0 ? <span className="review-list__tags">{tags.join(' · ')}</span> : null}
-                        {impactEntry !== undefined ? (
+                        {impactStatus !== undefined ? (
                           <span
                             className="review-list__impact"
-                            data-status={impactEntry.assessment.status}
+                            data-status={impactStatus}
                           >
-                            <span className="review-list__impact-badge">{REMOVAL_IMPACT_LABEL[impactEntry.assessment.status]}</span>
-                            {impactEntry.assessment.evidence.length > 0 ? (
+                            <span className="review-list__impact-badge">{REMOVAL_IMPACT_LABEL[impactStatus]}</span>
+                            {impactEntry !== undefined && impactEntry.assessment.evidence.length > 0 ? (
                               <span className="review-list__impact-evidence">
                                 {impactEntry.assessment.evidence.map((entry) => entry.summary).join(' · ')}
                               </span>
@@ -603,8 +667,8 @@ export function ManageDependenciesModal({
 
         <footer className={`modal__footer${step === 'review' ? ' modal__footer--split' : ''}`}>
           {step === 'select' ? (
-            <button type="button" className="button button--primary" onClick={() => setStep('review')} disabled={matched.length === 0}>
-              Review {matched.length > 0 ? `${matched.length} ` : ''}dependencies →
+            <button type="button" className="button button--primary" onClick={() => setStep('review')} disabled={batchRows.length === 0}>
+              Review {batchRows.length > 0 ? `${batchRows.length} ` : ''}dependencies →
             </button>
           ) : (
             <>
@@ -612,15 +676,6 @@ export function ManageDependenciesModal({
                 ← Back
               </button>
               <div className="bulk-modal__step-actions">
-                <button
-                  type="button"
-                  className="button button--primary"
-                  onClick={submitRemediation}
-                  disabled={remediationNames.length === 0}
-                >
-                  <IconRoute />
-                  Check {remediationNames.length > 0 ? `${remediationNames.length} ` : ''}fixes
-                </button>
                 <button
                   type="button"
                   className={semanticButtonClassName(removalAction.variant)}

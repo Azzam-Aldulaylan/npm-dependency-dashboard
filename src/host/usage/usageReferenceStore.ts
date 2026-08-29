@@ -19,6 +19,7 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 
 import type { DependencyReference, DependencyUsageResult } from '../../core/usage/types.js';
+import { USAGE_ANALYSIS_REUSE_MS } from './usageAnalysisState.js';
 
 interface StoredUsageResult {
   packageName: string;
@@ -27,12 +28,10 @@ interface StoredUsageResult {
   expiresAt: number;
 }
 
-const DEFAULT_TTL_MS = 30 * 60_000;
-
 export class UsageReferenceStore {
   private readonly entries = new Map<string, StoredUsageResult>();
 
-  constructor(private readonly ttlMs: number = DEFAULT_TTL_MS) {}
+  constructor(private readonly ttlMs: number = USAGE_ANALYSIS_REUSE_MS) {}
 
   private sweep(): void {
     const now = Date.now();

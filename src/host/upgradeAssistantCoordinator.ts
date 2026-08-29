@@ -62,6 +62,8 @@ import { loadUpgradeTargets, publishedUpgradeTargetsForRequest } from '../core/u
 import { buildStagedManifest, buildStagedManifestForRemoval } from '../core/upgrade/stagedManifest.js';
 import { isMajorUpgrade, requiresManifestReconciliation } from '../core/upgrade/plan.js';
 import { stillRequiredBy } from '../core/upgrade/removeImpact.js';
+import { buildPeerRequirementIndex, peerRequirementsFor } from '../core/upgrade/peerRequirement.js';
+import { buildWhyInstalledIndex } from '../core/hygiene/whyInstalled.js';
 import { describeBulkRejection, describeBulkRemoveRejection } from '../core/upgrade/validate.js';
 import type { EligibleRemoval, EligibleUpgrade } from '../core/upgrade/validate.js';
 import { advisoriesByNameFromRows } from '../core/advisories/attribution.js';
@@ -75,6 +77,7 @@ import { createNodeNpmResolverDeps, resolveNpmInvocation } from './npmResolver.j
 import { createNodeUpgradeTransactionFileAdapter } from './nodeUpgradeTransactionFiles.js';
 import { resolveInstalledPnpmInvocation } from './pnpmResolver.js';
 import { combineSecurityOutcomes } from './securityOutcomeBatch.js';
+import { materializeUpgradeSecurityGraph } from './upgradeSecurityGraph.js';
 import type { DiscoveredProject, ResolvedProject } from './projectResolution.js';
 import { loadProject } from './projectResolution.js';
 import { IsolatedResolverVerifier } from './resolverVerifier.js';
@@ -427,6 +430,13 @@ interface StoredRemoval {
   expiresAt: number;
 }
 
+interface PendingRemovalAnalysis {
+  packageName: string;
+  cancelled: boolean;
+  reservationHeld: boolean;
+  releaseStarted: boolean;
+}
+
 interface SharedRemediationWork {
   performance?: PerformanceRecorder;
   prepared: SharedPromise<{
@@ -445,6 +455,8 @@ export class UpgradeAssistantCoordinator {
   private readonly getUpgradeConfiguration: () => { ignoreScripts: boolean; verificationScripts: unknown[] };
   private analysis: StoredAnalysis | undefined;
   private removal: StoredRemoval | undefined;
+  /** Registered before controller lookup so `cancel-remove { analysisId: null }` also cancels that initial async gap. */
+  private pendingRemovalAnalysis: PendingRemovalAnalysis | undefined;
   /** The package a handleAnalyzeUpgrade call is currently in flight for, or null — the target `cancel-upgrade { analysisId: null }` refers to, since no analysisId exists yet at that point. */
   private pendingAnalyzePackage: string | null = null;
   /** Set by a cancel-upgrade with `analysisId: null` that arrived mid-analysis — handleAnalyzeUpgrade checks this right before storing/posting its result and drops it instead. */
@@ -995,6 +1007,27 @@ export class UpgradeAssistantCoordinator {
         (cause: unknown) => ({ ok: false as const, cause })
       );
 
+      // Chain directly from compatibility completion: its resolver verify
+      // and temp-dir cleanup have settled before this callback runs, while
+      // project evidence/metadata work below may still be in flight.
+      const securityGraphPromise = compatibilityResultPromise.then(async (compatibilityResult) => {
+        if (
+          !compatibilityResult.ok ||
+          securityPosted ||
+          compatibilityResult.analysis.status === 'conflict' ||
+          resolverVerifier === undefined
+        ) return undefined;
+        const endSecurityResolver = performance.start('security graph materialization');
+        const proposedGraph = await materializeUpgradeSecurityGraph({
+          compatibilityStatus: compatibilityResult.analysis.status,
+          proposal,
+          materializer: resolverVerifier,
+          signal: analysisAbort.signal,
+        });
+        endSecurityResolver({ resolved: proposedGraph !== undefined });
+        return proposedGraph;
+      });
+
       // --- project compatibility, fast then enriched medium then deep ---
       // The source scan above is local and bounded. Exact metadata normally
       // reuses the compatibility provider's in-flight/cache entry.
@@ -1137,6 +1170,10 @@ export class UpgradeAssistantCoordinator {
             const packageRegistry = registryForPackage(preflightProject.resolvedRegistry, eligibility.packageName);
             const cacheKey = `${packageRegistry}\0${eligibility.packageName}\0${eligibility.target}`;
             const cachedSurface = this.targetPackageSurfaceCache.get(cacheKey);
+            // Both operations use package-manager child processes. The
+            // security graph began earlier to overlap metadata/local work,
+            // but must settle before an uncached package inventory starts.
+            if (cachedSurface === undefined) await securityGraphPromise;
             const surface = cachedSurface ?? await new TargetPackageInspector(
                 {
                   executable: npmResolution.invocation.node,
@@ -1191,19 +1228,9 @@ export class UpgradeAssistantCoordinator {
       let security: SecurityOutcome | null = null;
       if (!securityPosted) {
         let after: Parameters<typeof evaluateSecurityOutcome>[0]['after'] = 'no-resolver-evidence';
-        let proposedSecurityGraph: ReturnType<typeof buildDependencyGraph> | undefined;
-        if (analysis.status !== 'conflict' && resolverVerifier !== undefined) {
-          try {
-            const endSecurityResolver = performance.start('security graph materialization');
-            const materialized = await resolverVerifier.materializeResolvedGraph(proposal);
-            endSecurityResolver({ resolved: materialized.ok });
-            if (materialized.ok) {
-              proposedSecurityGraph = materialized.graph;
-              after = { graph: materialized.graph, advisoriesByName: advisoriesByNameFromRows(rows) };
-            }
-          } catch {
-            // Left as 'no-resolver-evidence' — never a hard failure of the analysis.
-          }
+        const proposedSecurityGraph = await securityGraphPromise;
+        if (proposedSecurityGraph !== undefined) {
+          after = { graph: proposedSecurityGraph, advisoriesByName: advisoriesByNameFromRows(rows) };
         }
         const combinedSecurity = combineSecurityOutcomes(
           securityInputs.map(({ item, before }) =>
@@ -1529,8 +1556,28 @@ export class UpgradeAssistantCoordinator {
       return;
     }
 
+    const requestedPackage = message.changes[0]?.package ?? 'unknown';
+    if (this.pendingRemovalAnalysis !== undefined) {
+      this.options.sink.postMessage({
+        status: 'remove-error',
+        package: requestedPackage,
+        error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another dependency operation is already in progress for this project.' },
+      });
+      return;
+    }
+    const pending: PendingRemovalAnalysis = {
+      packageName: requestedPackage,
+      cancelled: false,
+      reservationHeld: false,
+      releaseStarted: false,
+    };
+    this.pendingRemovalAnalysis = pending;
+
     const controller = await this.options.ensureController();
-    if (controller === undefined) return;
+    if (controller === undefined || pending.cancelled || this.pendingRemovalAnalysis !== pending) {
+      if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
+      return;
+    }
 
     const batch = controller.validateBulkRemoveRequest(message.changes);
     if (!batch.ok) {
@@ -1539,10 +1586,14 @@ export class UpgradeAssistantCoordinator {
         package: batch.packageName ?? message.changes[0]?.package ?? 'unknown',
         error: describeBulkRemoveRejection(batch),
       });
+      if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
       return;
     }
     const eligibility = batch.removals[0];
-    if (eligibility === undefined) return;
+    if (eligibility === undefined) {
+      if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
+      return;
+    }
     const eligibilities = batch.removals;
 
     // Same reservation discipline as an upgrade — held across analysis and
@@ -1557,8 +1608,10 @@ export class UpgradeAssistantCoordinator {
         // (quiet, doesn't clear whatever this webview is itself tracking).
         error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another dependency operation is already in progress for this project.' },
       });
+      if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
       return;
     }
+    pending.reservationHeld = true;
     const analysisSourceGeneration = this.sourceGeneration.capture();
 
     let succeeded = false;
@@ -1567,6 +1620,7 @@ export class UpgradeAssistantCoordinator {
       if (selected === undefined) return;
       const source = controller.upgradeSource;
       const preflightProject = await this.projectLoader(selected);
+      if (pending.cancelled || this.pendingRemovalAnalysis !== pending || this.options.isDisposed()) return;
       if (
         preflightProject.root !== controller.root ||
         preflightProject.manifestText !== source.manifestText ||
@@ -1595,10 +1649,30 @@ export class UpgradeAssistantCoordinator {
         importerId: preflightProject.importerId,
       });
       const removingNames = new Set(eligibilities.map((item) => item.packageName));
+      const peerRequirementIndex = buildPeerRequirementIndex(graph);
+      const whyInstalledIndex = buildWhyInstalledIndex(graph);
+      const requiredPeerBlock = eligibilities
+        .map((item) => ({
+          packageName: item.packageName,
+          requirements: peerRequirementsFor(graph, item.packageName, removingNames, peerRequirementIndex).filter((requirement) => !requirement.optional),
+        }))
+        .find((item) => item.requirements.length > 0);
+      if (requiredPeerBlock !== undefined) {
+        const owners = requiredPeerBlock.requirements.map((requirement) => requirement.requiredBy).join(', ');
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: requiredPeerBlock.packageName,
+          error: {
+            code: 'REQUIRED_PEER_DEPENDENCY',
+            message: `${requiredPeerBlock.packageName} is required as a peer dependency by ${owners}. Remove the requiring package in the same operation or keep this dependency.`,
+          },
+        });
+        return;
+      }
       const changes = eligibilities.map((item) => ({
         packageName: item.packageName,
         classification: item.classification,
-        stillRequiredBy: stillRequiredBy(graph, manifest.dependencies, item.packageName, removingNames),
+        stillRequiredBy: stillRequiredBy(graph, manifest.dependencies, item.packageName, removingNames, whyInstalledIndex),
       }));
 
       const manifestPath = path.join(controller.root, 'package.json');
@@ -1625,6 +1699,7 @@ export class UpgradeAssistantCoordinator {
         verificationScripts,
         expiresAt: Date.now() + REMOVAL_ANALYSIS_TTL_MS,
       };
+      if (pending.cancelled || this.pendingRemovalAnalysis !== pending || this.options.isDisposed()) return;
       if (!this.sourceGeneration.commitIfCurrent(analysisSourceGeneration, () => {
         this.removal = removal;
       })) {
@@ -1654,12 +1729,16 @@ export class UpgradeAssistantCoordinator {
       succeeded = true;
       return;
     } catch (cause) {
-      if (!this.options.isDisposed()) {
+      if (!pending.cancelled && this.pendingRemovalAnalysis === pending && !this.options.isDisposed()) {
         this.options.sink.postMessage({ status: 'remove-error', package: eligibility.packageName, error: toProtocolError(cause) });
       }
       return;
     } finally {
-      if (!succeeded) await this.releaseReservation(eligibility.packageName);
+      if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
+      if (!succeeded && pending.reservationHeld && !pending.releaseStarted) {
+        pending.releaseStarted = true;
+        await this.releaseReservation(eligibility.packageName);
+      }
     }
   }
 
@@ -1668,10 +1747,20 @@ export class UpgradeAssistantCoordinator {
   }
 
   handleCancelRemove(message: CancelUpgradeMessage): void {
-    // Removal's analyze phase has nothing long-running to drop mid-flight
-    // (no network preflight, unlike an upgrade) — only a real, already-
-    // delivered analysis is ever cancellable.
-    if (message.analysisId === null) return;
+    if (message.analysisId === null) {
+      const pending = this.pendingRemovalAnalysis;
+      if (pending === undefined || pending.cancelled) return;
+      pending.cancelled = true;
+      // Free the request slot synchronously. The abandoned operation compares
+      // identity after every await, so it cannot clear or publish over a
+      // replacement that starts immediately after this cancellation.
+      this.pendingRemovalAnalysis = undefined;
+      if (pending.reservationHeld && !pending.releaseStarted) {
+        pending.releaseStarted = true;
+        void this.releaseReservation(pending.packageName);
+      }
+      return;
+    }
     if (this.removal === undefined || this.removal.id !== message.analysisId) return;
     void this.releaseReservation(this.removal.eligibility.packageName);
     this.removal = undefined;

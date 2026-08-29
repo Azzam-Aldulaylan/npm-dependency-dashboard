@@ -1,15 +1,20 @@
 import { useState } from 'react';
 import type { ReactElement } from 'react';
 
-import type { AttributedAdvisory, PackageRow, Severity } from '../../../src/core/types.js';
-import { sortAdvisoriesBySeverity } from '../../../src/host/severityDisplay.js';
+import type { PackageRow, Severity } from '../../../src/core/types.js';
 import { classifyRowUpdate } from '../../../src/host/updateClassification.js';
 import type { ActionState, TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
 import { resolveActionState } from '../../../src/host/upgradeAction.js';
+import {
+  buildManageVulnerabilityContexts,
+  vulnerabilityIdentifiers,
+} from '../../../src/host/vulnerabilityUiState.js';
+import type { ManageVulnerabilityContext } from '../../../src/host/vulnerabilityUiState.js';
 import { directUpgradeRecommendation } from '../../../src/host/vulnerabilityRecommendation.js';
-import { IconCheck, IconExternalLink, IconRefresh, IconShield } from '../icons.js';
+import { IconCheck, IconExternalLink, IconInfo, IconRefresh, IconShield } from '../icons.js';
 import { SeverityBadge } from './SeverityBadge.js';
-import { patchedVersionText } from './VulnerabilityCard.js';
+import { patchedVersionText, VulnerabilityIdentifierLinks } from './VulnerabilityCard.js';
+import type { OpenAdvisoryHandler } from './VulnerabilityCard.js';
 
 const SEVERITY_ORDER: readonly Severity[] = ['critical', 'high', 'moderate', 'low', 'info'];
 const SEVERITY_LABEL: Record<Severity, string> = {
@@ -38,43 +43,45 @@ function GlanceRow({ label, children }: { label: string; children: ReactElement 
 }
 
 /** Worst-first severity totals present on this row — never a zero count. */
-function severityCounts(advisories: readonly AttributedAdvisory[]): [Severity, number][] {
+function severityCounts(contexts: readonly ManageVulnerabilityContext[]): [Severity, number][] {
   const counts = new Map<Severity, number>();
-  for (const entry of advisories) counts.set(entry.advisory.severity, (counts.get(entry.advisory.severity) ?? 0) + 1);
+  for (const context of contexts) {
+    counts.set(context.advisory.severity, (counts.get(context.advisory.severity) ?? 0) + 1);
+  }
   return SEVERITY_ORDER.filter((severity) => counts.has(severity)).map((severity) => [severity, counts.get(severity) as number]);
 }
 
 /**
- * One vulnerability's full detail — severity, title, and source link on one
- * row; flagged package / affected range / fixed-in / introduced-through as
- * four scannable columns below. Deliberately a fresh layout rather than a
- * reuse of the shared VulnerabilityCard (table drilldown + Upgrade review's
- * Security section both still render that unchanged) — this tab's own
- * horizontal-metadata presentation is what's being redesigned here. The
- * underlying facts (attribution, patched-version resolution) are never
- * recomputed: every field below reads straight off the already-resolved
- * `AttributedAdvisory` the host produced.
+ * One grouped vulnerability's full detail: severity, identifiers, title,
+ * source link, exact flagged version, primary path, every affected direct
+ * root, and a disclosure for alternate graph-proven paths. The underlying
+ * advisory, attribution, and patched-version facts remain host-issued; this
+ * component only presents the aggregation from vulnerabilityUiState.ts.
  */
 function VulnerabilityDetailCard({
-  entry,
+  context,
   rootPackageName,
-  rootPackageVersion,
   onOpenAdvisory,
 }: {
-  entry: AttributedAdvisory;
+  context: ManageVulnerabilityContext;
   rootPackageName: string;
-  rootPackageVersion: string | null;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenAdvisory: OpenAdvisoryHandler;
 }): ReactElement {
+  const identifiers = vulnerabilityIdentifiers(context.advisory);
   return (
     <li className="vuln-card">
       <div className="vuln-card__head">
-        <SeverityBadge severity={entry.advisory.severity} />
-        <span className="vuln-card__title">{entry.advisory.title}</span>
+        <SeverityBadge severity={context.advisory.severity} />
+        <span className="vuln-card__title">{context.advisory.title}</span>
+        <VulnerabilityIdentifierLinks
+          identifiers={identifiers}
+          className="vuln-card__identifiers"
+          onOpen={(identifier) => onOpenAdvisory(rootPackageName, context.advisory.id, [...context.primaryPath], identifier)}
+        />
         <button
           type="button"
           className="vuln-card__source"
-          onClick={() => onOpenAdvisory(rootPackageName, entry.advisory.id, [...entry.path])}
+          onClick={() => onOpenAdvisory(rootPackageName, context.advisory.id, [...context.primaryPath])}
         >
           View advisory source
           <IconExternalLink />
@@ -84,25 +91,25 @@ function VulnerabilityDetailCard({
         <div className="vuln-card__meta-col">
           <dt>Flagged package</dt>
           <dd>
-            <code>{entry.flaggedPackage}</code>
+            <code>{context.flaggedPackage}{context.flaggedVersion === null ? '' : `@${context.flaggedVersion}`}</code>
           </dd>
         </div>
         <div className="vuln-card__meta-col">
           <dt>Affected</dt>
           <dd>
-            <code>{entry.advisory.vulnerableVersions}</code>
+            <code>{context.advisory.vulnerableVersions}</code>
           </dd>
         </div>
         <div className="vuln-card__meta-col">
-          <dt>Fixed in {entry.flaggedPackage}</dt>
-          <dd className={entry.patchedVersion.status === 'known' ? 'vuln-card__fixed' : undefined}>
-            {patchedVersionText(entry.patchedVersion)}
+          <dt>Fixed in {context.flaggedPackage}</dt>
+          <dd className={context.patchedVersion.status === 'known' ? 'vuln-card__fixed' : undefined}>
+            {patchedVersionText(context.patchedVersion)}
           </dd>
         </div>
         <div className="vuln-card__meta-col">
-          <dt>{entry.path.length > 1 ? 'Introduced through' : 'Package'}</dt>
+          <dt>{context.primaryPath.length > 1 ? 'Primary dependency path' : 'Package'}</dt>
           <dd className="vuln-card__path">
-            {entry.path.map((segment, index) => (
+            {context.primaryPath.map((segment, index) => (
               <span className="vuln-card__path-segment" key={`${segment}-${index}`}>
                 {index > 0 ? (
                   <span className="vuln-card__path-arrow" aria-hidden="true">
@@ -115,10 +122,29 @@ function VulnerabilityDetailCard({
           </dd>
         </div>
         <div className="vuln-card__meta-col">
-          <dt>Direct dependency</dt>
-          <dd><code>{rootPackageName}{rootPackageVersion === null ? '' : `@${rootPackageVersion}`}</code></dd>
+          <dt>Direct {context.directRoots.length === 1 ? 'dependency' : 'dependencies'}</dt>
+          <dd className="vuln-card__roots">
+            {context.directRoots.map((root) => (
+              <code key={root.packageName}>
+                {root.packageName}{root.version === null ? '' : `@${root.version}`}
+                {root.pathCount > 1 ? ` · ${root.pathCount} paths` : ''}
+              </code>
+            ))}
+          </dd>
         </div>
       </dl>
+      {context.paths.length > 1 ? (
+        <details className="vuln-card__paths">
+          <summary>
+            View {context.pathsTruncated ? `first ${context.paths.length}` : `all ${context.paths.length}`} known dependency paths
+          </summary>
+          <ol>
+            {context.paths.map((path) => (
+              <li key={path.join('\u0000')}><code>{path.join(' → ')}</code></li>
+            ))}
+          </ol>
+        </details>
+      ) : null}
     </li>
   );
 }
@@ -195,6 +221,7 @@ function RecommendedActionCard({
  */
 export function VulnerabilitiesPanel({
   row,
+  allRows,
   remediation,
   actionsDisabled,
   updateResolutionAvailable,
@@ -204,11 +231,12 @@ export function VulnerabilitiesPanel({
   onStartTransitiveCheck,
 }: {
   row: PackageRow;
+  allRows: readonly PackageRow[];
   remediation: TransitiveRemediationUiState | undefined;
   actionsDisabled: boolean;
   updateResolutionAvailable: boolean;
   advisoriesAvailable: boolean;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenAdvisory: OpenAdvisoryHandler;
   onStartUpgradeReview: (target: string) => void;
   onStartTransitiveCheck: () => void;
 }): ReactElement {
@@ -232,11 +260,11 @@ export function VulnerabilitiesPanel({
     );
   }
 
-  const sorted = sortAdvisoriesBySeverity(row.advisories);
-  const counts = severityCounts(row.advisories);
-  const total = row.advisories.length;
+  const contexts = buildManageVulnerabilityContexts(allRows, row.name);
+  const counts = severityCounts(contexts);
+  const total = contexts.length;
   const worstPresent = counts[0]?.[0] ?? 'info';
-  const filtered = filter === 'all' ? sorted : sorted.filter((entry) => entry.advisory.severity === filter);
+  const filtered = filter === 'all' ? contexts : contexts.filter((context) => context.advisory.severity === filter);
   const updateKind = classifyRowUpdate(row);
   const actionState = resolveActionState(row, remediation);
   const needsAttention = worstPresent === 'critical' || worstPresent === 'high';
@@ -297,6 +325,10 @@ export function VulnerabilitiesPanel({
 
       <div className="vuln-tab__details">
         <h3 className="manage-section-heading">Vulnerability details</h3>
+        <p className="vuln-source-note">
+          <IconInfo aria-hidden="true" />
+          Findings come from npm’s security service, CVE aliases from GitHub’s Advisory Database, and dependency paths from this project’s active lockfile.
+        </p>
         <div className="vuln-filters" role="tablist" aria-label="Filter by severity">
           <button
             type="button"
@@ -323,13 +355,12 @@ export function VulnerabilitiesPanel({
           ))}
         </div>
         <ul className="vuln-card-list">
-          {filtered.map((entry, index) => (
+          {filtered.map((context) => (
             <VulnerabilityDetailCard
-              entry={entry}
+              context={context}
               rootPackageName={row.name}
-              rootPackageVersion={row.current}
               onOpenAdvisory={onOpenAdvisory}
-              key={`${String(entry.advisory.id)}:${entry.path.join('>')}:${index}`}
+              key={`${String(context.advisory.id)}:${context.flaggedPackage}:${context.flaggedVersion ?? ''}`}
             />
           ))}
         </ul>

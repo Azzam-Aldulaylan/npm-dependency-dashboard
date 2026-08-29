@@ -559,10 +559,10 @@ export type HostToWebviewMessage =
    * `cleanup-analyzing`, since it shares the identical one-pass usage
    * analyzer. See src/host/usage/usageCoordinator.ts.
    */
-  | { status: 'removal-impact-analyzing'; scanned: number; total: number }
+  | { status: 'removal-impact-analyzing'; requestId: string; packages: string[]; scanned: number; total: number }
   /** The host-owned, read-only removal-impact preview for every requested package that is still a real direct dependency of the current scan — see RemovalImpactAssessment's own doc. */
-  | { status: 'removal-impact-result'; assessments: RemovalImpactAssessment[]; generatedAt: string }
-  | { status: 'removal-impact-error'; error: ProtocolError }
+  | { status: 'removal-impact-result'; requestId: string; packages: string[]; assessments: RemovalImpactAssessment[]; generatedAt: string }
+  | { status: 'removal-impact-error'; requestId: string; packages: string[]; error: ProtocolError }
   /**
    * Likely-unused findings from a completed "Analyze cleanup" run — the
    * webview merges these with the deprecated/duplicate-version findings it
@@ -588,7 +588,8 @@ export type HostToWebviewMessage =
  */
 /**
  * `open-advisory` never carries a URL — only the identifier of an advisory
- * already present in the host's own last scan. See
+ * already present in the host's own last scan and, optionally, one displayed
+ * CVE/GHSA/npm reference. See
  * src/core/advisories/resolve.ts and DashboardController.resolveAdvisoryUrl
  * for why: the host resolves the actual URL itself from trusted data, so
  * there is nothing here for a compromised or buggy webview to redirect
@@ -613,7 +614,7 @@ export type WebviewToHostMessage =
   | { type: 'bulk-upgrade'; changes: Array<{ package: string; target: string }>; requestId: string }
   /** Coordinated removal of one or more declared direct dependencies — see src/core/upgrade/validate.ts's validateBulkRemoveRequest. */
   | { type: 'bulk-remove'; changes: Array<{ package: string }> }
-  | { type: 'open-advisory'; package: string; advisoryId: string | number; path: string[] }
+  | { type: 'open-advisory'; package: string; advisoryId: string | number; path: string[]; reference?: string }
   | { type: 'confirm-upgrade'; analysisId: string }
   /**
    * `analysisId: null` cancels a still-loading analysis (no id has been
@@ -658,7 +659,9 @@ export type WebviewToHostMessage =
    * `cancel-usage-analysis`'s single-flight cancellation rather than
    * inventing a second one.
    */
-  | { type: 'analyze-removal-impact'; packages: string[] }
+  | { type: 'analyze-removal-impact'; requestId: string; packages: string[] }
+  /** Cancels one exact removal-impact attempt without cancelling an unrelated cleanup/where-used consumer. */
+  | { type: 'cancel-removal-impact'; requestId: string }
   /** Cancels whichever usage analysis (a `where-used` or an `analyze-cleanup` run) is currently in progress for this panel. */
   | { type: 'cancel-usage-analysis' }
   /**
@@ -724,6 +727,16 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[])
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
+}
+
+function isCanonicalRemovalPackageSet(value: unknown, allowEmpty = false): value is string[] {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0) || value.length > MAX_BULK_REMOVE_CHANGES) return false;
+  let previous: string | undefined;
+  for (const packageName of value) {
+    if (!isNonEmptyString(packageName) || (previous !== undefined && previous.localeCompare(packageName) >= 0)) return false;
+    previous = packageName;
+  }
+  return true;
 }
 
 export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMessage {
@@ -803,13 +816,15 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (type === 'open-advisory') {
     const advisoryId = value['advisoryId'];
     const path = value['path'];
+    const reference = value['reference'];
     return (
-      hasOnlyKeys(value, ['type', 'package', 'advisoryId', 'path']) &&
+      hasOnlyKeys(value, ['type', 'package', 'advisoryId', 'path', 'reference']) &&
       isNonEmptyString(value['package']) &&
       (typeof advisoryId === 'number' || isNonEmptyString(advisoryId)) &&
       Array.isArray(path) &&
       path.length > 0 &&
-      path.every((segment) => typeof segment === 'string')
+      path.every((segment) => typeof segment === 'string') &&
+      (reference === undefined || (isNonEmptyString(reference) && reference.length <= 64))
     );
   }
   if (type === 'confirm-upgrade' || type === 'use-smart-plan') {
@@ -846,13 +861,13 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (type === 'analyze-removal-impact') {
     const packages = value['packages'];
     return (
-      hasOnlyKeys(value, ['type', 'packages']) &&
-      Array.isArray(packages) &&
-      packages.length > 0 &&
-      packages.length <= MAX_BULK_REMOVE_CHANGES &&
-      packages.every(isNonEmptyString) &&
-      new Set(packages).size === packages.length
+      hasOnlyKeys(value, ['type', 'requestId', 'packages']) &&
+      isNonEmptyString(value['requestId']) &&
+      isCanonicalRemovalPackageSet(packages)
     );
+  }
+  if (type === 'cancel-removal-impact') {
+    return hasOnlyKeys(value, ['type', 'requestId']) && isNonEmptyString(value['requestId']);
   }
   if (type === 'open-usage-reference') {
     const referenceIndex = value['referenceIndex'];
@@ -1746,23 +1761,41 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
     return hasOnlyKeys(value, ['status', 'error']) && isProtocolError(value['error']);
   }
   if (status === 'removal-impact-analyzing') {
+    const packages = value['packages'];
     return (
-      hasOnlyKeys(value, ['status', 'scanned', 'total']) &&
+      hasOnlyKeys(value, ['status', 'requestId', 'packages', 'scanned', 'total']) &&
+      isNonEmptyString(value['requestId']) &&
+      isCanonicalRemovalPackageSet(packages) &&
       typeof value['scanned'] === 'number' &&
       typeof value['total'] === 'number'
     );
   }
   if (status === 'removal-impact-result') {
     const assessments = value['assessments'];
+    const packages = value['packages'];
+    const validAssessments = Array.isArray(assessments) && assessments.every(isRemovalImpactAssessment)
+      ? assessments
+      : null;
+    const assessmentPackageNames = validAssessments?.map((assessment) => assessment.packageName) ?? [];
     return (
-      hasOnlyKeys(value, ['status', 'assessments', 'generatedAt']) &&
-      Array.isArray(assessments) &&
-      assessments.every(isRemovalImpactAssessment) &&
+      hasOnlyKeys(value, ['status', 'requestId', 'packages', 'assessments', 'generatedAt']) &&
+      isNonEmptyString(value['requestId']) &&
+      isCanonicalRemovalPackageSet(packages, true) &&
+      validAssessments !== null &&
+      assessmentPackageNames.length === packages.length &&
+      new Set(assessmentPackageNames).size === assessmentPackageNames.length &&
+      assessmentPackageNames.every((packageName) => packages.includes(packageName)) &&
       typeof value['generatedAt'] === 'string'
     );
   }
   if (status === 'removal-impact-error') {
-    return hasOnlyKeys(value, ['status', 'error']) && isProtocolError(value['error']);
+    const packages = value['packages'];
+    return (
+      hasOnlyKeys(value, ['status', 'requestId', 'packages', 'error']) &&
+      isNonEmptyString(value['requestId']) &&
+      isCanonicalRemovalPackageSet(packages) &&
+      isProtocolError(value['error'])
+    );
   }
   if (DATA_STATUSES.has(status)) {
     return hasOnlyKeys(value, ['status', 'data']) && isDashboardData(value['data']);

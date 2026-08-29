@@ -262,6 +262,7 @@ function TabButton({
  */
 export function ManageDependencyModal({
   row,
+  allRows,
   remediation,
   removalImpact,
   usage,
@@ -286,6 +287,8 @@ export function ManageDependencyModal({
   onClose,
 }: {
   row: PackageRow;
+  /** Every host-issued row in the same completed scan, used only to aggregate graph-proven vulnerability roots and paths. */
+  allRows: readonly PackageRow[];
   remediation: TransitiveRemediationUiState | undefined;
   removalImpact: RemovalImpactState;
   usage: UsageRequestState | undefined;
@@ -305,7 +308,7 @@ export function ManageDependencyModal({
   upgrade: UpgradeReviewState;
   removal: RemovalReviewState;
   onAnalyzeRemediation: (packageName: string) => void;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[], reference?: string) => void;
   onReanalyzeUsage: (packageName: string) => void;
   onOpenUsageReference: (usageId: string, referenceIndex: number) => void;
   onRetryUpgradeEnrichment: () => void;
@@ -422,6 +425,7 @@ export function ManageDependencyModal({
     content = (
       <VulnerabilitiesPanel
         row={row}
+        allRows={allRows}
         remediation={remediation}
         actionsDisabled={upgradeDisabled}
         updateResolutionAvailable={quarantineDerivedData ? false : updateResolutionAvailable}

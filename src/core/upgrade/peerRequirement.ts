@@ -25,51 +25,77 @@ export interface PeerRequirementEvidence {
   optional: boolean;
 }
 
-export function peerRequirementsFor(
-  graph: DependencyGraph,
-  packageName: string,
-  alsoRemoving: ReadonlySet<string>
-): PeerRequirementEvidence[] {
-  // A name alone is not enough to identify the package being removed: the
-  // graph can contain another copy at (for example)
-  // node_modules/plugin/node_modules/react. Peer edges already carry the
-  // package-manager-resolved node id, so only edges to the direct node are
-  // evidence that removing that direct dependency breaks the owner.
-  const directTargetNodeIds = new Set(
-    [...graph.nodes.entries()]
-      .filter(([, node]) => node.direct && node.name === packageName)
-      .map(([nodeId]) => nodeId)
-  );
-  if (directTargetNodeIds.size === 0) return [];
+interface IndexedPeerRequirement extends PeerRequirementEvidence {
+  ownerDirect: boolean;
+}
 
-  const byOwner = new Map<string, PeerRequirementEvidence>();
+/**
+ * Peer requirements grouped by the direct package they target. Building
+ * this once makes a removal batch O(nodes + edges + reported evidence)
+ * instead of walking the entire graph once per candidate package.
+ */
+export interface PeerRequirementIndex {
+  byTargetPackage: ReadonlyMap<string, readonly IndexedPeerRequirement[]>;
+}
+
+export function buildPeerRequirementIndex(graph: DependencyGraph): PeerRequirementIndex {
+  const directTargetNamesByNodeId = new Map<string, string>();
+  for (const [nodeId, node] of graph.nodes) {
+    if (node.direct) directTargetNamesByNodeId.set(nodeId, node.name);
+  }
+
+  const byTargetPackage = new Map<string, IndexedPeerRequirement[]>();
   for (const node of graph.nodes.values()) {
-    // Removing a direct owner makes its own peer requirement irrelevant, but
-    // a transitive duplicate with the same name can remain installed and must
-    // still be considered.
-    if (node.name === packageName || (node.direct && alsoRemoving.has(node.name))) continue;
     for (const edge of node.edges) {
       if (
         edge.kind !== 'peer' ||
-        edge.name !== packageName ||
         edge.targetNodeId === null ||
-        !directTargetNodeIds.has(edge.targetNodeId)
+        directTargetNamesByNodeId.get(edge.targetNodeId) !== edge.name ||
+        node.name === edge.name
       ) {
         continue;
       }
+      const candidate: IndexedPeerRequirement = {
+        requiredBy: node.name,
+        range: edge.requestedRange,
+        optional: edge.optional,
+        ownerDirect: node.direct,
+      };
+      const entries = byTargetPackage.get(edge.name);
+      if (entries === undefined) byTargetPackage.set(edge.name, [candidate]);
+      else entries.push(candidate);
+    }
+  }
+  return { byTargetPackage };
+}
 
-      const candidate = { requiredBy: node.name, range: edge.requestedRange, optional: edge.optional };
-      const existing = byOwner.get(node.name);
-      // Duplicate installed copies of the same owner are presented once. A
-      // required edge is stronger evidence than an optional edge, regardless
-      // of which copy happens to appear first in the graph.
-      if (
-        existing === undefined ||
-        (existing.optional && !candidate.optional) ||
-        (existing.optional === candidate.optional && candidate.range.localeCompare(existing.range) < 0)
-      ) {
-        byOwner.set(node.name, candidate);
-      }
+export function peerRequirementsFor(
+  graph: DependencyGraph,
+  packageName: string,
+  alsoRemoving: ReadonlySet<string>,
+  index: PeerRequirementIndex = buildPeerRequirementIndex(graph)
+): PeerRequirementEvidence[] {
+  const byOwner = new Map<string, PeerRequirementEvidence>();
+  for (const candidate of index.byTargetPackage.get(packageName) ?? []) {
+    // Removing a direct owner makes its own peer requirement irrelevant, but
+    // a transitive duplicate with the same name can remain installed and must
+    // still be considered.
+    if (candidate.ownerDirect && alsoRemoving.has(candidate.requiredBy)) continue;
+
+    const existing = byOwner.get(candidate.requiredBy);
+    // Duplicate installed copies of the same owner are presented once. A
+    // required edge is stronger evidence than an optional edge, regardless
+    // of which copy happens to appear first in the graph.
+    if (
+      existing === undefined ||
+      (existing.optional && !candidate.optional) ||
+      (existing.optional === candidate.optional && candidate.range.localeCompare(existing.range) < 0)
+    ) {
+      byOwner.set(candidate.requiredBy, {
+        requiredBy: candidate.requiredBy,
+        range: candidate.range,
+        optional: candidate.optional,
+      });
     }
   }
   return [...byOwner.values()].sort((a, b) => a.requiredBy.localeCompare(b.requiredBy));

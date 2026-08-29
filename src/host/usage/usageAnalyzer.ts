@@ -71,6 +71,7 @@ export async function analyzeDependencyUsage(
   const fileCapReached = sourceFiles.length >= maxFiles;
 
   let scannedSourceFiles = 0;
+  let failedReadCount = 0;
   const endWorkspaceScan = performance.start('usage workspace scan');
   const workspaceScan = await scanFilesBounded({
     items: files,
@@ -99,6 +100,10 @@ export async function analyzeDependencyUsage(
       }
     },
     isCancelled: () => options.token.isCancellationRequested,
+    onReadFailure: () => {
+      failedReadCount += 1;
+      performance.increment('usage read failures');
+    },
     onItemProcessed: (file) => {
       if (!file.source) return;
       scannedSourceFiles += 1;
@@ -112,6 +117,7 @@ export async function analyzeDependencyUsage(
   endWorkspaceScan({
     'unique files': workspaceScan.processed,
     'source files': scannedSourceFiles,
+    'read failures': failedReadCount,
     packages: requested.size,
   });
 
@@ -129,7 +135,11 @@ export async function analyzeDependencyUsage(
   }
 
   const scannedAt = new Date().toISOString();
-  const truncated = fileCapReached || cancelledEarly;
+  // A missing, unreadable, or oversized eligible file is an evidence gap,
+  // just like a file-cap or cancellation. References found elsewhere remain
+  // valid, but a zero-reference result from this pass cannot honestly prove
+  // that the package is unused or low-risk to remove.
+  const truncated = fileCapReached || cancelledEarly || failedReadCount > 0;
   const results = new Map<string, DependencyUsageResult>();
   for (const name of requested) {
     results.set(name, {

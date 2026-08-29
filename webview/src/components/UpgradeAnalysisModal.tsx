@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import type { ReactElement } from 'react';
 
 import { semanticButtonClassName, upgradeConfirmationAction } from '../../../src/host/actionButtonSemantics.js';
@@ -7,7 +7,6 @@ import { compatibilityOutcomeDisplay } from '../../../src/host/outcomeCopy.js';
 import { hasPlannerAddedCoordination, upgradeAnalysisFreshness } from '../../../src/host/upgradeReviewUiState.js';
 import { IconRefresh, IconX } from '../icons.js';
 import { CompatibilitySection } from './CompatibilitySection.js';
-import { FilesSection } from './FilesSection.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
 import { ProjectCompatibilitySection } from './ProjectCompatibilitySection.js';
 import { SecuritySection } from './SecuritySection.js';
@@ -47,7 +46,7 @@ export function overallStatusDetail(analysis: { compatibility: UpgradeAnalysisPr
  * never a second, separate dialog). No modal chrome of its own: the caller
  * owns the dialog/tab wrapper, header, and footer actions.
  */
-export function UpgradeAnalysisBody({
+function UpgradeAnalysisBodyContent({
   packageName,
   targetVersion,
   analyzingPhase,
@@ -61,7 +60,7 @@ export function UpgradeAnalysisBody({
   targetVersion: string;
   analyzingPhase: 'compatibility' | 'project-compatibility' | 'smart-plan' | null;
   analysis: UpgradeAnalysisPresentation | null;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[], reference?: string) => void;
   onOpenUsageReference?: ((usageId: string, referenceIndex: number) => void) | undefined;
   onConfigureVerification: () => void;
   pendingChanges?: readonly { packageName: string; targetVersion: string }[] | undefined;
@@ -126,12 +125,18 @@ export function UpgradeAnalysisBody({
           onOpenAdvisory={onOpenAdvisory}
           emphasize={securityNeedsAttention}
         />
-        <FilesSection files={analysis.files} />
         <VerificationSection verification={analysis.verification} onConfigureVerification={onConfigureVerification} />
       </div>
     </>
   );
 }
+
+/**
+ * The app-wide minute clock updates freshness chrome even when the analysis
+ * evidence itself is unchanged. Keep the potentially large compatibility,
+ * security, and dependency-path result tree out of those periodic renders.
+ */
+export const UpgradeAnalysisBody = memo(UpgradeAnalysisBodyContent);
 
 /**
  * The Upgrade Analysis / confirmation experience — a centered dialog inside
@@ -174,7 +179,7 @@ export function UpgradeAnalysisModal({
   onCancel: () => void;
   onRefresh: () => void;
   onConfigureVerification: () => void;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[], reference?: string) => void;
   onOpenUsageReference?: ((usageId: string, referenceIndex: number) => void) | undefined;
   pendingChanges?: readonly { packageName: string; targetVersion: string }[];
 }): ReactElement {

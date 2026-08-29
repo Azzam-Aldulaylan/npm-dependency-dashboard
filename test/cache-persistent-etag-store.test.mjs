@@ -229,6 +229,25 @@ test('cumulative pressure does not backfill an older small entry past a newer ad
   assert.deepEqual(bounded, [newest], 'LRU evicts the whole older tail once the next recent entry cannot fit');
 });
 
+test('compact GitHub advisory aliases survive newer packument byte pressure', () => {
+  const advisory = [
+    'https://api.github.com/advisories/GHSA-4X5R-PXFX-6JF8',
+    { etag: 'W/"ghsa"', body: '{"ghsa_id":"GHSA-4X5R-PXFX-6JF8","cve_id":"CVE-2026-49356"}' },
+  ];
+  const olderPackument = ['https://registry.npmjs.org/older', { etag: 'W/"1"', body: 'a'.repeat(160) }];
+  const newerPackument = ['https://registry.npmjs.org/newer', { etag: 'W/"2"', body: 'b'.repeat(160) }];
+  const packumentOnlyBudget = serializedEtagCacheBytes([olderPackument, newerPackument]);
+
+  const bounded = boundPersistedEtagEntries(
+    [advisory, olderPackument, newerPackument],
+    packumentOnlyBudget,
+    500
+  );
+
+  assert.deepEqual(bounded.map(([url]) => url), [advisory[0], newerPackument[0]]);
+  assert.ok(serializedEtagCacheBytes(bounded) <= packumentOnlyBudget);
+});
+
 test('rewriting an entry makes it freshest for byte-bound eviction', () => {
   const originalA = ['https://registry.npmjs.org/a', { etag: 'W/"old-a"', body: 'a'.repeat(80) }];
   const entryB = ['https://registry.npmjs.org/b', { etag: 'W/"b"', body: 'b'.repeat(80) }];

@@ -33,10 +33,9 @@ function overallDetail(security: SecurityOutcome): string | undefined {
  * `security === null` means this package had no known vulnerabilities
  * before this upgrade at all (see UpgradeAssistantCoordinator — the
  * evaluation only runs when there was something to evaluate) — rendered as
- * its own real "clean" card, the same 'not-applicable' status vocabulary
- * `outcomeCopy.ts` already defines, rather than the whole Security card
- * disappearing and silently breaking the Compatibility|Security /
- * Files|Verification grid pairing.
+ * its own real "clean" card, using the same 'not-applicable' status
+ * vocabulary `outcomeCopy.ts` already defines. Security spans the result
+ * grid because its evidence is the primary post-analysis decision surface.
  *
  * `emphasize` gives the card the same visual weight bump the redesign spec
  * asks for ("Security status should have stronger visual priority than
@@ -52,14 +51,14 @@ export function SecuritySection({
 }: {
   security: SecurityOutcome | null;
   rootPackageName: string;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[], reference?: string) => void;
   emphasize: boolean;
 }): ReactElement {
   const display = securityOutcomeDisplay(security?.status ?? 'not-applicable');
 
   return (
     <section
-      className={`analysis-card${emphasize ? ' analysis-card--emphasized' : ''}`}
+      className={`analysis-card analysis-card--full${emphasize ? ' analysis-card--emphasized' : ''}`}
       aria-labelledby="analysis-security-heading"
     >
       <h3 className="analysis-card__title" id="analysis-security-heading">

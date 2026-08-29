@@ -46,8 +46,18 @@ import { isSourceFingerprint } from './sourceFingerprint.js';
  * 5: snapshots gained explicit update/advisory availability. Older rows can
  * contain null update metadata or no advisories without saying whether those
  * are proven facts or failed lookups, so replaying them would be misleading.
+ *
+ * 6: advisory rows gained public CVE/GHSA aliases. Version 5 rows remain
+ * structurally valid, but replaying them would keep showing only npm's raw
+ * source id until an unrelated refresh replaced the snapshot. Force one
+ * regeneration so the newly available public identifiers are visible.
+ *
+ * 7: the first alias-enrichment implementation discarded verified first-page
+ * identifiers if a later optional GitHub page failed. Reject those development
+ * snapshots so they cannot keep replaying CVE-less rows after that pagination
+ * behavior is corrected.
  */
-export const CACHE_SCHEMA_VERSION = 5;
+export const CACHE_SCHEMA_VERSION = 7;
 
 /**
  * The registry response cache did not change when project rows gained a

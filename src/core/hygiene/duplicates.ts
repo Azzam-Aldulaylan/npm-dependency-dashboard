@@ -17,9 +17,8 @@
 import type { DeclaredDependency } from '../manifest/parse.js';
 import type { DependencyGraph } from '../types.js';
 import type { PathSearchOptions } from '../graph/paths.js';
-import { buildInstallPathIndex } from '../graph/paths.js';
 import type { DependencyFinding } from './types.js';
-import { whyInstalled } from './whyInstalled.js';
+import { buildWhyInstalledIndex, whyInstalled } from './whyInstalled.js';
 
 function describeVersions(count: number): string {
   return `${count} versions`;
@@ -30,7 +29,7 @@ export function detectDuplicateVersionFindings(
   declared: readonly DeclaredDependency[],
   options: PathSearchOptions = {}
 ): DependencyFinding[] {
-  const index = buildInstallPathIndex(graph);
+  const index = buildWhyInstalledIndex(graph);
 
   const names = new Set<string>();
   for (const node of graph.nodes.values()) {

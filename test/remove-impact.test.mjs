@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { stillRequiredBy } from '../out/core/upgrade/removeImpact.js';
+import { buildWhyInstalledIndex } from '../out/core/hygiene/whyInstalled.js';
 
 function node(name, path, { version = null, direct = false, edges = [] } = {}) {
   return { name, version, range: '', dev: false, direct, path, deps: edges.map((e) => e.name), edges };
@@ -59,4 +60,16 @@ test('multiple dependents are deduplicated and sorted', () => {
   ]);
   const result = stillRequiredBy(graph, [declared('app-a'), declared('app-b')], 'shared', new Set());
   assert.deepEqual(result, ['app-a', 'app-b']);
+});
+
+test('a prebuilt why-installed index is reusable across a removal batch', () => {
+  const graph = graphOf([
+    node('app-a', 'node_modules/app-a', { version: '1.0.0', direct: true, edges: [edge('shared', 'node_modules/shared')] }),
+    node('app-b', 'node_modules/app-b', { version: '1.0.0', direct: true }),
+    node('shared', 'node_modules/shared', { version: '1.0.0' }),
+  ]);
+  const declaredDeps = [declared('app-a'), declared('app-b')];
+  const index = buildWhyInstalledIndex(graph);
+  assert.deepEqual(stillRequiredBy(graph, declaredDeps, 'shared', new Set(), index), ['app-a']);
+  assert.deepEqual(stillRequiredBy(graph, declaredDeps, 'app-b', new Set(), index), []);
 });

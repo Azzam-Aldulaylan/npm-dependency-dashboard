@@ -14,6 +14,7 @@
 import type {
   AttributedAdvisory,
   Advisory,
+  AdvisoryIdentifier,
   PackageRow,
   PatchedVersionResult,
   ScanDataAvailability,
@@ -46,6 +47,25 @@ export const UNRESOLVABLE_REASONS: ReadonlySet<string> = new Set<UnresolvableRea
   'no-lockfile',
 ]);
 
+const ADVISORY_IDENTIFIER_TYPES: ReadonlySet<string> = new Set(['CVE', 'GHSA']);
+const MAX_ADVISORY_IDENTIFIERS = 16;
+const CVE_IDENTIFIER_PATTERN = /^CVE-\d{4}-\d{4,}$/;
+const GHSA_IDENTIFIER_PATTERN = /^GHSA-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+
+function isAdvisoryIdentifier(value: unknown): value is AdvisoryIdentifier {
+  if (!isRecord(value)) return false;
+  const type = value['type'];
+  const identifier = value['value'];
+  if (
+    typeof type !== 'string' ||
+    !ADVISORY_IDENTIFIER_TYPES.has(type) ||
+    typeof identifier !== 'string' ||
+    identifier.length === 0 ||
+    identifier.length > 64
+  ) return false;
+  return type === 'CVE' ? CVE_IDENTIFIER_PATTERN.test(identifier) : GHSA_IDENTIFIER_PATTERN.test(identifier);
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -71,13 +91,18 @@ export function isProtocolError(value: unknown): value is ProtocolError {
 export function isAdvisory(value: unknown): value is Advisory {
   if (!isRecord(value)) return false;
   const id = value['id'];
+  const identifiers = value['identifiers'];
   return (
     (typeof id === 'number' || typeof id === 'string') &&
     typeof value['severity'] === 'string' &&
     SEVERITIES.has(value['severity']) &&
     typeof value['title'] === 'string' &&
     typeof value['url'] === 'string' &&
-    typeof value['vulnerableVersions'] === 'string'
+    typeof value['vulnerableVersions'] === 'string' &&
+    (identifiers === undefined ||
+      (Array.isArray(identifiers) &&
+        identifiers.length <= MAX_ADVISORY_IDENTIFIERS &&
+        identifiers.every(isAdvisoryIdentifier)))
   );
 }
 

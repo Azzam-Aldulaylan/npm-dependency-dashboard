@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  criteriaFromDashboardFilters,
   criteriaCounts,
   criteriaPredicate,
   criteriaSummaryLines,
@@ -101,14 +102,14 @@ test('criteriaPredicate curries the same behavior as rowMatchesCriteria for use 
 test('matchReasonTags only names selected criteria the row actually satisfies', () => {
   const selected = criteria({ health: new Set(['likely-unused']), type: new Set(['dev']), severity: new Set(['high']) });
   const tags = matchReasonTags(row({ name: 'unused-direct', dev: true, worstSeverity: 'high' }), [UNUSED_FINDING], selected);
-  assert.deepEqual(tags, ['Unused', 'Dev', 'High']);
+  assert.deepEqual(tags, ['Likely unused', 'Dev', 'High']);
 });
 
 test('matchReasonTags omits a selected group the row does not satisfy, and ignores unselected groups entirely', () => {
   const selected = criteria({ health: new Set(['likely-unused']), severity: new Set(['high']) });
   // Row satisfies the overall match via "health" only (severity not high) — severity tag must be absent.
   const tags = matchReasonTags(row({ name: 'unused-direct', worstSeverity: 'low' }), [UNUSED_FINDING], selected);
-  assert.deepEqual(tags, ['Unused']);
+  assert.deepEqual(tags, ['Likely unused']);
   // No groups selected at all -> no tags, regardless of the row's own properties.
   assert.deepEqual(matchReasonTags(row({ name: 'unused-direct', worstSeverity: 'critical' }), [UNUSED_FINDING], emptyCriteria()), []);
 });
@@ -171,7 +172,7 @@ test('criteriaSummaryLines joins chips within one group with "or", one line per 
     type: new Set(['prod']),
   });
   assert.deepEqual(criteriaSummaryLines(selected), [
-    { group: 'Health', text: 'Unused or Duplicated' },
+    { group: 'Health', text: 'Likely unused or Duplicated' },
     { group: 'Security', text: 'Critical or High' },
     { group: 'Type', text: 'Prod' },
   ]);
@@ -191,4 +192,16 @@ test('criteriaCounts never drops below what an already-selected chip needs — c
   const selected = criteria({ health: new Set(['deprecated']), type: new Set(['prod']) });
   const counts = criteriaCounts(rows, [], selected);
   assert.equal(counts.health.deprecated, 0, 'no prod row is deprecated, so the count itself does go to 0');
+});
+
+test('criteriaFromDashboardFilters carries the visible cleanup scope into bulk maintenance', () => {
+  const selected = criteriaFromDashboardFilters('likely-unused', 'dev');
+  assert.deepEqual([...selected.health], ['likely-unused']);
+  assert.deepEqual([...selected.type], ['dev']);
+  assert.equal(selected.severity.size, 0);
+  assert.equal(selected.updates.size, 0);
+});
+
+test('criteriaFromDashboardFilters keeps unfiltered dashboard groups empty', () => {
+  assert.deepEqual(criteriaFromDashboardFilters('all', 'all'), emptyCriteria());
 });

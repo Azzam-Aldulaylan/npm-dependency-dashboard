@@ -473,10 +473,11 @@ export class DashboardController {
 
   /**
    * The security boundary for "open advisory source" (Problem 4): the
-   * webview names an advisory, never a URL — this resolves that name
-   * against `lastResult`, the host's own last completed scan, and returns
-   * the URL *that scan itself recorded*, or `null` for any reason at all
-   * (unknown package/advisory, or a URL that isn't `https:`). Staleness
+   * webview names an advisory and optional displayed reference, never a URL —
+   * this resolves that name against `lastResult`, the host's own last
+   * completed scan, and returns a verified reference destination or the URL
+   * that scan itself recorded. It returns `null` for any mismatch or unsafe
+   * URL. Staleness
    * (`isEligible()`) is deliberately not checked here — unlike an Upgrade
    * request, opening a browser tab to an advisory mutates nothing, so a
    * revalidation in flight is not a reason to refuse it.

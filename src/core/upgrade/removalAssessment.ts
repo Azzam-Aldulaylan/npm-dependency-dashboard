@@ -22,7 +22,12 @@ export interface RemovalAssessmentInputs {
    * — not attempted, cancelled, or failed. Never treated as "no references
    * found"; see the `unknown` branch below.
    */
-  usage: { references: readonly DependencyReference[]; truncated: boolean } | null;
+  usage: {
+    references: readonly DependencyReference[];
+    truncated: boolean;
+    /** Static scanning cannot rule out convention-based runtime loading for this package. */
+    conventionUncertainty?: boolean;
+  } | null;
   peerRequirements: readonly PeerRequirementEvidence[];
   /** Other still-kept direct dependencies whose subtree still resolves through this package — informational only, never a blocker. */
   stillRequiredBy: readonly string[];
@@ -95,6 +100,16 @@ export function assessRemoval(inputs: RemovalAssessmentInputs): RemovalAssessmen
     return {
       status: 'unknown',
       evidence: [{ kind: 'source-reference', summary: 'The workspace scan did not cover every file — results may be incomplete.' }],
+    };
+  }
+
+  if (inputs.usage.conventionUncertainty === true) {
+    return {
+      status: 'unknown',
+      evidence: [{
+        kind: 'config-reference',
+        summary: 'This package type is commonly loaded through framework or tooling conventions that static analysis may not detect.',
+      }],
     };
   }
 

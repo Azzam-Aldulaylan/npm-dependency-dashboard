@@ -5,6 +5,7 @@ import type { DependencyFinding } from '../../src/core/hygiene/types.js';
 import type { DependencyTypeFilter as DependencyTypeFilterValue } from '../../src/host/dependencyTypeFilter.js';
 import { dependencyTypeFilterCounts, dependencyTypeFilterPredicate } from '../../src/host/dependencyTypeFilter.js';
 import { dependencyCountLabel } from '../../src/host/dependencySummary.js';
+import { criteriaFromDashboardFilters } from '../../src/host/dependencyCriteria.js';
 import { filterEmptyStateTitle } from '../../src/host/emptyStateCopy.js';
 import type { HygieneFilterId } from '../../src/host/hygieneFilter.js';
 import { hygieneFilterCounts, hygieneFilterPredicate } from '../../src/host/hygieneFilter.js';
@@ -17,7 +18,6 @@ import { dependencyRowMatchesSearch } from '../../src/host/vulnerabilityUiState.
 import type { SortColumn, TableSortState } from '../../src/host/tableSort.js';
 import { nextColumnSortState, sortRows } from '../../src/host/tableSort.js';
 import type { TransitiveRemediationUiState } from '../../src/host/upgradeAction.js';
-import { resolveActionState } from '../../src/host/upgradeAction.js';
 import {
   applyUpgradeResultLocalFacts,
   manageRemovalReplacesUpgradeReview,
@@ -72,16 +72,6 @@ import { vscode } from './vscodeApi.js';
 function formatTime(iso: string): string {
   const parsed = new Date(iso);
   return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleTimeString();
-}
-
-function formatAnalysisAge(analyzedAt: string, cacheExpiresAt: string, now: number): string {
-  const timestamp = Date.parse(analyzedAt);
-  const expiresAt = Date.parse(cacheExpiresAt);
-  const stale = Number.isFinite(expiresAt) && now >= expiresAt;
-  if (!Number.isFinite(timestamp)) return stale ? 'Previous analysis · stale' : 'Previous analysis';
-  const minutes = Math.max(0, Math.floor((now - timestamp) / 60_000));
-  const age = minutes === 0 ? 'Analyzed just now' : `Analyzed ${minutes} minute${minutes === 1 ? '' : 's'} ago`;
-  return stale ? `${age} · stale` : age;
 }
 
 function partialErrorText(data: DashboardData): string | null {
@@ -227,10 +217,6 @@ export function App(): ReactElement {
     () => new Map()
   );
   const [remediationError, setRemediationError] = useState<{ package: string; message: string } | null>(null);
-  const [remediationBatch, setRemediationBatch] = useState<
-    | { phase: 'idle' }
-    | { phase: 'running'; completed: number; total: number; current: string | null }
-  >({ phase: 'idle' });
   const [bulkActionsOpen, setBulkActionsOpen] = useState(false);
 
   // The row this webview session currently has "Manage dependency" open
@@ -282,11 +268,15 @@ export function App(): ReactElement {
   // own doc for why the bulk Review step and the single-package "Analyze
   // removal" card share it rather than each keeping their own copy.
   const [removalImpact, setRemovalImpact] = useState<RemovalImpactState>({ phase: 'idle' });
+  const nextRemovalImpactRequestIdRef = useRef(0);
+  const activeRemovalImpactRequestRef = useRef<{ requestId: string; packages: readonly string[] } | null>(null);
   // A Manage-tab removal first runs this read-only impact scan. Only its
   // matching result starts the existing removal preflight; posting both at
   // once would reserve the coordinator and make the host reject the scan.
   const [pendingManageRemoval, setPendingManageRemoval] = useState<string | null>(null);
   const cleanupShouldSelectFilter = useRef(false);
+  /** False immediately on Cancel so already-queued progress cannot put the cleanup banner back into analyzing. */
+  const cleanupProgressActiveRef = useRef(false);
   const [minuteClock, setMinuteClock] = useState(() => Date.now());
 
   useEffect(() => {
@@ -482,6 +472,7 @@ export function App(): ReactElement {
           setRemoveAnalysis(null);
           setRemoveBusy(false);
         }
+        setPendingManageRemoval(null);
         if (upgradeErrorIsUserVisible(incoming.error.code)) {
           setRemoveError({ package: incoming.package, code: incoming.error.code, message: incoming.error.message });
         }
@@ -536,27 +527,6 @@ export function App(): ReactElement {
         return;
       }
 
-      if (incoming.status === 'remediation-batch-progress') {
-        setRemediationBatch({
-          phase: 'running',
-          completed: incoming.completed,
-          total: incoming.total,
-          current: incoming.current,
-        });
-        return;
-      }
-
-      if (incoming.status === 'remediation-batch-complete') {
-        setRemediationBatch({ phase: 'idle' });
-        return;
-      }
-
-      if (incoming.status === 'remediation-batch-error') {
-        setRemediationBatch({ phase: 'idle' });
-        setRemediationError({ package: 'selected dependencies', message: incoming.error.message });
-        return;
-      }
-
       if (incoming.status === 'usage-analyzing') {
         setUsageByPackage((previous) => {
           const next = new Map(previous);
@@ -591,11 +561,14 @@ export function App(): ReactElement {
       }
 
       if (incoming.status === 'cleanup-analyzing') {
-        setCleanupState({ phase: 'analyzing', scanned: incoming.scanned, total: incoming.total });
+        if (cleanupProgressActiveRef.current) {
+          setCleanupState({ phase: 'analyzing', scanned: incoming.scanned, total: incoming.total });
+        }
         return;
       }
 
       if (incoming.status === 'cleanup-result') {
+        cleanupProgressActiveRef.current = false;
         setCleanupState({
           phase: 'done',
           analyzedAt: incoming.analyzedAt,
@@ -611,6 +584,7 @@ export function App(): ReactElement {
       }
 
       if (incoming.status === 'cleanup-error') {
+        cleanupProgressActiveRef.current = false;
         cleanupShouldSelectFilter.current = false;
         setCleanupState({ phase: 'idle' });
         setCleanupError(incoming.error.message);
@@ -618,23 +592,61 @@ export function App(): ReactElement {
       }
 
       if (incoming.status === 'removal-impact-analyzing') {
-        setRemovalImpact({ phase: 'analyzing', scanned: incoming.scanned, total: incoming.total });
+        const active = activeRemovalImpactRequestRef.current;
+        if (
+          active !== null &&
+          active.requestId === incoming.requestId &&
+          active.packages.length === incoming.packages.length &&
+          active.packages.every((name, index) => name === incoming.packages[index])
+        ) {
+          setRemovalImpact({
+            phase: 'analyzing',
+            requestId: incoming.requestId,
+            packages: incoming.packages,
+            scanned: incoming.scanned,
+            total: incoming.total,
+          });
+        }
         return;
       }
 
       if (incoming.status === 'removal-impact-result') {
-        setRemovalImpact({
-          phase: 'done',
-          assessments: new Map(
-            incoming.assessments.map((entry) => [entry.packageName, { assessment: entry.assessment, usageId: entry.usageId }])
-          ),
-          generatedAt: incoming.generatedAt,
-        });
+        const active = activeRemovalImpactRequestRef.current;
+        if (
+          active !== null &&
+          active.requestId === incoming.requestId &&
+          active.packages.length === incoming.packages.length &&
+          active.packages.every((name, index) => name === incoming.packages[index])
+        ) {
+          setRemovalImpact({
+            phase: 'done',
+            requestId: incoming.requestId,
+            packages: incoming.packages,
+            assessments: new Map(
+              incoming.assessments.map((entry) => [entry.packageName, { assessment: entry.assessment, usageId: entry.usageId }])
+            ),
+            generatedAt: incoming.generatedAt,
+          });
+        }
         return;
       }
 
       if (incoming.status === 'removal-impact-error') {
-        setRemovalImpact({ phase: 'error', message: incoming.error.message });
+        const active = activeRemovalImpactRequestRef.current;
+        if (
+          active !== null &&
+          active.requestId === incoming.requestId &&
+          active.packages.length === incoming.packages.length &&
+          active.packages.every((name, index) => name === incoming.packages[index])
+        ) {
+          setPendingManageRemoval(null);
+          setRemovalImpact({
+            phase: 'error',
+            requestId: incoming.requestId,
+            packages: incoming.packages,
+            message: incoming.error.message,
+          });
+        }
         return;
       }
 
@@ -701,7 +713,6 @@ export function App(): ReactElement {
       setRemoveOrigin(null);
       setRemediationByPackage(new Map());
       setRemediationError(null);
-      setRemediationBatch({ phase: 'idle' });
       setBulkActionsOpen(false);
       // `manageRow`/`manageTab` deliberately survive this reset: this branch
       // also fires for `status: 'stale'`, which announces structural/manual
@@ -721,6 +732,7 @@ export function App(): ReactElement {
       setCleanupFindings([]);
       setCleanupError(null);
       cleanupShouldSelectFilter.current = false;
+      activeRemovalImpactRequestRef.current = null;
       setRemovalImpact({ phase: 'idle' });
       setPendingManageRemoval(null);
       setCleanupState((previous) => previous.phase === 'analyzing' ? previous : { phase: 'idle' });
@@ -959,6 +971,7 @@ export function App(): ReactElement {
   // entire workspace" path.
   const requestCancelRemove = useCallback(() => {
     vscode.postMessage({ type: 'cancel-remove', analysisId: removeAnalysis?.analysisId ?? null });
+    setPendingManageRemoval(null);
     setActiveRemove(null);
     activeRemoveRef.current = null;
     setActiveRemoveChanges([]);
@@ -1022,8 +1035,8 @@ export function App(): ReactElement {
 
   // Never carries a URL — see webviewProtocol.ts's own doc on 'open-advisory'
   // and src/core/advisories/resolve.ts for the actual trust boundary.
-  const requestOpenAdvisory = useCallback((packageName: string, advisoryId: string | number, path: string[]) => {
-    vscode.postMessage(advisoryNavigationRequest(packageName, advisoryId, path));
+  const requestOpenAdvisory = useCallback((packageName: string, advisoryId: string | number, path: string[], reference?: string) => {
+    vscode.postMessage(advisoryNavigationRequest(packageName, advisoryId, path, reference));
   }, []);
 
   // Only ever a package name — see analyze-remediation's own doc in
@@ -1032,17 +1045,6 @@ export function App(): ReactElement {
   const requestAnalyzeRemediation = useCallback((packageName: string) => {
     setRemediationError(null);
     vscode.postMessage({ type: 'analyze-remediation', package: packageName });
-  }, []);
-
-  const requestAnalyzeRemediations = useCallback((packages: readonly string[]) => {
-    if (packages.length === 0) return;
-    setRemediationError(null);
-    setRemediationBatch({ phase: 'running', completed: 0, total: packages.length, current: null });
-    vscode.postMessage({ type: 'analyze-remediations', packages: [...packages] });
-  }, []);
-
-  const requestCancelRemediationBatch = useCallback(() => {
-    vscode.postMessage({ type: 'cancel-remediation-analysis' });
   }, []);
 
   const openManage = useCallback((packageName: string) => {
@@ -1086,13 +1088,17 @@ export function App(): ReactElement {
   }, []);
 
   const requestBulkAnalyzeCleanup = useCallback(() => {
+    cleanupProgressActiveRef.current = true;
     cleanupShouldSelectFilter.current = true;
     setCleanupError(null);
     vscode.postMessage({ type: 'analyze-cleanup' });
   }, []);
 
   const requestCancelCleanup = useCallback(() => {
+    cleanupProgressActiveRef.current = false;
     vscode.postMessage({ type: 'cancel-usage-analysis' });
+    cleanupShouldSelectFilter.current = false;
+    setCleanupState({ phase: 'idle' });
   }, []);
 
   // Read-only removal-impact preview — shared by the bulk Review step and
@@ -1101,12 +1107,18 @@ export function App(): ReactElement {
   // still re-validates everything fresh regardless of what this shows.
   const requestAnalyzeRemovalImpact = useCallback((packageNames: readonly string[]) => {
     if (packageNames.length === 0) return;
-    setRemovalImpact({ phase: 'analyzing', scanned: 0, total: 0 });
-    vscode.postMessage({ type: 'analyze-removal-impact', packages: [...packageNames] });
+    const packages = [...new Set(packageNames)].sort((left, right) => left.localeCompare(right));
+    const requestId = String(++nextRemovalImpactRequestIdRef.current);
+    activeRemovalImpactRequestRef.current = { requestId, packages };
+    setRemovalImpact({ phase: 'analyzing', requestId, packages, scanned: 0, total: 0 });
+    vscode.postMessage({ type: 'analyze-removal-impact', requestId, packages });
   }, []);
 
   const requestCancelRemovalImpact = useCallback(() => {
-    vscode.postMessage({ type: 'cancel-usage-analysis' });
+    const active = activeRemovalImpactRequestRef.current;
+    activeRemovalImpactRequestRef.current = null;
+    if (active !== null) vscode.postMessage({ type: 'cancel-removal-impact', requestId: active.requestId });
+    setPendingManageRemoval(null);
     setRemovalImpact({ phase: 'idle' });
   }, []);
 
@@ -1221,19 +1233,6 @@ export function App(): ReactElement {
     () => [...(data?.hygieneFindings ?? []), ...cleanupFindings],
     [data?.hygieneFindings, cleanupFindings]
   );
-  // Which rows currently offer "Check transitive fix" — the one legal
-  // action ManageDependenciesModal can't derive from `rows` alone, since it
-  // depends on this session's own remediationByPackage state.
-  const remediationEligibleNames = useMemo(
-    () =>
-      new Set(
-        (data?.rows ?? []).flatMap((row) => {
-          const action = resolveActionState(row, remediationByPackage.get(row.name));
-          return action.kind === 'transitive-remediation' || action.kind === 'remediation-unknown' ? [row.name] : [];
-        })
-      ),
-    [data?.rows, remediationByPackage]
-  );
   // Disabled while an upgrade or removal is active — a manual refresh or
   // project switch mid-operation would race the scan (and, for a project
   // switch, a controller replacement) against a package.json/lockfile the
@@ -1244,8 +1243,7 @@ export function App(): ReactElement {
     loading ||
     activeUpgrade !== null ||
     activeRemove !== null ||
-    cleanupState.phase === 'analyzing' ||
-    remediationBatch.phase === 'running';
+    cleanupState.phase === 'analyzing';
 
   return (
     <main className="dashboard">
@@ -1340,19 +1338,6 @@ export function App(): ReactElement {
         </div>
       ) : null}
 
-      {remediationBatch.phase === 'running' ? (
-        <div className="banner banner--info">
-          <IconRefresh className="banner__icon banner__icon--spin" />
-          <p className="banner__text">
-            Checking transitive fixes — {remediationBatch.completed} of {remediationBatch.total} analyzed
-            {remediationBatch.current === null ? '' : ` · ${remediationBatch.current}`}
-          </p>
-          <button className="button button--secondary" type="button" onClick={requestCancelRemediationBatch}>
-            Cancel
-          </button>
-        </div>
-      ) : null}
-
       {message !== undefined && 'data' in message ? (
         <Dashboard
           status={message.status}
@@ -1378,8 +1363,7 @@ export function App(): ReactElement {
           onRefresh={refresh}
           actionsDisabled={actionsDisabled}
           cleanupFindings={cleanupFindings}
-          cleanupAnalysis={cleanupState.phase === 'done' ? cleanupState : null}
-          now={minuteClock}
+          cleanupAnalyzed={cleanupState.phase === 'done'}
           onOpenBulkActions={() => setBulkActionsOpen(true)}
           onOpenManage={openManage}
         />
@@ -1400,7 +1384,6 @@ export function App(): ReactElement {
               coreDataIncomplete ||
               loading ||
               cleanupState.phase === 'analyzing' ||
-              remediationBatch.phase === 'running' ||
               confirmBusy ||
               removeBusy ||
               removalImpact.phase === 'analyzing' ||
@@ -1472,12 +1455,11 @@ export function App(): ReactElement {
         <ManageDependenciesModal
           rows={data.rows}
           hygieneFindings={allHygieneFindings}
-          remediationEligibleNames={remediationEligibleNames}
+          initialCriteria={criteriaFromDashboardFilters(hygieneFilter, dependencyType)}
           cleanupBusy={cleanupState.phase === 'analyzing'}
           onRecheckHealth={requestBulkAnalyzeCleanup}
           onBulkUpgrade={requestBulkUpgrade}
           onBulkRemove={requestBulkRemove}
-          onAnalyzeRemediations={requestAnalyzeRemediations}
           removalImpact={removalImpact}
           onAnalyzeRemovalImpact={requestAnalyzeRemovalImpact}
           onCancelRemovalImpact={requestCancelRemovalImpact}
@@ -1551,8 +1533,7 @@ function Dashboard({
   onRefresh,
   actionsDisabled,
   cleanupFindings,
-  cleanupAnalysis,
-  now,
+  cleanupAnalyzed,
   onOpenBulkActions,
   onOpenManage,
 }: {
@@ -1560,7 +1541,7 @@ function Dashboard({
   data: DashboardData;
   /** Non-null while a coordinated removal holds the panel-wide lock — disables the bulk "Manage dependencies" entry point the same way a stale scan does. */
   activeRemove: string | null;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[], reference?: string) => void;
   search: string;
   onSearchChange: (value: string) => void;
   selectedFilter: SummaryFilterId;
@@ -1581,8 +1562,7 @@ function Dashboard({
   actionsDisabled: boolean;
   /** Likely-unused findings from the last completed "Analyze cleanup" run this session — see App.tsx. */
   cleanupFindings: readonly DependencyFinding[];
-  cleanupAnalysis: { analyzedAt: string; cacheExpiresAt: string } | null;
-  now: number;
+  cleanupAnalyzed: boolean;
   onOpenBulkActions: () => void;
   onOpenManage: (packageName: string) => void;
 }): ReactElement {
@@ -1695,11 +1675,6 @@ function Dashboard({
             refreshing={status === 'stale'}
             trailingActions={
               <div className="toolbar__analysis-actions">
-                {cleanupAnalysis !== null ? (
-                  <span className="toolbar__analysis-age">
-                    {formatAnalysisAge(cleanupAnalysis.analyzedAt, cleanupAnalysis.cacheExpiresAt, now)}
-                  </span>
-                ) : null}
                 <button
                   className="button button--secondary"
                   type="button"
@@ -1739,7 +1714,7 @@ function Dashboard({
                   selectedFilter,
                   dependencyType,
                   hygieneFilter,
-                  cleanupAnalysis !== null
+                  cleanupAnalyzed
                 )}
                 detail="Nothing matches this filter."
               />

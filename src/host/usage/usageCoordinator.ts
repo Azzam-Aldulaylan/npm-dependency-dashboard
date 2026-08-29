@@ -43,7 +43,9 @@ import type { ProjectSourceFingerprint } from '../../core/cache/sourceFingerprin
 import { buildUnusedFinding } from '../../core/usage/unused.js';
 import type { DependencyReference, DependencyUsageResult } from '../../core/usage/types.js';
 import type { DependencyFinding } from '../../core/hygiene/types.js';
-import { peerRequirementsFor } from '../../core/upgrade/peerRequirement.js';
+import { buildWhyInstalledIndex } from '../../core/hygiene/whyInstalled.js';
+import { isFrameworkConventionPackage } from '../../core/usage/frameworkConventions.js';
+import { buildPeerRequirementIndex, peerRequirementsFor } from '../../core/upgrade/peerRequirement.js';
 import { stillRequiredBy } from '../../core/upgrade/removeImpact.js';
 import { assessRemoval } from '../../core/upgrade/removalAssessment.js';
 import { createPerformanceSession } from '../../core/performance/measurement.js';
@@ -51,6 +53,7 @@ import type { DashboardController, MessageSink } from '../dashboardController.js
 import type { DiscoveredProject } from '../projectResolution.js';
 import type { RemovalImpactAssessment } from '../webviewProtocol.js';
 import { shouldRunBackgroundUsageRefresh } from './backgroundUsageRefreshGate.js';
+import type { ProjectUsageAnalysisMarker } from './backgroundUsageRefreshGate.js';
 import { analyzeDependencyUsage } from './usageAnalyzer.js';
 import {
   UsageAnalysisState,
@@ -59,6 +62,7 @@ import {
   canJoinBackgroundUsageScan,
   shouldCancelUnderlyingUsageScan,
   usageScanFailureAudience,
+  USAGE_ANALYSIS_REUSE_MS,
   type UsageSourceIdentity,
 } from './usageAnalysisState.js';
 import { UsageReferenceStore } from './usageReferenceStore.js';
@@ -68,7 +72,12 @@ export interface WhereUsedMessage {
 }
 
 export interface AnalyzeRemovalImpactMessage {
+  requestId: string;
   packages: string[];
+}
+
+export interface CancelRemovalImpactMessage {
+  requestId: string;
 }
 
 export interface OpenUsageReferenceMessage {
@@ -86,7 +95,7 @@ export interface UsageCoordinatorOptions {
   isUpgradeBusy?(): boolean;
 }
 
-export const USAGE_CACHE_TTL_MS = 10 * 60_000;
+export const USAGE_CACHE_TTL_MS = USAGE_ANALYSIS_REUSE_MS;
 
 interface ActiveUsageScan {
   projectId: string;
@@ -117,10 +126,17 @@ export class UsageAnalysisCoordinator {
   private readonly visibleUsageProjects = new Map<string, string>();
   /** Cleanup findings have no protocol reset, so retain their real analysis time for an expired empty supersession result. */
   private visibleCleanup: { projectId: string; analyzedAt?: string } | undefined;
-  /** The shared removal-impact result/analyzing state currently belongs to at most one project. */
-  private visibleRemovalImpactProjectId: string | undefined;
-  /** project id -> source identity last auto-analyzed by requestBackgroundUsageRefresh. */
-  private readonly lastAutoIdentity = new Map<string, UsageSourceIdentity>();
+  /** Correlation identity for the removal-impact result currently visible in the webview. */
+  private visibleRemovalImpact: { projectId: string; requestId: string; packages: readonly string[] } | undefined;
+  /** Registered before the first await so cancel can terminate even controller/project lookup races. */
+  private activeRemovalImpactRequest: {
+    requestId: string;
+    packages: readonly string[];
+    cancelled: boolean;
+    consumer?: ForegroundUsageConsumer;
+  } | undefined;
+  /** Project-wide completion marker; explicit and automatic cleanup passes share the same one-hour reuse window. */
+  private readonly lastProjectAnalysis = new Map<string, ProjectUsageAnalysisMarker>();
   private activeScan: ActiveUsageScan | undefined;
   private readonly foregroundOperations = new ForegroundUsageOperationRegistry<ForegroundUsageConsumerValue>();
   /** At most one slot: multiple requests before it can run collapse into it — force always wins. See requestBackgroundUsageRefresh. */
@@ -142,7 +158,7 @@ export class UsageAnalysisCoordinator {
   invalidateProjectSource(projectId = this.options.getSelectedProject()?.id): number {
     if (projectId === undefined) return 0;
     const generation = this.analysisState.invalidate(projectId);
-    this.lastAutoIdentity.delete(projectId);
+    this.lastProjectAnalysis.delete(projectId);
     if (this.activeScan?.projectId === projectId) this.activeScan.cts.cancel();
     this.supersedeVisibleAnalysis(projectId);
     return generation;
@@ -160,7 +176,7 @@ export class UsageAnalysisCoordinator {
       .filter(([, visibleProjectId]) => visibleProjectId === projectId)
       .map(([packageName]) => packageName);
     const cleanupVisible = this.visibleCleanup?.projectId === projectId;
-    const removalVisible = this.visibleRemovalImpactProjectId === projectId;
+    const removalVisible = this.visibleRemovalImpact?.projectId === projectId;
     if (
       packages.length > 0 ||
       cleanupVisible ||
@@ -193,9 +209,13 @@ export class UsageAnalysisCoordinator {
       });
     }
     if (removalVisible) {
-      this.visibleRemovalImpactProjectId = undefined;
+      const visible = this.visibleRemovalImpact;
+      this.visibleRemovalImpact = undefined;
+      if (visible === undefined) return;
       this.options.sink.postMessage({
         status: 'removal-impact-error',
+        requestId: visible.requestId,
+        packages: [...visible.packages],
         error: {
           code: 'STALE_SOURCE',
           message: 'Project source or configuration changed. Re-analyze removal impact.',
@@ -225,6 +245,7 @@ export class UsageAnalysisCoordinator {
   }
 
   dispose(): void {
+    if (this.activeRemovalImpactRequest !== undefined) this.activeRemovalImpactRequest.cancelled = true;
     this.activeScan?.cts.cancel();
     this.foregroundOperations.cancelActive((consumer) => {
       if (shouldCancelUnderlyingUsageScan(consumer.ownsScan)) consumer.scan.cts.cancel();
@@ -501,9 +522,11 @@ export class UsageAnalysisCoordinator {
     const packageNames = rows.map((row) => row.name);
     const selected = this.options.getSelectedProject();
     if (selected === undefined) return false;
+    const identity = this.identityFor(controller, selected);
 
     if (packageNames.length === 0) {
       const analyzedAt = new Date().toISOString();
+      this.lastProjectAnalysis.set(selected.id, { identity, analyzedAt: Date.now() });
       this.visibleCleanup = { projectId: selected.id, analyzedAt };
       this.options.sink.postMessage({
         status: 'cleanup-result',
@@ -530,7 +553,6 @@ export class UsageAnalysisCoordinator {
       this.options.sink.postMessage({ status: 'cleanup-analyzing', scanned: 0, total: 0 });
     }
 
-    const identity = this.identityFor(controller, selected);
     let consumer: ForegroundUsageConsumer | undefined;
     try {
       const source = controller.upgradeSource;
@@ -593,6 +615,7 @@ export class UsageAnalysisCoordinator {
         if (finding !== null) findings.push(finding);
       }
       this.visibleCleanup = { projectId: selected.id, analyzedAt };
+      this.lastProjectAnalysis.set(selected.id, { identity, analyzedAt: Date.now() });
       this.options.sink.postMessage({ status: 'cleanup-result', findings, analyzedAt, cacheExpiresAt });
       return true;
     } catch (cause) {
@@ -671,11 +694,10 @@ export class UsageAnalysisCoordinator {
       const selected = this.options.getSelectedProject();
       if (selected === undefined) return;
       const identity = this.identityFor(controller, selected);
-      const last = this.lastAutoIdentity.get(selected.id);
+      const last = this.lastProjectAnalysis.get(selected.id);
       if (!shouldRunBackgroundUsageRefresh(pending.force, last, identity)) return;
 
-      const completed = await this.handleAnalyzeCleanup({ background: true });
-      if (completed && this.isCurrent(selected.id, identity)) this.lastAutoIdentity.set(selected.id, identity);
+      await this.handleAnalyzeCleanup({ background: true });
     } finally {
       this.schedulingBackgroundRefresh = false;
     }
@@ -712,20 +734,51 @@ export class UsageAnalysisCoordinator {
    * this preview showed.
    *
    * Package names that aren't a real direct dependency of the current scan
-   * are silently dropped, never trusted as-is — the same discipline
-   * `handleWhereUsed` applies to a single package name.
+   * reject the whole correlated request as stale. Returning a smaller package
+   * set would leave the webview waiting for the exact set it requested.
    */
   async handleAnalyzeRemovalImpact(message: AnalyzeRemovalImpactMessage): Promise<void> {
-    const controller = await this.options.ensureController();
-    if (controller === undefined) return;
-    const rowNames = new Set(controller.lastResultRows().map((row) => row.name));
-    const packageNames = [...new Set(message.packages)].filter((name) => rowNames.has(name));
-    const selected = this.options.getSelectedProject();
-    if (selected === undefined) return;
+    const requestedPackages = [...new Set(message.packages)].sort((left, right) => left.localeCompare(right));
+    const operation: NonNullable<UsageAnalysisCoordinator['activeRemovalImpactRequest']> = {
+      requestId: message.requestId,
+      packages: requestedPackages,
+      cancelled: false,
+    };
+    if (this.activeRemovalImpactRequest !== undefined) {
+      this.options.sink.postMessage({
+        ...foregroundUsageBusyMessage('removal'),
+        requestId: message.requestId,
+        packages: requestedPackages,
+      });
+      return;
+    }
+    this.activeRemovalImpactRequest = operation;
 
-    if (packageNames.length === 0) {
-      this.visibleRemovalImpactProjectId = selected.id;
-      this.options.sink.postMessage({ status: 'removal-impact-result', assessments: [], generatedAt: new Date().toISOString() });
+    const controller = await this.options.ensureController();
+    if (controller === undefined || operation.cancelled || this.options.isDisposed() || this.activeRemovalImpactRequest !== operation) {
+      if (this.activeRemovalImpactRequest === operation) this.activeRemovalImpactRequest = undefined;
+      return;
+    }
+    const rowNames = new Set(controller.lastResultRows().map((row) => row.name));
+    const packageNames = requestedPackages.filter((name) => rowNames.has(name));
+    const selected = this.options.getSelectedProject();
+    if (selected === undefined || operation.cancelled || this.options.isDisposed() || this.activeRemovalImpactRequest !== operation) {
+      if (this.activeRemovalImpactRequest === operation) this.activeRemovalImpactRequest = undefined;
+      return;
+    }
+
+    if (packageNames.length !== requestedPackages.length) {
+      this.visibleRemovalImpact = undefined;
+      this.options.sink.postMessage({
+        status: 'removal-impact-error',
+        requestId: message.requestId,
+        packages: requestedPackages,
+        error: {
+          code: 'STALE_SOURCE',
+          message: 'The selected dependencies are no longer current. Refresh and analyze removal impact again.',
+        },
+      });
+      if (this.activeRemovalImpactRequest === operation) this.activeRemovalImpactRequest = undefined;
       return;
     }
 
@@ -744,9 +797,14 @@ export class UsageAnalysisCoordinator {
     let joined = false;
 
     if (cached === undefined && this.foregroundOperations.isClaimed()) {
-      this.visibleRemovalImpactProjectId = undefined;
-      this.options.sink.postMessage(foregroundUsageBusyMessage('removal'));
+      this.visibleRemovalImpact = undefined;
+      this.options.sink.postMessage({
+        ...foregroundUsageBusyMessage('removal'),
+        requestId: message.requestId,
+        packages: packageNames,
+      });
       performance.finish({ packages: packageNames.length, cached: false, joined: false });
+      if (this.activeRemovalImpactRequest === operation) this.activeRemovalImpactRequest = undefined;
       return;
     }
 
@@ -761,6 +819,8 @@ export class UsageAnalysisCoordinator {
         importerId: source.importerId,
       });
       const removing = new Set(packageNames);
+      const peerRequirementIndex = buildPeerRequirementIndex(graph);
+      const whyInstalledIndex = buildWhyInstalledIndex(graph);
 
       let resultsByPackage: ReadonlyMap<string, DependencyUsageResult>;
       if (cached !== undefined) {
@@ -770,12 +830,22 @@ export class UsageAnalysisCoordinator {
         joined = scan !== undefined;
         if (joined) performance.increment('usage joined scans');
         if (scan === undefined && this.isBusy()) {
-          this.visibleRemovalImpactProjectId = undefined;
-          this.options.sink.postMessage(foregroundUsageBusyMessage('removal'));
+          this.visibleRemovalImpact = undefined;
+          this.options.sink.postMessage({
+            ...foregroundUsageBusyMessage('removal'),
+            requestId: message.requestId,
+            packages: packageNames,
+          });
           return;
         }
-        this.visibleRemovalImpactProjectId = selected.id;
-        this.options.sink.postMessage({ status: 'removal-impact-analyzing', scanned: 0, total: 0 });
+        this.visibleRemovalImpact = { projectId: selected.id, requestId: message.requestId, packages: packageNames };
+        this.options.sink.postMessage({
+          status: 'removal-impact-analyzing',
+          requestId: message.requestId,
+          packages: packageNames,
+          scanned: 0,
+          total: 0,
+        });
         scan ??= this.startScan({
           projectId: selected.id,
           identity,
@@ -785,25 +855,45 @@ export class UsageAnalysisCoordinator {
           backgroundOwner: false,
           performance,
           onProgress: (scanned, total) => {
-            this.options.sink.postMessage({ status: 'removal-impact-analyzing', scanned, total });
+            if (operation.cancelled || this.activeRemovalImpactRequest !== operation) return;
+            this.options.sink.postMessage({
+              status: 'removal-impact-analyzing',
+              requestId: message.requestId,
+              packages: packageNames,
+              scanned,
+              total,
+            });
           },
         });
         if (joined) {
           joinedProgressSubscriber = (scanned, total) => {
-            if (consumer?.cancelled === true) return;
-            this.options.sink.postMessage({ status: 'removal-impact-analyzing', scanned, total });
+            if (consumer?.cancelled === true || operation.cancelled || this.activeRemovalImpactRequest !== operation) return;
+            this.options.sink.postMessage({
+              status: 'removal-impact-analyzing',
+              requestId: message.requestId,
+              packages: packageNames,
+              scanned,
+              total,
+            });
           };
           scan.progressSubscribers.add(joinedProgressSubscriber);
         }
         consumer = this.createForegroundConsumer(scan, !joined);
+        if (consumer !== undefined) operation.consumer = consumer;
         if (consumer === undefined) {
           if (!joined) scan.cts.cancel();
-          this.visibleRemovalImpactProjectId = undefined;
-          this.options.sink.postMessage(foregroundUsageBusyMessage('removal'));
+          this.visibleRemovalImpact = undefined;
+          this.options.sink.postMessage({
+            ...foregroundUsageBusyMessage('removal'),
+            requestId: message.requestId,
+            packages: packageNames,
+          });
           return;
         }
         resultsByPackage = await scan.promise;
         if (
+          operation.cancelled ||
+          this.activeRemovalImpactRequest !== operation ||
           consumer.cancelled ||
           scan.cts.token.isCancellationRequested ||
           this.options.isDisposed() ||
@@ -816,7 +906,12 @@ export class UsageAnalysisCoordinator {
       // Cancellation means the user closed the review before results were
       // ready — same discipline as a cancelled background cleanup scan:
       // never publish a partial result as if it were complete.
-      if (this.options.isDisposed() || !this.isCurrent(selected.id, identity)) return;
+      if (
+        operation.cancelled ||
+        this.activeRemovalImpactRequest !== operation ||
+        this.options.isDisposed() ||
+        !this.isCurrent(selected.id, identity)
+      ) return;
 
       // analyzeDependencyUsage always returns an entry for every name it was
       // given (see its own implementation), so `usageResult` is only ever
@@ -826,30 +921,66 @@ export class UsageAnalysisCoordinator {
         if (usageResult === undefined) return [];
         const usageId = this.referenceStore.store(name, usageResult, selected.folder);
         const assessment = assessRemoval({
-          usage: { references: usageResult.references, truncated: usageResult.truncated },
-          peerRequirements: peerRequirementsFor(graph, name, removing),
-          stillRequiredBy: stillRequiredBy(graph, manifest.dependencies, name, removing),
+          usage: {
+            references: usageResult.references,
+            truncated: usageResult.truncated,
+            conventionUncertainty: isFrameworkConventionPackage(name),
+          },
+          peerRequirements: peerRequirementsFor(graph, name, removing, peerRequirementIndex),
+          stillRequiredBy: stillRequiredBy(graph, manifest.dependencies, name, removing, whyInstalledIndex),
         });
         return [{ packageName: name, assessment, usageId }];
       });
 
-      this.visibleRemovalImpactProjectId = selected.id;
-      this.options.sink.postMessage({ status: 'removal-impact-result', assessments, generatedAt: new Date().toISOString() });
+      this.visibleRemovalImpact = { projectId: selected.id, requestId: message.requestId, packages: packageNames };
+      this.options.sink.postMessage({
+        status: 'removal-impact-result',
+        requestId: message.requestId,
+        packages: packageNames,
+        assessments,
+        generatedAt: new Date().toISOString(),
+      });
     } catch (cause) {
       const failureAudience = usageScanFailureAudience({
         backgroundOwner: consumer?.value.scan.backgroundOwner ?? false,
         foregroundWaiters: consumer?.cancelled === true ? 0 : 1,
       });
-      if (failureAudience !== 'quiet' && consumer?.cancelled !== true && !this.options.isDisposed() && this.isCurrent(selected.id, identity)) {
-        this.visibleRemovalImpactProjectId = undefined;
-        this.options.sink.postMessage({ status: 'removal-impact-error', error: toProtocolError(cause) });
+      if (
+        failureAudience !== 'quiet' &&
+        consumer?.cancelled !== true &&
+        !operation.cancelled &&
+        this.activeRemovalImpactRequest === operation &&
+        !this.options.isDisposed() &&
+        this.isCurrent(selected.id, identity)
+      ) {
+        this.visibleRemovalImpact = undefined;
+        this.options.sink.postMessage({
+          status: 'removal-impact-error',
+          requestId: message.requestId,
+          packages: packageNames,
+          error: toProtocolError(cause),
+        });
       }
     } finally {
       if (joinedProgressSubscriber !== undefined && consumer !== undefined) {
         consumer.value.scan.progressSubscribers.delete(joinedProgressSubscriber);
       }
       if (consumer !== undefined) this.releaseForegroundConsumer(consumer);
+      if (this.activeRemovalImpactRequest === operation) this.activeRemovalImpactRequest = undefined;
       performance.finish({ packages: packageNames.length, cached: cached !== undefined, joined });
+    }
+  }
+
+  handleCancelRemovalImpact(message: CancelRemovalImpactMessage): void {
+    const operation = this.activeRemovalImpactRequest;
+    if (operation === undefined || operation.requestId !== message.requestId || operation.cancelled) return;
+    operation.cancelled = true;
+    if (this.visibleRemovalImpact?.requestId === message.requestId) this.visibleRemovalImpact = undefined;
+    const consumer = operation.consumer;
+    if (consumer !== undefined) {
+      this.foregroundOperations.cancel(consumer, (value) => {
+        if (shouldCancelUnderlyingUsageScan(value.ownsScan)) value.scan.cts.cancel();
+      });
     }
   }
 

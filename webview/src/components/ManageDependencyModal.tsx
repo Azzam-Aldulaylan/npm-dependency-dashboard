@@ -308,7 +308,7 @@ export function ManageDependencyModal({
   upgrade: UpgradeReviewState;
   removal: RemovalReviewState;
   onAnalyzeRemediation: (packageName: string) => void;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[], reference?: string) => void;
   onReanalyzeUsage: (packageName: string) => void;
   onOpenUsageReference: (usageId: string, referenceIndex: number) => void;
   onRetryUpgradeEnrichment: () => void;

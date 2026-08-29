@@ -184,4 +184,12 @@ test('advisory navigation carries only trusted identifiers and an exact cloned p
     path: ['webpack', 'loader-utils', 'json5'],
   });
   assert.equal(Object.hasOwn(request, 'url'), false);
+
+  assert.deepEqual(advisoryNavigationRequest('webpack', 1234, path, 'CVE-2026-67213'), {
+    type: 'open-advisory',
+    package: 'webpack',
+    advisoryId: 1234,
+    path: ['webpack', 'loader-utils', 'json5', 'mutated-after-click'],
+    reference: 'CVE-2026-67213',
+  });
 });

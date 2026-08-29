@@ -7,8 +7,12 @@
  */
 export function manageRemovalReadyPackage(
   pendingPackage: string | null,
-  impact: { phase: string; assessments?: { has(packageName: string): boolean } }
+  impact: { phase: string; packages?: readonly string[]; assessments?: { has(packageName: string): boolean } }
 ): string | null {
   if (pendingPackage === null || impact.phase !== 'done') return null;
-  return impact.assessments?.has(pendingPackage) === true ? pendingPackage : null;
+  return impact.packages?.length === 1 &&
+    impact.packages[0] === pendingPackage &&
+    impact.assessments?.has(pendingPackage) === true
+    ? pendingPackage
+    : null;
 }

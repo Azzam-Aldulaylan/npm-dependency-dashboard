@@ -12,7 +12,7 @@
 
 import type { DeclaredDependency } from '../manifest/parse.js';
 import type { DependencyClassification } from '../upgrade/plan.js';
-import type { DependencyGraph } from '../types.js';
+import type { DependencyGraph, DependencyNode } from '../types.js';
 import type { InstallPathIndex, PathSearchOptions } from '../graph/paths.js';
 import { buildInstallPathIndex, pathsToNodes } from '../graph/paths.js';
 import type { InstallPathVersionEntry } from './types.js';
@@ -25,6 +25,36 @@ export interface WhyInstalledResult {
   declared: { classification: DependencyClassification; version: string | null } | null;
   /** Every distinct resolved version found anywhere in the graph, each with its own introducing paths — see InstallPathVersionEntry. */
   versions: InstallPathVersionEntry[];
+}
+
+/**
+ * Reusable lookup state for callers that query many package names against
+ * one immutable graph. It combines the one-time install-path BFS with a
+ * name index so a batch does not rescan every graph node for every package.
+ */
+export interface WhyInstalledIndex {
+  installPaths: InstallPathIndex;
+  nodesByName: ReadonlyMap<string, readonly (readonly [nodeId: string, node: DependencyNode])[]>;
+  directNodeByName: ReadonlyMap<string, DependencyNode>;
+}
+
+export function buildWhyInstalledIndex(
+  graph: DependencyGraph,
+  installPaths: InstallPathIndex = buildInstallPathIndex(graph)
+): WhyInstalledIndex {
+  const nodesByName = new Map<string, Array<Readonly<[string, DependencyNode]>>>();
+  const directNodeByName = new Map<string, DependencyNode>();
+  for (const node of graph.nodes.values()) {
+    const entries = nodesByName.get(node.name);
+    // DependencyNode.path is the canonical id used by the path index and by
+    // the pre-index implementation, so preserve it even for a hand-built
+    // graph whose Map key does not happen to match.
+    const entry = [node.path, node] as const;
+    if (entries === undefined) nodesByName.set(node.name, [entry]);
+    else entries.push(entry);
+    if (node.direct && !directNodeByName.has(node.name)) directNodeByName.set(node.name, node);
+  }
+  return { installPaths, nodesByName, directNodeByName };
 }
 
 function classificationOf(dep: DeclaredDependency): DependencyClassification {
@@ -53,19 +83,23 @@ function compareVersions(a: string, b: string): number {
 
 /**
  * `index` may be supplied by a caller that already built one for the same
- * graph (duplicate-version detection, scanning every package name, builds
- * exactly one and reuses it here per name) — building a fresh one is only
- * the right default for a single, standalone lookup.
+ * graph. A `WhyInstalledIndex` reuses both paths and name lookups; the older
+ * path-only index remains accepted for compatibility, although it still
+ * needs one node scan for that individual query.
  */
 export function whyInstalled(
   graph: DependencyGraph,
   declared: readonly DeclaredDependency[],
   packageName: string,
   options: PathSearchOptions = {},
-  index: InstallPathIndex = buildInstallPathIndex(graph)
+  index: InstallPathIndex | WhyInstalledIndex = buildWhyInstalledIndex(graph)
 ): WhyInstalledResult {
   const declaredEntry = declared.find((dep) => dep.name === packageName);
-  const directNode = [...graph.nodes.values()].find((node) => node.direct && node.name === packageName);
+  const indexedNodes = 'installPaths' in index ? index.nodesByName.get(packageName) ?? [] : undefined;
+  const directNode = 'installPaths' in index
+    ? index.directNodeByName.get(packageName)
+    : [...graph.nodes.values()].find((node) => node.direct && node.name === packageName);
+  const installPaths = 'installPaths' in index ? index.installPaths : index;
 
   const declaredInfo =
     declaredEntry === undefined
@@ -73,11 +107,13 @@ export function whyInstalled(
       : { classification: classificationOf(declaredEntry), version: directNode?.version ?? null };
 
   const byVersion = new Map<string, string[]>();
-  for (const node of graph.nodes.values()) {
+  const matchingNodes: Iterable<readonly [string, DependencyNode]> = indexedNodes ?? [...graph.nodes.entries()]
+    .filter(([, node]) => node.name === packageName);
+  for (const [nodeId, node] of matchingNodes) {
     if (node.name !== packageName || node.version === null) continue;
     const existing = byVersion.get(node.version);
-    if (existing === undefined) byVersion.set(node.version, [node.path]);
-    else existing.push(node.path);
+    if (existing === undefined) byVersion.set(node.version, [nodeId]);
+    else existing.push(nodeId);
   }
 
   const versions: InstallPathVersionEntry[] = [...byVersion.entries()]
@@ -88,7 +124,7 @@ export function whyInstalled(
       const pathResult =
         transitiveIds.length === 0
           ? { paths: [], totalPaths: 0, truncated: false }
-          : pathsToNodes(graph, index, new Set(transitiveIds), options);
+          : pathsToNodes(graph, installPaths, new Set(transitiveIds), options);
       const entry: InstallPathVersionEntry = {
         version,
         direct: isDirectVersion && declaredInfo !== null ? { classification: declaredInfo.classification } : null,

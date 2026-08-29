@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { peerRequirementsFor } from '../out/core/upgrade/peerRequirement.js';
+import { buildPeerRequirementIndex, peerRequirementsFor } from '../out/core/upgrade/peerRequirement.js';
 
 function node(overrides) {
   return {
@@ -260,4 +260,32 @@ test('duplicate owners with equally strong edges choose evidence deterministical
 
   assert.deepEqual(peerRequirementsFor(graphOf([target, broad, narrow]), 'react', new Set()), expected);
   assert.deepEqual(peerRequirementsFor(graphOf([target, narrow, broad]), 'react', new Set()), expected);
+});
+
+test('a reusable peer index avoids traversing graph nodes for every batch candidate', () => {
+  const graph = graphOf([
+    node({ name: 'react', path: 'node_modules/react', direct: true }),
+    node({ name: 'vue', path: 'node_modules/vue', direct: true }),
+    node({
+      name: 'plugin',
+      path: 'node_modules/plugin',
+      edges: [
+        { name: 'react', requestedRange: '^18', kind: 'peer', targetNodeId: 'node_modules/react', optional: false },
+        { name: 'vue', requestedRange: '^3', kind: 'peer', targetNodeId: 'node_modules/vue', optional: true },
+      ],
+    }),
+  ]);
+  const index = buildPeerRequirementIndex(graph);
+  const originalValues = graph.nodes.values;
+  graph.nodes.values = () => { throw new Error('batch queries must use the peer index'); };
+  try {
+    assert.deepEqual(peerRequirementsFor(graph, 'react', new Set(), index), [
+      { requiredBy: 'plugin', range: '^18', optional: false },
+    ]);
+    assert.deepEqual(peerRequirementsFor(graph, 'vue', new Set(), index), [
+      { requiredBy: 'plugin', range: '^3', optional: true },
+    ]);
+  } finally {
+    graph.nodes.values = originalValues;
+  }
 });

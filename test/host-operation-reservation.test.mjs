@@ -15,7 +15,7 @@ registerHooks({
         shortCircuit: true,
         format: 'module',
         source: `
-          export const workspace = {};
+          export const workspace = { getConfiguration: () => ({ get: (_key, fallback) => fallback }) };
           export const window = {};
           export const commands = {};
           export const tasks = {};
@@ -171,4 +171,123 @@ test('a host source change terminates a real in-flight Upgrade analysis exactly 
   }]);
   assert.deepEqual(lifecycle, ['flush', 'resume']);
   assert.equal(coordinator.isBusy(), false);
+});
+
+test('cancel-remove with a null id cancels a pending project load and releases without publishing a stale review', async () => {
+  const { UpgradeAssistantCoordinator } = await import('../out/host/upgradeAssistantCoordinator.js');
+  const messages = [];
+  const lifecycle = [];
+  let resolveProjectLoad;
+  let markProjectLoadStarted;
+  let projectLoadCalls = 0;
+  const projectLoadStarted = new Promise((resolve) => {
+    markProjectLoadStarted = resolve;
+  });
+  const manifestText = JSON.stringify({ dependencies: { react: '^18.0.0' } });
+  const source = {
+    manifestText,
+    lockfileText: JSON.stringify({ lockfileVersion: 3, packages: { '': {}, 'node_modules/react': { version: '18.2.0' } } }),
+    lockfilePath: '/workspace/package-lock.json',
+    registry: 'https://registry.npmjs.org/',
+    packageManager: 'npm',
+    importerId: '.',
+  };
+  const coordinator = new UpgradeAssistantCoordinator({
+    sink: { postMessage: (message) => messages.push(message) },
+    httpClient: {},
+    etagStore: {},
+    ensureController: async () => ({
+      root: '/workspace',
+      upgradeSource: source,
+      validateBulkRemoveRequest: () => ({
+        ok: true,
+        removals: [{ packageName: 'react', classification: 'prod' }],
+      }),
+    }),
+    getSelectedProject: () => ({ id: 'project', dir: '', folder: {} }),
+    isDisposed: () => false,
+    reloadFinalState: async () => {},
+    flushDeferredChanges: async () => lifecycle.push('flush'),
+    onMutationLockReleased: () => lifecycle.push('resume'),
+    loadProject: async () => {
+      projectLoadCalls += 1;
+      if (projectLoadCalls > 1) return { root: '/workspace', ...source };
+      markProjectLoadStarted();
+      return await new Promise((resolve) => {
+        resolveProjectLoad = resolve;
+      });
+    },
+  });
+
+  const analysis = coordinator.handleAnalyzeBulkRemove({ changes: [{ package: 'react' }] });
+  await projectLoadStarted;
+  assert.equal(coordinator.isBusy(), true);
+  coordinator.handleCancelRemove({ analysisId: null });
+  assert.equal(coordinator.isBusy(), false, 'the reservation is released synchronously by cancellation');
+
+  const replacement = coordinator.handleAnalyzeBulkRemove({ changes: [{ package: 'react' }] });
+  await replacement;
+  const replacementReview = messages.findLast((message) => message.status === 'remove-analysis');
+  assert.ok(replacementReview, 'an immediate retry is accepted instead of being rejected by the cancelled pending slot');
+  assert.equal(messages.some((message) => message.status === 'remove-error'), false);
+  coordinator.handleCancelRemove({ analysisId: replacementReview.analysis.analysisId });
+
+  resolveProjectLoad({ root: '/workspace', ...source });
+  await analysis;
+
+  assert.equal(messages.filter((message) => message.status === 'remove-analysis').length, 1);
+  assert.equal(messages.some((message) => message.status === 'remove-error'), false);
+});
+
+test('bulk removal preflight blocks a required peer unless its direct owner is in the exact removal set', async () => {
+  const { UpgradeAssistantCoordinator } = await import('../out/host/upgradeAssistantCoordinator.js');
+  const manifestText = JSON.stringify({ dependencies: { consumer: '^1.0.0', react: '^18.0.0' } });
+  const lockfileText = JSON.stringify({
+    lockfileVersion: 3,
+    packages: {
+      '': {},
+      'node_modules/consumer': { version: '1.0.0', peerDependencies: { react: '^18.0.0' } },
+      'node_modules/react': { version: '18.2.0' },
+    },
+  });
+  const source = {
+    manifestText,
+    lockfileText,
+    lockfilePath: '/workspace/package-lock.json',
+    registry: 'https://registry.npmjs.org/',
+    packageManager: 'npm',
+    importerId: '.',
+  };
+
+  async function run(changes) {
+    const messages = [];
+    const removals = changes.map(({ package: packageName }) => ({ packageName, classification: 'prod' }));
+    const coordinator = new UpgradeAssistantCoordinator({
+      sink: { postMessage: (message) => messages.push(message) },
+      httpClient: {},
+      etagStore: {},
+      ensureController: async () => ({
+        root: '/workspace',
+        upgradeSource: source,
+        validateBulkRemoveRequest: () => ({ ok: true, removals }),
+      }),
+      getSelectedProject: () => ({ id: 'project', dir: '', folder: {} }),
+      isDisposed: () => false,
+      reloadFinalState: async () => {},
+      flushDeferredChanges: async () => {},
+      loadProject: async () => ({ root: '/workspace', ...source }),
+    });
+    await coordinator.handleAnalyzeBulkRemove({ changes });
+    return { coordinator, messages };
+  }
+
+  const blocked = await run([{ package: 'react' }]);
+  assert.equal(blocked.messages.findLast((message) => message.status === 'remove-error').error.code, 'REQUIRED_PEER_DEPENDENCY');
+  assert.equal(blocked.messages.some((message) => message.status === 'remove-analysis'), false);
+  assert.equal(blocked.coordinator.isBusy(), false);
+
+  const coordinated = await run([{ package: 'react' }, { package: 'consumer' }]);
+  assert.equal(coordinated.messages.some((message) => message.status === 'remove-error' && message.error.code === 'REQUIRED_PEER_DEPENDENCY'), false);
+  assert.equal(coordinated.messages.some((message) => message.status === 'remove-analysis'), true);
+  coordinated.coordinator.handleCancelRemove({ analysisId: coordinated.messages.findLast((message) => message.status === 'remove-analysis').analysis.analysisId });
 });

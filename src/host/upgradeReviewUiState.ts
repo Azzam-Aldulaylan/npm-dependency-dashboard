@@ -163,12 +163,15 @@ export function remainingVulnerabilityPatchedVersionLabel(flaggedPackage: string
 export function advisoryNavigationRequest(
   packageName: string,
   advisoryId: string | number,
-  path: readonly string[]
+  path: readonly string[],
+  reference?: string
 ): {
   type: 'open-advisory';
   package: string;
   advisoryId: string | number;
   path: string[];
+  reference?: string;
 } {
-  return { type: 'open-advisory', package: packageName, advisoryId, path: [...path] };
+  const request = { type: 'open-advisory' as const, package: packageName, advisoryId, path: [...path] };
+  return reference === undefined ? request : { ...request, reference };
 }

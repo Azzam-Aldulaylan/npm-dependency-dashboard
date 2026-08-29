@@ -59,7 +59,7 @@ export function CompatibilitySection({
   const hiddenCount = compatibility.findings.length - visible.length;
 
   return (
-    <section className="analysis-card" aria-labelledby="analysis-compatibility-heading">
+    <section className="analysis-card analysis-card--full compatibility-card" aria-labelledby="analysis-compatibility-heading">
       <h3 className="analysis-card__title" id="analysis-compatibility-heading">
         <IconRoute className="analysis-card__title-icon" />
         Compatibility

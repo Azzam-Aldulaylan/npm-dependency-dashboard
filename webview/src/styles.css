@@ -401,12 +401,6 @@ button {
   gap: 0.55rem;
 }
 
-.toolbar__analysis-age {
-  color: var(--vscode-descriptionForeground);
-  font-size: 0.8rem;
-  white-space: nowrap;
-}
-
 /* --------------------------------------------------------- type filter */
 
 .type-filter {
@@ -1027,6 +1021,35 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+.advisory__identifier {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  color: var(--vscode-textLink-foreground);
+  background: none;
+  cursor: pointer;
+}
+
+.advisory__identifier svg {
+  width: 0.78em;
+  height: 0.78em;
+  flex-shrink: 0;
+}
+
+.advisory__identifier:hover code {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.advisory__identifier:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
 .advisories code,
 .advisory__identifiers code {
   padding: 0.05rem 0.4rem;
@@ -1274,6 +1297,14 @@ button {
   }
 }
 
+/* The refresh glyph's arrowheads point counter-clockwise. Keep its motion in
+   the same direction while leaving the direction-neutral loading ring alone. */
+@keyframes dashboard-refresh-spin {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
 .loading-state__title {
   margin: 0;
   font-weight: 600;
@@ -1436,7 +1467,14 @@ button {
     animation: none;
     background: var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
   }
-  .stale-status__icon {
+  .stale-status__icon,
+  .manage-glance__status-icon--spin,
+  .manage-action-card__status-icon--spin,
+  .manage-removal-stat__spinner,
+  .vuln-recommended__spin,
+  .usage-status__icon--spin,
+  .removal-review__loading-icon,
+  .banner__icon--spin {
     animation: none;
   }
 }
@@ -1485,7 +1523,7 @@ button {
 
 .stale-status__icon {
   flex-shrink: 0;
-  animation: dashboard-spin 1.2s linear infinite;
+  animation: dashboard-refresh-spin 1.2s linear infinite;
 }
 
 /* A manually-triggered freshness bar (e.g. the Upgrade review panel's own)
@@ -1758,12 +1796,8 @@ button {
   font-size: 1.02em;
 }
 
-/*
- * Compatibility | Security, then Files | Verification — a plain two-column
- * grid on anything wide enough to hold it, one column (stacked) otherwise.
- * Card order in the markup already matches this pairing, so no explicit
- * grid-column placement is needed.
- */
+/* Post-analysis evidence uses two quiet columns; Security opts into the
+   full-width span because its result and advisory evidence need room. */
 .modal__grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -2147,7 +2181,7 @@ button {
 }
 
 .manage-glance__status-icon--spin {
-  animation: dashboard-spin 1.2s linear infinite;
+  animation: dashboard-refresh-spin 1.2s linear infinite;
 }
 
 /*
@@ -2412,7 +2446,7 @@ button {
 }
 
 .manage-action-card__status-icon--spin {
-  animation: dashboard-spin 1.2s linear infinite;
+  animation: dashboard-refresh-spin 1.2s linear infinite;
 }
 
 .manage-action-card__evidence {
@@ -2486,7 +2520,7 @@ button {
 .manage-removal-stat__spinner {
   flex-shrink: 0;
   color: var(--vscode-descriptionForeground);
-  animation: dashboard-spin 1.2s linear infinite;
+  animation: dashboard-refresh-spin 1.2s linear infinite;
 }
 
 .manage-modal__footer-note {
@@ -2695,7 +2729,7 @@ button {
 .vuln-recommended__spin {
   flex-shrink: 0;
   margin-top: 0.15em;
-  animation: dashboard-spin 1.2s linear infinite;
+  animation: dashboard-refresh-spin 1.2s linear infinite;
 }
 
 .vuln-recommended__cta {
@@ -3035,7 +3069,7 @@ button {
 }
 
 .usage-status__icon--spin {
-  animation: dashboard-spin 1.2s linear infinite;
+  animation: dashboard-refresh-spin 1.2s linear infinite;
 }
 
 .usage-ref-list {
@@ -3698,7 +3732,7 @@ button {
   width: 1.5rem;
   height: 1.5rem;
   color: var(--accent-total);
-  animation: dashboard-spin 1.2s linear infinite;
+  animation: dashboard-refresh-spin 1.2s linear infinite;
 }
 
 .removal-review__unknown {
@@ -4322,6 +4356,13 @@ button {
   white-space: nowrap;
 }
 
+.review-controls__batch-note {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  line-height: 1.45;
+}
+
 .review-list {
   display: flex;
   flex-direction: column;
@@ -4862,6 +4903,20 @@ button {
   list-style: none;
 }
 
+/* Dependency compatibility and source/config compatibility remain separate
+   questions, but both receive the full review width. Individual dependency
+   findings then use the extra room rather than stretching into long lines. */
+.compatibility-card .finding-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (min-width: 36rem) {
+  .modal__grid > .compatibility-card .finding-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .finding {
   padding: 0.45rem 0.55rem;
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
@@ -4934,6 +4989,9 @@ button {
 }
 
 .analysis-card__vulnerabilities {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem;
   margin: 0.55rem 0 0;
   padding: 0;
 }
@@ -4945,7 +5003,13 @@ button {
 }
 
 .analysis-card__vulnerabilities .advisory + .advisory {
-  margin-top: 0.5rem;
+  margin-top: 0;
+}
+
+@media (min-width: 36rem) {
+  .modal__grid > .analysis-card--full .analysis-card__vulnerabilities {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .vulnerability-contexts {
@@ -5699,5 +5763,5 @@ button {
 }
 
 .banner__icon--spin {
-  animation: dashboard-spin 1.2s linear infinite;
+  animation: dashboard-refresh-spin 1.2s linear infinite;
 }

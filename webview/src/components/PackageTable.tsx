@@ -175,7 +175,7 @@ export function PackageTable({
   searchQuery: string;
   sortState: TableSortState;
   onSort: (column: SortColumn) => void;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[], reference?: string) => void;
   /** Deprecated + duplicate-version findings from the current scan, plus any likely-unused findings from a completed "Analyze cleanup" run — see App.tsx. */
   hygieneFindings: readonly DependencyFinding[];
   onOpenManage: (packageName: string) => void;

@@ -75,6 +75,62 @@ test('a valid, trusted advisory resolves to its own https URL', () => {
   assert.equal(url, 'https://github.com/advisories/GHSA-f8q6-p94x-37v3');
 });
 
+test('a trusted CVE badge resolves to the official CVE record', () => {
+  const cveRow = row({
+    advisories: [attributedAdvisory({
+      advisory: {
+        ...attributedAdvisory().advisory,
+        identifiers: [{ type: 'CVE', value: 'CVE-2026-67213' }],
+      },
+    })],
+  });
+  assert.equal(
+    resolveTrustedAdvisoryUrl([cveRow], {
+      package: 'minimatch',
+      advisoryId: 1096549,
+      path: ['minimatch'],
+      reference: 'CVE-2026-67213',
+    }),
+    'https://www.cve.org/CVERecord?id=CVE-2026-67213'
+  );
+});
+
+test('a trusted GHSA badge resolves to its GitHub Advisory Database record', () => {
+  assert.equal(
+    resolveTrustedAdvisoryUrl([row()], {
+      package: 'minimatch',
+      advisoryId: 1096549,
+      path: ['minimatch'],
+      reference: 'GHSA-F8Q6-P94X-37V3',
+    }),
+    'https://github.com/advisories/GHSA-F8Q6-P94X-37V3'
+  );
+});
+
+test('the npm source id badge resolves to the advisory URL already trusted by the scan', () => {
+  assert.equal(
+    resolveTrustedAdvisoryUrl([row()], {
+      package: 'minimatch',
+      advisoryId: 1096549,
+      path: ['minimatch'],
+      reference: 'npm:1096549',
+    }),
+    'https://github.com/advisories/GHSA-f8q6-p94x-37v3'
+  );
+});
+
+test('an ID that does not belong to the trusted advisory cannot be opened', () => {
+  assert.equal(
+    resolveTrustedAdvisoryUrl([row()], {
+      package: 'minimatch',
+      advisoryId: 1096549,
+      path: ['minimatch'],
+      reference: 'CVE-2026-99999',
+    }),
+    null
+  );
+});
+
 test('an unknown package name resolves to nothing', () => {
   const url = resolveTrustedAdvisoryUrl([row()], {
     package: 'does-not-exist',

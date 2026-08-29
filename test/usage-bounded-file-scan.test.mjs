@@ -31,6 +31,7 @@ test('usage file reads are bounded and consumed in deterministic input order', a
 
 test('usage file scan isolates an unreadable file and continues the batch', async () => {
   const consumed = [];
+  const failures = [];
   const result = await scanFilesBounded({
     items: [1, 2, 3],
     read: async (item) => {
@@ -38,11 +39,26 @@ test('usage file scan isolates an unreadable file and continues the batch', asyn
       return String(item);
     },
     consume: (item) => consumed.push(item),
+    onReadFailure: (item) => failures.push(item),
     concurrency: 2,
   });
 
   assert.deepEqual(consumed, [1, 3]);
+  assert.deepEqual(failures, [2]);
   assert.deepEqual(result, { processed: 3, cancelled: false });
+});
+
+test('usage file scan reports an explicit null read as incomplete evidence', async () => {
+  const failures = [];
+  const result = await scanFilesBounded({
+    items: ['readable', 'oversized'],
+    read: async (item) => item === 'oversized' ? null : item,
+    consume: () => undefined,
+    onReadFailure: (item) => failures.push(item),
+  });
+
+  assert.deepEqual(failures, ['oversized']);
+  assert.deepEqual(result, { processed: 2, cancelled: false });
 });
 
 test('usage cancellation stops queued batches', async () => {

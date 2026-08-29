@@ -98,7 +98,7 @@ function fixture() {
     getSelectedProject: () => selected,
     isDisposed: () => false,
   });
-  return { coordinator, messages };
+  return { coordinator, messages, selected, controller };
 }
 
 test('coordinator reuses a real cleanup scan and immediately supersedes rendered evidence on source invalidation', async () => {
@@ -113,8 +113,11 @@ test('coordinator reuses a real cleanup scan and immediately supersedes rendered
   assert.equal(usage.analysis.fromCache, true);
   assert.equal(findFilesCalls, 2, 'where-used reuses cleanup instead of scanning');
 
-  await coordinator.handleAnalyzeRemovalImpact({ packages: ['react'] });
-  assert.equal(messages.findLast((message) => message.status === 'removal-impact-result').assessments.length, 1);
+  await coordinator.handleAnalyzeRemovalImpact({ requestId: 'impact-1', packages: ['react'] });
+  const impact = messages.findLast((message) => message.status === 'removal-impact-result');
+  assert.equal(impact.requestId, 'impact-1');
+  assert.deepEqual(impact.packages, ['react']);
+  assert.equal(impact.assessments.length, 1);
   assert.equal(findFilesCalls, 2, 'removal impact reuses the complete cleanup entry');
 
   const beforeInvalidation = messages.length;
@@ -129,6 +132,63 @@ test('coordinator reuses a real cleanup scan and immediately supersedes rendered
   assert.deepEqual(supersession[1].findings, []);
   assert.equal(Date.parse(supersession[1].cacheExpiresAt), 0);
   assert.equal(supersession[2].error.code, 'STALE_SOURCE');
+  assert.equal(supersession[2].requestId, 'impact-1');
+  assert.deepEqual(supersession[2].packages, ['react']);
+
+  coordinator.dispose();
+});
+
+test('an explicit cleanup pass satisfies the project-wide background reuse gate', async () => {
+  findFilesCalls = 0;
+  const { coordinator } = fixture();
+
+  assert.equal(await coordinator.handleAnalyzeCleanup(), true);
+  assert.equal(findFilesCalls, 2);
+  await coordinator.requestBackgroundUsageRefresh();
+  assert.equal(findFilesCalls, 2, 'the same project does not rescan before its one-hour reuse window expires');
+
+  coordinator.dispose();
+});
+
+test('targeted cancellation during controller lookup drops every stale removal-impact message', async () => {
+  const base = fixture();
+  let resolveController;
+  const controllerReady = new Promise((resolve) => {
+    resolveController = resolve;
+  });
+  const messages = [];
+  const coordinator = new UsageAnalysisCoordinator({
+    sink: { postMessage: (message) => messages.push(message) },
+    ensureController: async () => controllerReady,
+    getSelectedProject: () => base.selected,
+    isDisposed: () => false,
+  });
+
+  const stale = coordinator.handleAnalyzeRemovalImpact({ requestId: 'impact-old', packages: ['react'] });
+  coordinator.handleCancelRemovalImpact({ requestId: 'impact-old' });
+  resolveController(base.controller);
+  await stale;
+
+  assert.deepEqual(messages, [], 'cancelled lookup cannot publish queued progress, result, or error');
+
+  await coordinator.handleAnalyzeRemovalImpact({ requestId: 'impact-new', packages: ['react'] });
+  const result = messages.findLast((message) => message.status === 'removal-impact-result');
+  assert.equal(result.requestId, 'impact-new');
+  assert.deepEqual(result.packages, ['react']);
+
+  coordinator.dispose();
+  base.coordinator.dispose();
+});
+
+test('a stale package selection fails atomically with the exact requested package set', async () => {
+  const { coordinator, messages } = fixture();
+  await coordinator.handleAnalyzeRemovalImpact({ requestId: 'impact-stale', packages: ['missing', 'react'] });
+
+  const error = messages.findLast((message) => message.status === 'removal-impact-error');
+  assert.equal(error.requestId, 'impact-stale');
+  assert.deepEqual(error.packages, ['missing', 'react']);
+  assert.equal(error.error.code, 'STALE_SOURCE');
+  assert.equal(messages.some((message) => message.status === 'removal-impact-result'), false);
 
   coordinator.dispose();
 });

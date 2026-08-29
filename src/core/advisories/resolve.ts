@@ -3,23 +3,26 @@
  * last-trusted scan — the security boundary for Problem 4's external link.
  *
  * The webview never sends a URL, only an identifier (`package` +
- * `advisoryId` + `path`) naming which attributed advisory it means; this
- * looks that identifier up in `rows` (host-owned, from the last completed
- * scan — see DashboardController.lastResult) and returns the URL *that scan
- * itself recorded*, never anything the webview supplied. A URL is returned
- * only when it is a well-formed `https:` link — `http:`, `javascript:`,
- * `file:`, and malformed strings are all refused, regardless of source.
+ * `advisoryId` + `path`) naming which attributed advisory it means and,
+ * optionally, one ID badge already shown for that advisory. This looks the
+ * advisory up in host-owned rows, verifies the badge against the same trusted
+ * record, and derives the CVE/GHSA destination locally. npm source IDs use
+ * only the URL the scan itself recorded. Every returned destination is
+ * `https:`; `http:`, `javascript:`, `file:`, and malformed values are refused.
  *
  * Nothing here may import 'vscode' — see types.ts.
  */
 
 import type { AttributedAdvisory, PackageRow } from '../types.js';
+import { vulnerabilityIdentifiers } from './identifiers.js';
 
 export interface AdvisoryLookupRequest {
   package: string;
   advisoryId: string | number;
   /** Same disambiguator the UI already keys advisory rows by — id alone is not guaranteed unique within a row. */
   path: readonly string[];
+  /** Optional human-facing ID badge. The host verifies it belongs to this exact trusted advisory before resolving a destination. */
+  reference?: string;
 }
 
 export function isSafeAdvisoryUrl(url: string): boolean {
@@ -41,6 +44,24 @@ function findAttributedAdvisory(
   return advisories.find((entry) => entry.advisory.id === request.advisoryId && pathsEqual(entry.path, request.path));
 }
 
+function resolveTrustedReferenceUrl(entry: AttributedAdvisory, reference: string): string | null {
+  const normalized = reference.trim().toUpperCase();
+  const belongsToAdvisory = vulnerabilityIdentifiers(entry.advisory)
+    .some((identifier) => identifier.toUpperCase() === normalized);
+  if (!belongsToAdvisory) return null;
+
+  if (/^CVE-\d{4}-\d{4,}$/.test(normalized)) {
+    return `https://www.cve.org/CVERecord?id=${encodeURIComponent(normalized)}`;
+  }
+  if (/^GHSA-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(normalized)) {
+    return `https://github.com/advisories/${encodeURIComponent(normalized)}`;
+  }
+  if (normalized === `NPM:${String(entry.advisory.id).toUpperCase()}`) {
+    return isSafeAdvisoryUrl(entry.advisory.url) ? entry.advisory.url : null;
+  }
+  return null;
+}
+
 /**
  * `null` covers every failure alike — package not in the last scan, advisory
  * id/path not present on that row, or a URL that failed the https: check —
@@ -56,5 +77,6 @@ export function resolveTrustedAdvisoryUrl(
   if (row === undefined) return null;
   const entry = findAttributedAdvisory(row.advisories, request);
   if (entry === undefined) return null;
+  if (request.reference !== undefined) return resolveTrustedReferenceUrl(entry, request.reference);
   return isSafeAdvisoryUrl(entry.advisory.url) ? entry.advisory.url : null;
 }

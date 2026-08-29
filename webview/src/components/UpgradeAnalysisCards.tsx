@@ -10,6 +10,7 @@ import type {
 } from '../../../src/host/webviewProtocol.js';
 import { compatibilityOutcomeDisplay, securityOutcomeDisplay } from '../../../src/host/outcomeCopy.js';
 import { summarizeProjectCompatibility } from '../../../src/host/projectCompatibilityUiState.js';
+import { vulnerabilityIdentifiers } from '../../../src/host/vulnerabilityUiState.js';
 import {
   plannerAddedUpgradeChanges,
   remainingVulnerabilityPatchedVersionLabel,
@@ -18,7 +19,7 @@ import { IconAlertTriangle, IconCheck, IconExternalLink, IconGear, IconHelpCircl
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { overallStatusDetail } from './UpgradeAnalysisModal.js';
 import { SeverityBadge } from './SeverityBadge.js';
-import { patchedVersionText } from './VulnerabilityCard.js';
+import { patchedVersionText, VulnerabilityIdentifierLinks } from './VulnerabilityCard.js';
 
 /**
  * The five Upgrade review cards shared between the fully-populated review
@@ -266,7 +267,7 @@ export function SecurityOutcomeCard({
   row: PackageRow;
   security: UpgradeAnalysisPresentation['security'];
   onChangeTab: (tab: ManageTabId) => void;
-  onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[]) => void) | undefined;
+  onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[], reference?: string) => void) | undefined;
 }): ReactElement | null {
   if (security === null) return null;
   const beforeCount = security.resolvedAdvisories.length + security.remaining.length;
@@ -344,6 +345,17 @@ export function SecurityOutcomeCard({
                   <div className="vulnerability-context__head">
                     <SeverityBadge severity={context.advisory.severity} />
                     <strong>{context.advisory.title}</strong>
+                    {onOpenAdvisory === undefined ? null : (
+                      <VulnerabilityIdentifierLinks
+                        identifiers={vulnerabilityIdentifiers(context.advisory)}
+                        onOpen={(identifier) => onOpenAdvisory(
+                          contextRootPackage,
+                          context.advisory.id,
+                          primaryPath,
+                          identifier
+                        )}
+                      />
+                    )}
                   </div>
                   <dl className="vulnerability-context__meta">
                     <dt>Flagged package</dt>
@@ -418,7 +430,19 @@ export function SecurityOutcomeCard({
                       <div className="security-remaining__head">
                         <SeverityBadge severity={entry.advisory.severity} />
                         <strong>{entry.advisory.title}</strong>
-                        <code className="security-remaining__advisory-id">{String(entry.advisory.id)}</code>
+                        {onOpenAdvisory === undefined ? (
+                          <code className="security-remaining__advisory-id">{String(entry.advisory.id)}</code>
+                        ) : (
+                          <VulnerabilityIdentifierLinks
+                            identifiers={vulnerabilityIdentifiers(entry.advisory)}
+                            onOpen={(identifier) => onOpenAdvisory(
+                              row.name,
+                              entry.advisory.id,
+                              [...entry.path],
+                              identifier
+                            )}
+                          />
+                        )}
                       </div>
                       <dl className="security-remaining__meta">
                         <dt>Flagged package</dt>

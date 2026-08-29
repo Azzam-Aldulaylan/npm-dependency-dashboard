@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildInstallPathIndex, pathsToNodes } from '../out/core/graph/paths.js';
-import { whyInstalled } from '../out/core/hygiene/whyInstalled.js';
+import { buildWhyInstalledIndex, whyInstalled } from '../out/core/hygiene/whyInstalled.js';
 
 function node(name, path, { version = null, direct = false, edges = [] } = {}) {
   return { name, version, range: '', dev: false, direct, path, deps: edges.map((e) => e.name), edges };
@@ -155,6 +155,23 @@ test('a package name absent from the graph and not declared is reported as not f
   const result = whyInstalled(graph, [declared('react')], 'nonexistent');
   assert.equal(result.found, false);
   assert.deepEqual(result.versions, []);
+});
+
+test('a reusable why-installed index avoids rescanning graph nodes for every batch candidate', () => {
+  const graph = graphOf([
+    node('app-a', 'node_modules/app-a', { version: '1.0.0', direct: true, edges: [edge('shared', 'node_modules/shared')] }),
+    node('app-b', 'node_modules/app-b', { version: '1.0.0', direct: true }),
+    node('shared', 'node_modules/shared', { version: '1.0.0' }),
+  ]);
+  const index = buildWhyInstalledIndex(graph);
+  const originalValues = graph.nodes.values;
+  graph.nodes.values = () => { throw new Error('batch queries must use the name index'); };
+  try {
+    assert.equal(whyInstalled(graph, [declared('app-a'), declared('app-b')], 'shared', {}, index).found, true);
+    assert.equal(whyInstalled(graph, [declared('app-a'), declared('app-b')], 'app-b', {}, index).found, true);
+  } finally {
+    graph.nodes.values = originalValues;
+  }
 });
 
 // --------------------------------------------------------- paths.ts API

@@ -33,7 +33,7 @@ export function buildUnusedFinding(packageName: string, usage: DependencyUsageRe
   const lowConfidence = usage.truncated || conventionPackage;
 
   const reason = usage.truncated
-    ? 'The workspace scan was capped before covering every source file, so this may be a false positive.'
+    ? 'The workspace scan did not cover every eligible file, so this may be a false positive.'
     : conventionPackage
       ? 'No code references found, but this package type is commonly loaded through framework/config conventions.'
       : 'No static imports, requires, dynamic imports, package.json scripts, or recognized configuration references were found.';

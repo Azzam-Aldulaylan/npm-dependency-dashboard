@@ -6,6 +6,7 @@ import { manageRemovalReadyPackage } from '../out/host/manageRemovalFlow.js';
 test('a matching completed impact scan starts the pending Manage removal', () => {
   const result = manageRemovalReadyPackage('lodash', {
     phase: 'done',
+    packages: ['lodash'],
     assessments: new Map([['lodash', {}]]),
   });
   assert.equal(result, 'lodash');
@@ -23,6 +24,7 @@ test('an errored or unknown scan never starts destructive preflight', () => {
 test('a completed result for another package cannot start a stale pending removal', () => {
   const result = manageRemovalReadyPackage('lodash', {
     phase: 'done',
+    packages: ['axios'],
     assessments: new Map([['axios', {}]]),
   });
   assert.equal(result, null);
@@ -31,7 +33,17 @@ test('a completed result for another package cannot start a stale pending remova
 test('a completed impact result does nothing when no Manage removal is pending', () => {
   const result = manageRemovalReadyPackage(null, {
     phase: 'done',
+    packages: ['lodash'],
     assessments: new Map([['lodash', {}]]),
+  });
+  assert.equal(result, null);
+});
+
+test('a stale superset result cannot authorize a single-package Manage removal', () => {
+  const result = manageRemovalReadyPackage('lodash', {
+    phase: 'done',
+    packages: ['axios', 'lodash'],
+    assessments: new Map([['axios', {}], ['lodash', {}]]),
   });
   assert.equal(result, null);
 });

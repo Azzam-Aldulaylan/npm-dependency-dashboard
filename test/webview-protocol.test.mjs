@@ -304,6 +304,16 @@ test('a well-formed open-advisory request is accepted, with either a numeric or 
     }),
     true
   );
+  assert.equal(
+    isWebviewToHostMessage({
+      type: 'open-advisory',
+      package: 'minimatch',
+      advisoryId: 1096549,
+      path: ['minimatch'],
+      reference: 'CVE-2026-67213',
+    }),
+    true
+  );
 });
 
 test('an open-advisory request never carries a URL — extra keys are rejected outright', () => {
@@ -317,6 +327,21 @@ test('an open-advisory request never carries a URL — extra keys are rejected o
     }),
     false
   );
+});
+
+test('an open-advisory reference is bounded and must be a non-empty string', () => {
+  for (const reference of ['', 42, 'x'.repeat(65)]) {
+    assert.equal(
+      isWebviewToHostMessage({
+        type: 'open-advisory',
+        package: 'minimatch',
+        advisoryId: 1,
+        path: ['minimatch'],
+        reference,
+      }),
+      false
+    );
+  }
 });
 
 test('an open-advisory request missing any required field is rejected', () => {
@@ -1603,19 +1628,23 @@ test('remove-error mirrors upgrade-error\'s shape', () => {
 // ---------------------------------------------- webview -> host / host -> webview: removal-impact preview
 
 test('a well-formed analyze-removal-impact request is accepted', () => {
-  assert.equal(isWebviewToHostMessage({ type: 'analyze-removal-impact', packages: ['left-pad'] }), true);
-  assert.equal(isWebviewToHostMessage({ type: 'analyze-removal-impact', packages: ['left-pad', 'axios'] }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'analyze-removal-impact', requestId: 'impact-1', packages: ['left-pad'] }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'analyze-removal-impact', requestId: 'impact-2', packages: ['axios', 'left-pad'] }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'cancel-removal-impact', requestId: 'impact-2' }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'cancel-removal-impact', requestId: '' }), false);
 });
 
 test('analyze-removal-impact rejects an empty, oversized, duplicate, or forged-shape package list', () => {
   const bad = [
-    { type: 'analyze-removal-impact', packages: [] },
-    { type: 'analyze-removal-impact', packages: Array.from({ length: MAX_BULK_REMOVE_CHANGES + 1 }, (_, i) => `pkg-${i}`) },
-    { type: 'analyze-removal-impact', packages: ['left-pad', 'left-pad'] },
-    { type: 'analyze-removal-impact', packages: ['left-pad', ''] },
-    { type: 'analyze-removal-impact', packages: ['left-pad', 7] },
+    { type: 'analyze-removal-impact', requestId: 'impact-1', packages: [] },
+    { type: 'analyze-removal-impact', requestId: 'impact-1', packages: Array.from({ length: MAX_BULK_REMOVE_CHANGES + 1 }, (_, i) => `pkg-${i}`) },
+    { type: 'analyze-removal-impact', requestId: 'impact-1', packages: ['left-pad', 'left-pad'] },
+    { type: 'analyze-removal-impact', requestId: 'impact-1', packages: ['left-pad', 'axios'] },
+    { type: 'analyze-removal-impact', requestId: 'impact-1', packages: ['left-pad', ''] },
+    { type: 'analyze-removal-impact', requestId: 'impact-1', packages: ['left-pad', 7] },
     { type: 'analyze-removal-impact' },
-    { type: 'analyze-removal-impact', packages: ['left-pad'], extra: 1 },
+    { type: 'analyze-removal-impact', requestId: '', packages: ['left-pad'] },
+    { type: 'analyze-removal-impact', requestId: 'impact-1', packages: ['left-pad'], extra: 1 },
   ];
   for (const value of bad) {
     assert.equal(isWebviewToHostMessage(value), false, `${JSON.stringify(value)} accepted`);
@@ -1633,10 +1662,12 @@ const BLOCKED_ASSESSMENT = {
 };
 
 test('removal-impact-analyzing, removal-impact-result, and removal-impact-error are accepted', () => {
-  assert.equal(isHostToWebviewMessage({ status: 'removal-impact-analyzing', scanned: 4, total: 12 }), true);
+  assert.equal(isHostToWebviewMessage({ status: 'removal-impact-analyzing', requestId: 'impact-1', packages: ['axios', 'left-pad', 'react'], scanned: 4, total: 12 }), true);
   assert.equal(
     isHostToWebviewMessage({
       status: 'removal-impact-result',
+      requestId: 'impact-1',
+      packages: ['axios', 'left-pad', 'react'],
       assessments: [
         { packageName: 'left-pad', assessment: LOW_RISK_ASSESSMENT, usageId: 'abc' },
         { packageName: 'axios', assessment: REVIEW_ASSESSMENT, usageId: 'def' },
@@ -1646,21 +1677,61 @@ test('removal-impact-analyzing, removal-impact-result, and removal-impact-error 
     }),
     true
   );
-  assert.equal(isHostToWebviewMessage({ status: 'removal-impact-error', error: { code: 'X', message: 'Y' } }), true);
+  assert.equal(isHostToWebviewMessage({ status: 'removal-impact-error', requestId: 'impact-1', packages: ['left-pad'], error: { code: 'X', message: 'Y' } }), true);
 });
 
 test('removal-impact-result rejects an unknown assessment status, a malformed evidence kind, or a missing usageId', () => {
   const bad = [
-    { status: 'removal-impact-result', assessments: [{ packageName: 'x', assessment: { status: 'safe', evidence: [] }, usageId: 'a' }], generatedAt: 't' },
+    { status: 'removal-impact-result', requestId: 'impact-1', packages: ['x'], assessments: [{ packageName: 'x', assessment: { status: 'safe', evidence: [] }, usageId: 'a' }], generatedAt: 't' },
     {
       status: 'removal-impact-result',
+      requestId: 'impact-1',
+      packages: ['x'],
       assessments: [{ packageName: 'x', assessment: { status: 'review', evidence: [{ kind: 'shell-command', summary: 's' }] }, usageId: 'a' }],
       generatedAt: 't',
     },
-    { status: 'removal-impact-result', assessments: [{ packageName: 'x', assessment: LOW_RISK_ASSESSMENT }], generatedAt: 't' },
-    { status: 'removal-impact-result', assessments: [{ packageName: 'x', assessment: LOW_RISK_ASSESSMENT, usageId: '' }], generatedAt: 't' },
+    { status: 'removal-impact-result', requestId: 'impact-1', packages: ['x'], assessments: [{ packageName: 'x', assessment: LOW_RISK_ASSESSMENT }], generatedAt: 't' },
+    { status: 'removal-impact-result', requestId: 'impact-1', packages: ['x'], assessments: [{ packageName: 'x', assessment: LOW_RISK_ASSESSMENT, usageId: '' }], generatedAt: 't' },
   ];
   for (const value of bad) {
     assert.equal(isHostToWebviewMessage(value), false, `${JSON.stringify(value)} accepted`);
   }
+});
+
+test('every removal-impact response requires one exact correlated package set', () => {
+  assert.equal(isHostToWebviewMessage({ status: 'removal-impact-analyzing', packages: ['x'], scanned: 0, total: 1 }), false);
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'removal-impact-result',
+      requestId: 'impact-1',
+      packages: ['x', 'y'],
+      assessments: [{ packageName: 'x', assessment: LOW_RISK_ASSESSMENT, usageId: 'a' }],
+      generatedAt: 't',
+    }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'removal-impact-result',
+      requestId: 'impact-1',
+      packages: ['x', 'y'],
+      assessments: [
+        { packageName: 'x', assessment: LOW_RISK_ASSESSMENT, usageId: 'a' },
+        { packageName: 'x', assessment: LOW_RISK_ASSESSMENT, usageId: 'b' },
+      ],
+      generatedAt: 't',
+    }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'removal-impact-result',
+      requestId: 'impact-1',
+      packages: ['x'],
+      assessments: [{ packageName: 'y', assessment: LOW_RISK_ASSESSMENT, usageId: 'a' }],
+      generatedAt: 't',
+    }),
+    false
+  );
+  assert.equal(isHostToWebviewMessage({ status: 'removal-impact-error', requestId: 'impact-1', error: { code: 'X', message: 'Y' } }), false);
 });

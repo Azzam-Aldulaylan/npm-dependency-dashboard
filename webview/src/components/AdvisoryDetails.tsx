@@ -21,7 +21,7 @@ export function AdvisoryDetails({
 }: {
   row: PackageRow;
   searchQuery: string;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[], reference?: string) => void;
 }): ReactElement {
   const contexts = filterDashboardAdvisoryContexts(row, searchQuery);
   return (

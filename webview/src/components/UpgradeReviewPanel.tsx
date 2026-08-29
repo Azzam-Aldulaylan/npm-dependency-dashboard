@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { ReactElement } from 'react';
 
 import type { PackageRow, Severity } from '../../../src/core/types.js';
@@ -250,6 +251,51 @@ function UpgradePreviewCard({ analysis }: { analysis: UpgradeAnalysisPresentatio
   );
 }
 
+/**
+ * This is the evidence-heavy half of a completed review. It does not depend
+ * on the freshness clock, so memoizing it avoids reconciling compatibility
+ * findings, vulnerability paths, and verification rows every minute while
+ * the surrounding freshness/action chrome still updates normally.
+ */
+const UpgradeReviewDetails = memo(function UpgradeReviewDetails({
+  row,
+  analysis,
+  coordinated,
+  onChangeTab,
+  onOpenAdvisory,
+  onOpenUsageReference,
+  onConfigureVerification,
+}: {
+  row: PackageRow;
+  analysis: UpgradeAnalysisPresentation;
+  coordinated: boolean;
+  onChangeTab: (tab: ManageTabId) => void;
+  onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[], reference?: string) => void) | undefined;
+  onOpenUsageReference?: ((usageId: string, referenceIndex: number) => void) | undefined;
+  onConfigureVerification: () => void;
+}): ReactElement {
+  return (
+    <div className="upgrade-tab__details">
+      <UpgradePreviewCard analysis={analysis} />
+      <CompatibilityCheckCard compatibility={analysis.compatibility} projectCompatibility={analysis.projectCompatibility} />
+      <ProjectCompatibilitySection analysis={analysis.projectCompatibility} onOpenUsageReference={onOpenUsageReference} />
+      {analysis.smartPlan !== null && coordinated ? (
+        <CoordinatedUpgradePlanCard
+          requestedChanges={analysis.changes}
+          smartPlan={analysis.smartPlan}
+          compatibility={analysis.compatibility}
+        />
+      ) : analysis.compatibility.status === 'conflict' ? (
+        <CoordinationUnavailableCard row={row} changes={analysis.changes} />
+      ) : (
+        <SimpleUpgradePlanCard row={row} changes={analysis.changes} />
+      )}
+      <SecurityOutcomeCard row={row} security={analysis.security} onChangeTab={onChangeTab} onOpenAdvisory={onOpenAdvisory} />
+      <VerificationStepsCard verification={analysis.verification} onConfigureVerification={onConfigureVerification} />
+    </div>
+  );
+});
+
 function formatUpgradeAnalysisAge(analyzedAt: string, now: number): string {
   const timestamp = Date.parse(analyzedAt);
   if (!Number.isFinite(timestamp)) return 'previously';
@@ -367,7 +413,7 @@ export function UpgradeReviewPanel({
   onConfigureVerification: () => void;
   onRefresh: () => void;
   onChangeTab: (tab: ManageTabId) => void;
-  onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[]) => void) | undefined;
+  onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[], reference?: string) => void) | undefined;
   onOpenUsageReference?: ((usageId: string, referenceIndex: number) => void) | undefined;
 }): ReactElement {
   const targetSelector = row.upgradeTo === null ? null : (
@@ -490,24 +536,15 @@ export function UpgradeReviewPanel({
             onUseSmartPlan={onUseSmartPlan}
           />
         </div>
-        <div className="upgrade-tab__details">
-          <UpgradePreviewCard analysis={analysis} />
-          <CompatibilityCheckCard compatibility={analysis.compatibility} projectCompatibility={analysis.projectCompatibility} />
-          <ProjectCompatibilitySection analysis={analysis.projectCompatibility} onOpenUsageReference={onOpenUsageReference} />
-          {analysis.smartPlan !== null && coordinated ? (
-            <CoordinatedUpgradePlanCard
-              requestedChanges={analysis.changes}
-              smartPlan={analysis.smartPlan}
-              compatibility={analysis.compatibility}
-            />
-          ) : analysis.compatibility.status === 'conflict' ? (
-            <CoordinationUnavailableCard row={row} changes={analysis.changes} />
-          ) : (
-            <SimpleUpgradePlanCard row={row} changes={analysis.changes} />
-          )}
-          <SecurityOutcomeCard row={row} security={analysis.security} onChangeTab={onChangeTab} onOpenAdvisory={onOpenAdvisory} />
-          <VerificationStepsCard verification={analysis.verification} onConfigureVerification={onConfigureVerification} />
-        </div>
+        <UpgradeReviewDetails
+          row={row}
+          analysis={analysis}
+          coordinated={coordinated}
+          onChangeTab={onChangeTab}
+          onOpenAdvisory={onOpenAdvisory}
+          onOpenUsageReference={onOpenUsageReference}
+          onConfigureVerification={onConfigureVerification}
+        />
       </div>
 
       <div className="review-panel__footer">

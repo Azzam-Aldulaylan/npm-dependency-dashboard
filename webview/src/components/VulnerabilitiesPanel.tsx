@@ -13,7 +13,8 @@ import type { ManageVulnerabilityContext } from '../../../src/host/vulnerability
 import { directUpgradeRecommendation } from '../../../src/host/vulnerabilityRecommendation.js';
 import { IconCheck, IconExternalLink, IconInfo, IconRefresh, IconShield } from '../icons.js';
 import { SeverityBadge } from './SeverityBadge.js';
-import { patchedVersionText } from './VulnerabilityCard.js';
+import { patchedVersionText, VulnerabilityIdentifierLinks } from './VulnerabilityCard.js';
+import type { OpenAdvisoryHandler } from './VulnerabilityCard.js';
 
 const SEVERITY_ORDER: readonly Severity[] = ['critical', 'high', 'moderate', 'low', 'info'];
 const SEVERITY_LABEL: Record<Severity, string> = {
@@ -64,7 +65,7 @@ function VulnerabilityDetailCard({
 }: {
   context: ManageVulnerabilityContext;
   rootPackageName: string;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenAdvisory: OpenAdvisoryHandler;
 }): ReactElement {
   const identifiers = vulnerabilityIdentifiers(context.advisory);
   return (
@@ -72,9 +73,11 @@ function VulnerabilityDetailCard({
       <div className="vuln-card__head">
         <SeverityBadge severity={context.advisory.severity} />
         <span className="vuln-card__title">{context.advisory.title}</span>
-        <span className="vuln-card__identifiers" aria-label={`Vulnerability ID: ${identifiers.join(', ')}`}>
-          {identifiers.map((identifier) => <code key={identifier}>{identifier}</code>)}
-        </span>
+        <VulnerabilityIdentifierLinks
+          identifiers={identifiers}
+          className="vuln-card__identifiers"
+          onOpen={(identifier) => onOpenAdvisory(rootPackageName, context.advisory.id, [...context.primaryPath], identifier)}
+        />
         <button
           type="button"
           className="vuln-card__source"
@@ -233,7 +236,7 @@ export function VulnerabilitiesPanel({
   actionsDisabled: boolean;
   updateResolutionAvailable: boolean;
   advisoriesAvailable: boolean;
-  onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[]) => void;
+  onOpenAdvisory: OpenAdvisoryHandler;
   onStartUpgradeReview: (target: string) => void;
   onStartTransitiveCheck: () => void;
 }): ReactElement {

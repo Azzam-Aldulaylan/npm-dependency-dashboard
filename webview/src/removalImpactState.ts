@@ -13,9 +13,16 @@ import type { RemovalAssessment } from '../../src/core/types.js';
  */
 export type RemovalImpactState =
   | { phase: 'idle' }
-  | { phase: 'analyzing'; scanned: number; total: number }
-  | { phase: 'done'; assessments: ReadonlyMap<string, { assessment: RemovalAssessment; usageId: string }>; generatedAt: string }
-  | { phase: 'error'; message: string };
+  | { phase: 'analyzing'; requestId: string; packages: readonly string[]; scanned: number; total: number }
+  | {
+      phase: 'done';
+      requestId: string;
+      /** Exact canonical package set this result analyzed; selection coverage is equality, never subset containment. */
+      packages: readonly string[];
+      assessments: ReadonlyMap<string, { assessment: RemovalAssessment; usageId: string }>;
+      generatedAt: string;
+    }
+  | { phase: 'error'; requestId: string; packages: readonly string[]; message: string };
 
 /** Shared label vocabulary for a RemovalAssessment's status — one source of truth for both ManageDependenciesModal and ManageDependencyModal. */
 export const REMOVAL_IMPACT_LABEL: Record<RemovalAssessment['status'], string> = {

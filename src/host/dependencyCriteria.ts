@@ -12,6 +12,8 @@
 
 import type { DependencyFinding } from '../core/hygiene/types.js';
 import type { PackageRow, Severity } from '../core/types.js';
+import type { DependencyTypeFilter } from './dependencyTypeFilter.js';
+import type { HygieneFilterId } from './hygieneFilter.js';
 import { rowMatchesHygieneFilter } from './hygieneFilter.js';
 import { rowHasUpdate, rowIsMajorUpdate } from './summaryMetrics.js';
 
@@ -32,9 +34,22 @@ export function emptyCriteria(): SelectedCriteria {
   return { health: new Set(), type: new Set(), severity: new Set(), updates: new Set() };
 }
 
+/** Carry the dashboard's visible maintenance scope into the bulk picker. */
+export function criteriaFromDashboardFilters(
+  hygieneFilter: HygieneFilterId,
+  dependencyType: DependencyTypeFilter
+): SelectedCriteria {
+  return {
+    health: hygieneFilter === 'all' ? new Set() : new Set([hygieneFilter]),
+    type: dependencyType === 'all' ? new Set() : new Set([dependencyType]),
+    severity: new Set(),
+    updates: new Set(),
+  };
+}
+
 /** Single source of truth for chip/tag text — both the picker's chips and a matched row's "why matched" tags read from here, so they never drift apart. */
 export const HEALTH_LABELS: Record<HealthCriterion, string> = {
-  'likely-unused': 'Unused',
+  'likely-unused': 'Likely unused',
   'duplicate-version': 'Duplicated',
   deprecated: 'Deprecated',
 };

@@ -113,6 +113,25 @@ test('a truncated scan that already found real evidence is still review — foun
   assert.equal(result.status, 'review');
 });
 
+test('a convention-loaded package with no static references is unknown, not low-risk', () => {
+  const result = assessRemoval({
+    usage: { ...usage([]), conventionUncertainty: true },
+    peerRequirements: [],
+    stillRequiredBy: [],
+  });
+  assert.equal(result.status, 'unknown');
+  assert.match(result.evidence[0].summary, /framework or tooling conventions/);
+});
+
+test('real usage evidence takes priority over convention uncertainty', () => {
+  const result = assessRemoval({
+    usage: { ...usage([ref('config')]), conventionUncertainty: true },
+    peerRequirements: [],
+    stillRequiredBy: [],
+  });
+  assert.equal(result.status, 'review');
+});
+
 test('blocked takes priority even over an incomplete usage scan', () => {
   const result = assessRemoval({
     usage: null,

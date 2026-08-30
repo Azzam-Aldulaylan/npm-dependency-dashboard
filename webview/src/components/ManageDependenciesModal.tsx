@@ -34,7 +34,6 @@ import {
   UPDATE_LABELS,
 } from '../../../src/host/dependencyCriteria.js';
 import {
-  IconAlertTriangle,
   IconBroom,
   IconFilter,
   IconPackage,
@@ -46,6 +45,7 @@ import {
 import { REMOVAL_IMPACT_LABEL } from '../removalImpactState.js';
 import type { RemovalImpactState } from '../removalImpactState.js';
 import { DirectionalButton } from './DirectionalButton.js';
+import { StatusBanner } from './StatusBanner.js';
 
 export interface BulkUpgradeCandidate {
   packageName: string;
@@ -119,7 +119,6 @@ function CriteriaGroup<T extends string>({
   counts,
   selected,
   onToggle,
-  headerAction,
 }: {
   icon: ReactElement;
   label: string;
@@ -129,7 +128,6 @@ function CriteriaGroup<T extends string>({
   counts: Record<T, number>;
   selected: ReadonlySet<T>;
   onToggle: (criterion: T) => void;
-  headerAction?: ReactElement;
 }): ReactElement {
   return (
     <div className="criteria-group">
@@ -138,7 +136,6 @@ function CriteriaGroup<T extends string>({
           {icon}
           {label}
         </span>
-        {headerAction}
       </div>
       <div className="criteria-chips" role="group" aria-label={`${label} criteria`}>
         {ids.map((criterion) => (
@@ -439,24 +436,38 @@ export function ManageDependenciesModal({
           </button>
         </header>
 
-        <ol className="bulk-modal__steps" id="manage-dependencies-step">
-          <li
-            className="bulk-modal__step"
-            data-active={step === 'select' ? 'true' : undefined}
-            aria-current={step === 'select' ? 'step' : undefined}
-          >
-            <span className="bulk-modal__step-num">1</span>
-            Select criteria
-          </li>
-          <li
-            className="bulk-modal__step"
-            data-active={step === 'review' ? 'true' : undefined}
-            aria-current={step === 'review' ? 'step' : undefined}
-          >
-            <span className="bulk-modal__step-num">2</span>
-            Review dependencies
-          </li>
-        </ol>
+        <div className="bulk-modal__step-bar">
+          <ol className="bulk-modal__steps" id="manage-dependencies-step">
+            <li
+              className="bulk-modal__step"
+              data-active={step === 'select' ? 'true' : undefined}
+              aria-current={step === 'select' ? 'step' : undefined}
+            >
+              <span className="bulk-modal__step-num">1</span>
+              Select criteria
+            </li>
+            <li
+              className="bulk-modal__step"
+              data-active={step === 'review' ? 'true' : undefined}
+              aria-current={step === 'review' ? 'step' : undefined}
+            >
+              <span className="bulk-modal__step-num">2</span>
+              Review dependencies
+            </li>
+          </ol>
+          {step === 'select' ? (
+            <button
+              type="button"
+              className="button button--secondary button--small bulk-modal__recheck"
+              onClick={onRecheckHealth}
+              disabled={cleanupBusy}
+              aria-busy={cleanupBusy}
+            >
+              <IconRefresh className={cleanupBusy ? 'banner__icon--spin' : undefined} />
+              {cleanupBusy ? 'Checking health…' : 'Re-check health'}
+            </button>
+          ) : null}
+        </div>
 
         {step === 'select' ? (
           <div className="modal__body">
@@ -470,17 +481,6 @@ export function ManageDependenciesModal({
                 counts={counts.health}
                 selected={selected.health}
                 onToggle={toggleHealth}
-                headerAction={
-                  <button
-                    type="button"
-                    className="button button--subtle criteria-group__recheck"
-                    onClick={onRecheckHealth}
-                    disabled={cleanupBusy}
-                  >
-                    <IconRefresh className={cleanupBusy ? 'banner__icon--spin' : undefined} />
-                    {cleanupBusy ? 'Checking…' : 'Re-check'}
-                  </button>
-                }
               />
 
               <CriteriaGroup
@@ -580,23 +580,30 @@ export function ManageDependenciesModal({
             ) : null}
 
             {removalImpact.phase === 'analyzing' ? (
-              <div className="banner banner--info review-controls__impact-progress" role="status" aria-live="polite">
-                <IconRefresh className="banner__icon banner__icon--spin" />
-                <p className="banner__text">
-                  Analyzing removal impact
-                  {removalImpact.total > 0 ? ` — ${removalImpact.scanned} of ${removalImpact.total} files checked` : '…'}
-                </p>
-                <button type="button" className="button button--secondary" onClick={onCancelRemovalImpact}>
-                  Cancel
-                </button>
-              </div>
+              <StatusBanner
+                tone="info"
+                className="review-controls__impact-progress"
+                live="polite"
+                icon={<IconRefresh className="banner__icon--spin" />}
+                action={{ label: 'Cancel', onClick: onCancelRemovalImpact }}
+              >
+                Analyzing removal impact
+                {removalImpact.total > 0 ? ` — ${removalImpact.scanned} of ${removalImpact.total} files checked` : '…'}
+              </StatusBanner>
             ) : null}
 
             {removalImpact.phase === 'error' ? (
-              <div className="banner banner--error" role="alert">
-                <IconAlertTriangle className="banner__icon" />
-                <p className="banner__text">Couldn't analyze removal impact: {removalImpact.message}</p>
-              </div>
+              <StatusBanner
+                tone="error"
+                action={{
+                  label: 'Try again',
+                  onClick: () => onAnalyzeRemovalImpact(reviewRows.map((row) => row.name)),
+                  disabled: reviewRows.length === 0,
+                  icon: <IconRefresh />,
+                }}
+              >
+                Couldn't analyze removal impact: {removalImpact.message}
+              </StatusBanner>
             ) : null}
 
             {removalImpactCounts !== null ? (

@@ -10,7 +10,7 @@ import { compatibilityOutcomeDisplay, upgradeSafetyHeadline } from '../../../src
 import { classifyUpdate } from '../../../src/host/updateClassification.js';
 import { severityDisplay } from '../../../src/host/severityDisplay.js';
 import { summarizeUpgradeSecurity } from '../../../src/host/upgradeSecuritySummary.js';
-import { IconAlertTriangle, IconFile, IconRefresh, IconTrendUp } from '../icons.js';
+import { IconFile, IconRefresh, IconTrendUp } from '../icons.js';
 import { DirectionalButton } from './DirectionalButton.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
@@ -24,6 +24,7 @@ import {
 } from './UpgradeAnalysisCards.js';
 import { UpgradeAnalysisSections } from './UpgradeAnalysisSections.js';
 import { ProjectCompatibilitySection } from './ProjectCompatibilitySection.js';
+import { StatusBanner } from './StatusBanner.js';
 import { UpgradeTargetSelector } from './UpgradeTargetSelector.js';
 import type { UpgradeTargetLoadState } from './UpgradeTargetSelector.js';
 import type { UsageRequestState } from './UsageReferencesPanel.js';
@@ -430,10 +431,18 @@ export function UpgradeReviewPanel({
     <div className="upgrade-review-stack">
       {targetSelector}
       {error !== null ? (
-        <div className="banner banner--error upgrade-review__error" role="alert">
-          <IconAlertTriangle className="banner__icon" />
-          <p className="banner__text">{error}</p>
-        </div>
+        <StatusBanner
+          tone="error"
+          className="upgrade-review__error"
+          action={{
+            label: 'Refresh data',
+            onClick: onRefresh,
+            disabled: busy || disabled,
+            icon: <IconRefresh />,
+          }}
+        >
+          {error}
+        </StatusBanner>
       ) : null}
       {content}
     </div>

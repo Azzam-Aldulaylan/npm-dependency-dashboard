@@ -25,6 +25,12 @@ export interface SummaryMetrics {
   vulnerable: number;
   /** Distinct npm advisory records + flagged package pairs reachable from the direct dependency rows. */
   advisoryFindings: number;
+  criticalAdvisoryFindings: number;
+  highAdvisoryFindings: number;
+  moderateAdvisoryFindings: number;
+  lowAdvisoryFindings: number;
+  infoAdvisoryFindings: number;
+  /** Direct dependencies grouped by their own worst reachable severity. */
   criticalVulnerabilities: number;
   highVulnerabilities: number;
   moderateVulnerabilities: number;
@@ -106,6 +112,13 @@ export function summaryMetrics(rows: readonly PackageRow[]): SummaryMetrics {
   let needsAttention = 0;
   let deprecatedCount = 0;
   const advisoryFindingKeys = new Set<string>();
+  const advisoryFindingCounts: Record<Severity, number> = {
+    critical: 0,
+    high: 0,
+    moderate: 0,
+    low: 0,
+    info: 0,
+  };
 
   for (const row of rows) {
     if (rowHasUpdate(row)) {
@@ -119,7 +132,11 @@ export function summaryMetrics(rows: readonly PackageRow[]): SummaryMetrics {
     if (rowHasVulnerability(row)) vulnerable += 1;
     for (const attributed of row.advisories) {
       const advisory = attributed.advisory;
-      advisoryFindingKeys.add(`${typeof advisory.id}:${String(advisory.id)}\u0000${attributed.flaggedPackage}`);
+      const findingKey = `${typeof advisory.id}:${String(advisory.id)}\u0000${attributed.flaggedPackage}`;
+      if (!advisoryFindingKeys.has(findingKey)) {
+        advisoryFindingKeys.add(findingKey);
+        advisoryFindingCounts[advisory.severity] += 1;
+      }
     }
     if (rowNeedsAttention(row)) needsAttention += 1;
     if (row.deprecated !== undefined) deprecatedCount += 1;
@@ -134,6 +151,11 @@ export function summaryMetrics(rows: readonly PackageRow[]): SummaryMetrics {
     otherUpdates,
     vulnerable,
     advisoryFindings: advisoryFindingKeys.size,
+    criticalAdvisoryFindings: advisoryFindingCounts.critical,
+    highAdvisoryFindings: advisoryFindingCounts.high,
+    moderateAdvisoryFindings: advisoryFindingCounts.moderate,
+    lowAdvisoryFindings: advisoryFindingCounts.low,
+    infoAdvisoryFindings: advisoryFindingCounts.info,
     criticalVulnerabilities: countSeverity(rows, 'critical'),
     highVulnerabilities: countSeverity(rows, 'high'),
     moderateVulnerabilities: countSeverity(rows, 'moderate'),
@@ -187,23 +209,41 @@ const SEVERITY_LABELS: Record<Severity, string> = {
   info: 'info',
 };
 
-/** Every nonzero severity category, highest first, so the breakdown accounts for the card's complete total. */
+/**
+ * Finding severities account for the complete advisory-finding total. The
+ * headline remains the number of affected direct dependencies because that
+ * is what selecting the card filters in the table.
+ */
 export function vulnerabilitiesCardSubtitle(metrics: SummaryMetrics): string {
   if (metrics.vulnerable === 0) return 'No known vulnerabilities';
-  const counts: [keyof typeof SEVERITY_LABELS, number][] = [
+  const findingCounts: [keyof typeof SEVERITY_LABELS, number][] = [
+    ['critical', metrics.criticalAdvisoryFindings],
+    ['high', metrics.highAdvisoryFindings],
+    ['moderate', metrics.moderateAdvisoryFindings],
+    ['low', metrics.lowAdvisoryFindings],
+    ['info', metrics.infoAdvisoryFindings],
+  ];
+  const findingBreakdown = findingCounts
+    .filter(([, count]) => count > 0)
+    .map(([severity, count]) => `${count} ${SEVERITY_LABELS[severity]}`)
+    .join(' · ');
+  if (metrics.advisoryFindings > 0) {
+    return `${metrics.advisoryFindings} advisory finding${metrics.advisoryFindings === 1 ? '' : 's'}\n${findingBreakdown}`;
+  }
+
+  // Defensive fallback for a partially-constructed PackageRow carrying a
+  // worst severity without its attributed advisory records.
+  const rootCounts: [keyof typeof SEVERITY_LABELS, number][] = [
     ['critical', metrics.criticalVulnerabilities],
     ['high', metrics.highVulnerabilities],
     ['moderate', metrics.moderateVulnerabilities],
     ['low', metrics.lowVulnerabilities],
     ['info', metrics.infoVulnerabilities],
   ];
-  const rootBreakdown = counts
+  return `Highest severity: ${rootCounts
     .filter(([, count]) => count > 0)
     .map(([severity, count]) => `${count} ${SEVERITY_LABELS[severity]}`)
-    .join(' · ');
-  return metrics.advisoryFindings === 0
-    ? rootBreakdown
-    : `${metrics.advisoryFindings} advisory finding${metrics.advisoryFindings === 1 ? '' : 's'} · ${rootBreakdown}`;
+    .join(' · ')}`;
 }
 
 export function vulnerabilitiesCardValue(

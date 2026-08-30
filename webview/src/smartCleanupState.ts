@@ -8,7 +8,7 @@ export type SmartCleanupConfidence = 'safe' | 'review' | 'blocked' | 'unknown';
 export type SmartCleanupAnalysisStepStatus = 'waiting' | 'running' | 'complete' | 'unavailable';
 
 export interface SmartCleanupAnalysisStep {
-  id: 'inventory' | 'usage' | 'removal-safety' | 'deprecation' | 'duplicates' | 'security';
+  id: 'usage' | 'removal-safety' | 'deprecation' | 'duplicates';
   label: string;
   status: SmartCleanupAnalysisStepStatus;
   detail?: string;

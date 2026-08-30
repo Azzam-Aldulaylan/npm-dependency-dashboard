@@ -138,19 +138,20 @@ button {
 }
 
 .banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
   gap: 0.6rem;
   margin: 0 0 1rem;
   padding: 0.6rem 0.8rem;
-  border-left: 3px solid var(--vscode-editorWarning-foreground);
-  border-radius: 2px;
+  border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-editorWarning-foreground));
+  border-radius: 5px;
   background: var(--vscode-inputValidation-warningBackground, transparent);
+  text-align: start;
 }
 
 .banner--error {
-  border-left-color: var(--vscode-editorError-foreground);
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-editorError-foreground));
   background: var(--vscode-inputValidation-errorBackground, transparent);
 }
 
@@ -160,9 +161,16 @@ button {
 }
 
 .banner__text {
-  flex: 1;
+  min-width: 0;
   margin: 0;
-  text-align: left;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+  text-align: start;
+}
+
+.banner__action {
+  align-self: center;
+  white-space: nowrap;
 }
 
 /* ------------------------------------------------------------------ buttons */
@@ -297,10 +305,10 @@ button {
   --card-accent: var(--accent-updates);
 }
 .summary-card[data-card='vulnerabilities'] {
-  --card-accent: var(--accent-vulnerabilities);
+  --card-accent: var(--accent-attention);
 }
 .summary-card[data-card='attention'] {
-  --card-accent: var(--accent-attention);
+  --card-accent: var(--accent-vulnerabilities);
 }
 
 .summary-card:hover {
@@ -360,13 +368,13 @@ button {
   white-space: nowrap;
 }
 
-/* The vulnerability card accounts for every nonzero severity tier; let that
- * complete breakdown wrap instead of truncating the lower severities. */
+/* Keep the finding total and its severity breakdown on separate lines, then
+ * allow either line to wrap instead of truncating lower severities. */
 .summary-card[data-card='vulnerabilities'] .summary-card__subtitle {
   overflow: visible;
   line-height: 1.3;
   text-overflow: clip;
-  white-space: normal;
+  white-space: pre-line;
 }
 
 /* ------------------------------------------------------------------ toolbar */
@@ -2194,17 +2202,19 @@ button {
 /*
  * The compact "VULNERABILITIES" summary — severity totals plus the one or
  * two most urgent advisories, never the full VulnerabilityCard list (see
- * ManageDependencyModal.tsx's own doc on why). The left rail's one section
- * allowed to carry the same error-toned accent as the Remove action card:
- * both are naming the same underlying risk.
+ * ManageDependencyModal.tsx's own doc on why). Its restrained error-toned
+ * outline relates it to the Remove action without turning it into an alert.
  */
 .manage-vulnerabilities {
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
   padding: 0.7rem 0.75rem;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
-  border-left: 3px solid var(--vscode-editorError-foreground);
+  border: 1px solid color-mix(
+    in srgb,
+    var(--vscode-editorError-foreground) 45%,
+    var(--vscode-panel-border, rgba(128, 128, 128, 0.25))
+  );
   border-radius: 6px;
 }
 
@@ -2317,7 +2327,7 @@ button {
  * A raised widget surface — the same elevated background the removal-stat
  * boxes below use — so each card reads as a distinct clickable panel against
  * the modal's own (darker) background, not just an outline. Semantic color
- * (upgrade/remove/transitive) still lives in the left border, the icon
+ * (upgrade/remove/transitive) lives in the restrained outline, the icon
  * circle, and any badge/CTA inside — never by tinting toward the accent
  * hue itself, so a Remove card never reads as an alarming block of red.
  */
@@ -2326,8 +2336,11 @@ button {
   flex-direction: column;
   gap: 0.6rem;
   padding: 0.85rem 0.9rem;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
-  border-left: 3px solid var(--manage-card-accent, var(--vscode-panel-border));
+  border: 1px solid color-mix(
+    in srgb,
+    var(--manage-card-accent, var(--vscode-panel-border, rgba(128, 128, 128, 0.25))) 45%,
+    var(--vscode-panel-border, rgba(128, 128, 128, 0.25))
+  );
   border-radius: 6px;
   background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
 }
@@ -4102,16 +4115,30 @@ button {
  * step's own list item gives screen readers the same "step 2 of 2" context
  * a sighted user gets from the accent color.
  */
+.bulk-modal__step-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.7rem 1.1rem;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+}
+
 .bulk-modal__steps {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   margin: 0;
-  padding: 0.7rem 1.1rem;
-  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  padding: 0;
   list-style: none;
   color: var(--vscode-descriptionForeground);
   font-size: 0.78rem;
+}
+
+.bulk-modal__recheck {
+  margin-inline-start: auto;
+  white-space: nowrap;
 }
 
 .bulk-modal__step {
@@ -4189,11 +4216,6 @@ button {
 .criteria-group__icon {
   flex-shrink: 0;
   color: var(--vscode-descriptionForeground);
-}
-
-.criteria-group__recheck {
-  padding: 0.2rem 0.6rem;
-  font-size: 0.78rem;
 }
 
 .criteria-chips {
@@ -4705,22 +4727,26 @@ button {
 }
 
 .project-compat__group {
+  --project-compat-group-accent: var(--vscode-descriptionForeground);
   overflow: hidden;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
-  border-left: 2px solid var(--vscode-descriptionForeground);
+  border: 1px solid color-mix(
+    in srgb,
+    var(--project-compat-group-accent) 45%,
+    var(--vscode-panel-border, rgba(128, 128, 128, 0.25))
+  );
   border-radius: 5px;
 }
 
 .project-compat__group.project-compat__confidence--confirmed {
-  border-left-color: var(--vscode-editorError-foreground);
+  --project-compat-group-accent: var(--vscode-editorError-foreground);
 }
 
 .project-compat__group.project-compat__confidence--likely {
-  border-left-color: var(--vscode-editorWarning-foreground);
+  --project-compat-group-accent: var(--vscode-editorWarning-foreground);
 }
 
 .project-compat__group.project-compat__confidence--review {
-  border-left-color: var(--vscode-editorInfo-foreground);
+  --project-compat-group-accent: var(--vscode-editorInfo-foreground);
 }
 
 .project-compat__group > summary {
@@ -5394,8 +5420,11 @@ button {
   gap: 0.85rem 1.25rem;
   align-items: center;
   padding: 0.85rem 1rem;
-  border: 1px solid var(--vscode-panel-border);
-  border-left: 3px solid var(--vscode-focusBorder);
+  border: 1px solid color-mix(
+    in srgb,
+    var(--vscode-focusBorder) 50%,
+    var(--vscode-panel-border, rgba(128, 128, 128, 0.25))
+  );
   border-radius: 4px;
   background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
 }
@@ -5777,8 +5806,19 @@ button {
 }
 
 .banner--info {
-  border-left-color: var(--vscode-editorInfo-foreground, var(--vscode-focusBorder));
+  border-color: var(--vscode-inputValidation-infoBorder, var(--vscode-editorInfo-foreground, var(--vscode-focusBorder)));
   background: var(--vscode-inputValidation-infoBackground, transparent);
+}
+
+@media (max-width: 34rem) {
+  .banner {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .banner__action {
+    grid-column: 2;
+    justify-self: start;
+  }
 }
 
 .banner__icon--spin {
@@ -5868,7 +5908,6 @@ button {
   font-size: 0.86em;
 }
 
-.smart-cleanup-notice,
 .smart-cleanup-restore-note {
   display: flex;
   align-items: flex-start;
@@ -5880,13 +5919,11 @@ button {
   background: var(--vscode-inputValidation-warningBackground, transparent);
 }
 
-.smart-cleanup-notice > svg,
 .smart-cleanup-restore-note > svg {
   flex-shrink: 0;
   margin-top: 0.12rem;
 }
 
-.smart-cleanup-notice p,
 .smart-cleanup-restore-note p {
   margin: 0;
   line-height: 1.45;

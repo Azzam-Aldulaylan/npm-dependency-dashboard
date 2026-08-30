@@ -23,6 +23,16 @@ test('step transitions move focus and impact completion has a polite live announ
   assert.match(component, /Impact analysis complete\./);
 });
 
+test('health re-check lives beside the workflow steps and exposes immediate busy feedback', () => {
+  assert.match(component, /className="bulk-modal__step-bar"/);
+  assert.match(component, /className="button button--secondary button--small bulk-modal__recheck"/);
+  assert.match(component, /cleanupBusy \? 'Checking health…' : 'Re-check health'/);
+  assert.match(component, /aria-busy=\{cleanupBusy\}/);
+  assert.doesNotMatch(component, /criteria-group__recheck|headerAction/);
+  assert.match(app, /if \(cleanupProgressActiveRef\.current\) return;/);
+  assert.match(app, /setCleanupState\(\{ phase: 'analyzing', scanned: 0, total: 0 \}\)/);
+});
+
 test('the capped batch is used for review rendering and all submitted package lists', () => {
   assert.match(component, /\{batchRows\.map\(\(row\) => \{/);
   assert.match(component, /onAnalyzeRemovalImpact\(reviewRows\.map\(\(row\) => row\.name\)\)/);

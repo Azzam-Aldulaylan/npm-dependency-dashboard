@@ -66,10 +66,11 @@ import { PackageTable } from './components/PackageTable.js';
 import { RemoveAnalysisModal } from './components/RemoveAnalysisModal.js';
 import { SummaryCards } from './components/SummaryCards.js';
 import { SmartCleanupWorkspace } from './components/SmartCleanupWorkspace.js';
+import { StatusBanner } from './components/StatusBanner.js';
 import { UpgradeAnalysisModal } from './components/UpgradeAnalysisModal.js';
 import type { UpgradeTargetLoadState } from './components/UpgradeTargetSelector.js';
 import type { UsageRequestState } from './components/UsageReferencesPanel.js';
-import { IconAlertTriangle, IconBroom, IconListChecks, IconRefresh } from './icons.js';
+import { IconBroom, IconListChecks, IconRefresh } from './icons.js';
 import type { RemovalImpactState } from './removalImpactState.js';
 import { buildSmartCleanupPlan } from './smartCleanupPlanAdapter.js';
 import {
@@ -1515,9 +1516,13 @@ export function App(): ReactElement {
   }, []);
 
   const requestBulkAnalyzeCleanup = useCallback(() => {
+    if (cleanupProgressActiveRef.current) return;
     cleanupProgressActiveRef.current = true;
     cleanupShouldSelectFilter.current = true;
     setCleanupError(null);
+    // Give the control immediate feedback instead of waiting for the host's
+    // first progress event to make the re-check visibly busy.
+    setCleanupState({ phase: 'analyzing', scanned: 0, total: 0 });
     vscode.postMessage({ type: 'analyze-cleanup' });
   }, []);
 
@@ -1718,34 +1723,34 @@ export function App(): ReactElement {
     setSmartCleanupMetadata({ phase: 'analyzing', findings: [], unavailablePackages: [], capability: null });
     setSmartCleanupDuplicates({ phase: 'analyzing', assessments: [], action: null });
     setRemovalImpact({ phase: 'idle' });
+    const reusableUsage = cleanupState.phase === 'done' && Date.parse(cleanupState.cacheExpiresAt) > Date.now();
+    const reusableUnusedCount = reusableUsage
+      ? cleanupFindings.filter((finding) => finding.kind === 'likely-unused').length
+      : 0;
     dispatchSmartCleanup({
       type: 'analysis-started',
       projectName: data.project.label,
       requestId,
       steps: [
-        { id: 'inventory', label: 'Reading dependency inventory', status: 'complete' },
-        { id: 'usage', label: 'Checking project usage', status: 'running' },
-        { id: 'removal-safety', label: 'Checking removal safety', status: 'waiting' },
-        { id: 'deprecation', label: 'Checking installed-version deprecations', status: 'running' },
-        { id: 'duplicates', label: 'Simulating safe duplicate consolidation', status: 'running' },
+        { id: 'usage', label: 'Checking project usage', status: reusableUsage ? 'complete' : 'running' },
         {
-          id: 'security',
-          label: 'Preparing security impact',
-          status: data.availability.advisories === 'complete' ? 'complete' : 'unavailable',
+          id: 'removal-safety',
+          label: 'Checking removal safety',
+          status: reusableUsage ? (reusableUnusedCount === 0 ? 'complete' : 'running') : 'waiting',
         },
+        { id: 'duplicates', label: 'Simulating safe duplicate consolidation', status: 'running' },
+        { id: 'deprecation', label: 'Checking installed-version deprecations', status: 'running' },
       ],
     });
     cleanupShouldSelectFilter.current = false;
     setCleanupError(null);
-    const reusableUsage =
-      cleanupState.phase === 'done' && Date.parse(cleanupState.cacheExpiresAt) > Date.now();
     if (!reusableUsage) {
       cleanupProgressActiveRef.current = true;
       vscode.postMessage({ type: 'analyze-cleanup' });
     }
     vscode.postMessage({ type: 'analyze-smart-cleanup-metadata', requestId });
     vscode.postMessage({ type: 'analyze-smart-cleanup-duplicates', requestId });
-  }, [cleanupState, data, smartCleanupState]);
+  }, [cleanupFindings, cleanupState, data, smartCleanupState]);
 
   const closeSmartCleanup = useCallback(() => {
     if (smartCleanupState.phase === 'analyzing') {
@@ -1902,7 +1907,6 @@ export function App(): ReactElement {
       type: 'analysis-progress',
       requestId: smartCleanupState.requestId ?? '',
       steps: [
-        { id: 'inventory', label: 'Reading dependency inventory', status: 'complete' },
         { id: 'usage', label: 'Checking project usage', status: usageDone ? 'complete' : 'running' },
         {
           id: 'removal-safety',
@@ -1927,11 +1931,6 @@ export function App(): ReactElement {
               ? 'unavailable'
               : 'running',
         },
-        {
-          id: 'security',
-          label: 'Preparing security impact',
-          status: data?.availability.advisories === 'complete' ? 'complete' : 'unavailable',
-        },
       ],
     });
   }, [
@@ -1943,7 +1942,6 @@ export function App(): ReactElement {
     smartCleanupOpen,
     smartCleanupState.phase,
     smartCleanupState.requestId,
-    data?.availability.advisories,
   ]);
 
   const prepareSmartCleanup = useCallback((actionIds: readonly string[]) => {
@@ -2081,75 +2079,59 @@ export function App(): ReactElement {
       ) : null}
 
       {message !== undefined && message.status === 'fatal-error' ? (
-        <div className="banner banner--error" role="alert">
-          <IconAlertTriangle className="banner__icon" />
-          <p className="banner__text">{message.error.message}</p>
-          <button className="button" type="button" onClick={refresh}>
-            Retry
-          </button>
-        </div>
+        <StatusBanner tone="error" action={{ label: 'Retry', onClick: refresh, icon: <IconRefresh /> }}>
+          {message.error.message}
+        </StatusBanner>
       ) : null}
 
       {/* upgradeError is only ever set for a user-visible code (see
           upgradeErrorIsUserVisible) — CANCELLED and UPGRADE_IN_PROGRESS never
           reach this state at all, so there is nothing to filter here. */}
       {upgradeError !== null ? (
-        <div className="banner banner--error" role="alert">
-          <IconAlertTriangle className="banner__icon" />
-          <p className="banner__text">
-            Couldn't upgrade {upgradeError.package}: {upgradeError.message}
-          </p>
-          <button className="button button--secondary" type="button" onClick={refresh} disabled={actionsDisabled}>
-            Refresh
-          </button>
-        </div>
+        <StatusBanner
+          tone="error"
+          action={{ label: 'Refresh', onClick: refresh, disabled: actionsDisabled, icon: <IconRefresh /> }}
+        >
+          Couldn't upgrade {upgradeError.package}: {upgradeError.message}
+        </StatusBanner>
       ) : null}
 
       {removeError !== null && removeOrigin !== 'manage-dependency' ? (
-        <div className="banner banner--error" role="alert">
-          <IconAlertTriangle className="banner__icon" />
-          <p className="banner__text">
-            Couldn't remove {removeError.package}: {removeError.message}
-          </p>
-          <button className="button button--secondary" type="button" onClick={refresh} disabled={actionsDisabled}>
-            Refresh
-          </button>
-        </div>
+        <StatusBanner
+          tone="error"
+          action={{ label: 'Refresh', onClick: refresh, disabled: actionsDisabled, icon: <IconRefresh /> }}
+        >
+          Couldn't remove {removeError.package}: {removeError.message}
+        </StatusBanner>
       ) : null}
 
       {remediationError !== null ? (
-        <div className="banner banner--error" role="alert">
-          <IconAlertTriangle className="banner__icon" />
-          <p className="banner__text">
-            Couldn't analyze remediation for {remediationError.package}: {remediationError.message}
-          </p>
-          <button className="button button--secondary" type="button" onClick={refresh} disabled={actionsDisabled}>
-            Refresh
-          </button>
-        </div>
+        <StatusBanner
+          tone="error"
+          action={{ label: 'Refresh', onClick: refresh, disabled: actionsDisabled, icon: <IconRefresh /> }}
+        >
+          Couldn't analyze remediation for {remediationError.package}: {remediationError.message}
+        </StatusBanner>
       ) : null}
 
       {cleanupError !== null ? (
-        <div className="banner banner--error" role="alert">
-          <IconAlertTriangle className="banner__icon" />
-          <p className="banner__text">Couldn't analyze dependency usage: {cleanupError}</p>
-          <button className="button button--secondary" type="button" onClick={refresh} disabled={actionsDisabled}>
-            Refresh
-          </button>
-        </div>
+        <StatusBanner
+          tone="error"
+          action={{ label: 'Refresh', onClick: refresh, disabled: actionsDisabled, icon: <IconRefresh /> }}
+        >
+          Couldn't analyze dependency usage: {cleanupError}
+        </StatusBanner>
       ) : null}
 
       {cleanupState.phase === 'analyzing' ? (
-        <div className="banner banner--info">
-          <IconRefresh className="banner__icon banner__icon--spin" />
-          <p className="banner__text">
-            Analyzing dependency usage
-            {cleanupState.total > 0 ? ` — ${cleanupState.scanned} of ${cleanupState.total} files checked` : '…'}
-          </p>
-          <button className="button button--secondary" type="button" onClick={requestCancelCleanup}>
-            Cancel
-          </button>
-        </div>
+        <StatusBanner
+          tone="info"
+          icon={<IconRefresh className="banner__icon--spin" />}
+          action={{ label: 'Cancel', onClick: requestCancelCleanup }}
+        >
+          Analyzing dependency usage
+          {cleanupState.total > 0 ? ` — ${cleanupState.scanned} of ${cleanupState.total} files checked` : '…'}
+        </StatusBanner>
       ) : null}
 
       {message !== undefined && 'data' in message ? (
@@ -2486,10 +2468,12 @@ function Dashboard({
       {/* A degraded slice of the data still renders the table — hiding every
           column because one is missing is worse than showing what we have. */}
       {degraded === null ? null : (
-        <p className="banner banner--warning">
-          <IconAlertTriangle className="banner__icon" />
+        <StatusBanner
+          tone="warning"
+          action={{ label: 'Refresh', onClick: onRefresh, disabled: actionsDisabled, icon: <IconRefresh /> }}
+        >
           Showing partial results: {degraded}.
-        </p>
+        </StatusBanner>
       )}
 
       {status === 'empty' ? (

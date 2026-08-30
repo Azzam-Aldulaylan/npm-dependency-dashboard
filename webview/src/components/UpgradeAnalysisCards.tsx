@@ -16,6 +16,7 @@ import {
   remainingVulnerabilityPatchedVersionLabel,
 } from '../../../src/host/upgradeReviewUiState.js';
 import { IconAlertTriangle, IconCheck, IconExternalLink, IconGear, IconHelpCircle, IconListChecks, IconRoute, IconShield } from '../icons.js';
+import { DirectionalButton } from './DirectionalButton.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { overallStatusDetail } from './UpgradeAnalysisModal.js';
 import { SeverityBadge } from './SeverityBadge.js';
@@ -306,9 +307,9 @@ export function SecurityOutcomeCard({
           <IconShield className="analysis-card__title-icon" />
           Security outcome
         </h3>
-        <button type="button" className="usage-show-all" onClick={() => onChangeTab('vulnerabilities')}>
-          View vulnerabilities →
-        </button>
+        <DirectionalButton direction="forward" className="usage-show-all" onClick={() => onChangeTab('vulnerabilities')}>
+          View vulnerabilities
+        </DirectionalButton>
       </div>
       <p className="usage-card__subtitle">{subtitle}</p>
       <div className="security-outcome">
@@ -431,7 +432,9 @@ export function SecurityOutcomeCard({
                         <SeverityBadge severity={entry.advisory.severity} />
                         <strong>{entry.advisory.title}</strong>
                         {onOpenAdvisory === undefined ? (
-                          <code className="security-remaining__advisory-id">{String(entry.advisory.id)}</code>
+                          vulnerabilityIdentifiers(entry.advisory).map((identifier) => (
+                            <code className="security-remaining__advisory-id" key={identifier}>{identifier}</code>
+                          ))
                         ) : (
                           <VulnerabilityIdentifierLinks
                             identifiers={vulnerabilityIdentifiers(entry.advisory)}

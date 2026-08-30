@@ -127,6 +127,14 @@ export function IconChevronRight(props: IconProps): ReactElement {
   );
 }
 
+export function IconChevronLeft(props: IconProps): ReactElement {
+  return (
+    <Svg {...props}>
+      <path d="M10 3.5 5.5 8 10 12.5" />
+    </Svg>
+  );
+}
+
 export function IconFolder(props: IconProps): ReactElement {
   return (
     <Svg {...props}>

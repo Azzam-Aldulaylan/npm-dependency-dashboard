@@ -84,13 +84,13 @@ function fixture() {
   const controller = {
     root: '/workspace',
     upgradeSource: {
-      manifestText: JSON.stringify({ name: 'fixture', dependencies: { react: '^18.0.0' } }),
+      manifestText: JSON.stringify({ name: 'fixture', dependencies: { lodash: '^4.0.0', react: '^18.0.0' } }),
       lockfileText: null,
       lockfilePath: null,
       packageManager: 'npm',
       importerId: '.',
     },
-    lastResultRows: () => [{ name: 'react' }],
+    lastResultRows: () => [{ name: 'lodash' }, { name: 'react' }],
   };
   const coordinator = new UsageAnalysisCoordinator({
     sink: { postMessage: (message) => messages.push(message) },
@@ -146,6 +146,27 @@ test('an explicit cleanup pass satisfies the project-wide background reuse gate'
   assert.equal(findFilesCalls, 2);
   await coordinator.requestBackgroundUsageRefresh();
   assert.equal(findFilesCalls, 2, 'the same project does not rescan before its one-hour reuse window expires');
+
+  coordinator.dispose();
+});
+
+test('Smart Cleanup evidence authorizes only a canonical selectable subset and is revoked by source changes', async () => {
+  const { coordinator } = fixture();
+
+  await coordinator.handleAnalyzeRemovalImpact({
+    requestId: 'impact-selection',
+    packages: ['lodash', 'react'],
+  });
+
+  const subset = coordinator.smartCleanupRemovalEvidence('impact-selection', ['react']);
+  assert.ok(subset, 'a deliberate subset of the reviewed low-risk packages remains executable');
+  assert.equal(subset.isCurrent(), true);
+  assert.equal(coordinator.smartCleanupRemovalEvidence('impact-selection', ['react', 'lodash']), null, 'selection must be canonical');
+  assert.equal(coordinator.smartCleanupRemovalEvidence('wrong-request', ['react']), null, 'request ids cannot cross analysis runs');
+  assert.equal(coordinator.smartCleanupRemovalEvidence('impact-selection', ['missing']), null, 'unreviewed packages are rejected');
+
+  coordinator.invalidateProjectSource('project-a');
+  assert.equal(subset.isCurrent(), false, 'the retained execution guard is revoked synchronously');
 
   coordinator.dispose();
 });

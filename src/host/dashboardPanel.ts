@@ -37,6 +37,7 @@ import type { FileChangeKind } from '../core/cache/fileChangeCoordinator.js';
 import { FileChangeCoordinator } from '../core/cache/fileChangeCoordinator.js';
 import { DEFAULT_TTL_MINUTES, effectiveTtlMinutes } from '../core/cache/freshness.js';
 import { deriveProjectCacheKey } from '../core/cache/keys.js';
+import { computeSourceFingerprint, sourceFingerprintsMatch } from '../core/cache/sourceFingerprint.js';
 import { PersistentEtagStore } from '../core/cache/persistentEtagStore.js';
 import { PersistentProjectCacheStore } from '../core/cache/projectCacheStore.js';
 import { DEFAULT_EXCLUDED_DIRS, isSameProjectReload, lockfileWatchDirs, projectCandidateLabel } from '../core/workspace/scan.js';
@@ -44,7 +45,7 @@ import { NodeHttpClient } from '../core/registry/http.js';
 import type { PerformanceRecorder } from '../core/performance/measurement.js';
 import { createPerformanceSession } from '../core/performance/measurement.js';
 import { DashboardController } from './dashboardController.js';
-import type { MessageSink } from './dashboardController.js';
+import type { BackgroundRefreshOutcome, MessageSink } from './dashboardController.js';
 import type { BuildInfo } from './dashboardData.js';
 import type { ReloadSource } from './fileChangeReload.js';
 import { reloadControllerFromDisk } from './fileChangeReload.js';
@@ -56,6 +57,9 @@ import { reconcileProjectCandidates } from './projectReconciliation.js';
 import { UpgradeAssistantCoordinator } from './upgradeAssistantCoordinator.js';
 import { canRetryMutationEnrichment, classifyMutationEnrichmentStart } from './upgradeAssistantOutcome.js';
 import { UsageAnalysisCoordinator } from './usage/usageCoordinator.js';
+import { SmartCleanupMetadataCoordinator } from './smartCleanupMetadataCoordinator.js';
+import { SmartCleanupDuplicateCoordinator } from './smartCleanupDuplicateCoordinator.js';
+import type { SmartCleanupFinalRefreshEvidence } from './smartCleanupCompletionReport.js';
 import { USAGE_FILE_WATCH_GLOB } from './usage/workspaceFiles.js';
 import type { ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
 import type { WebviewToHostMessage } from './webviewProtocol.js';
@@ -129,6 +133,10 @@ export class DashboardPanel {
   private readonly upgradeCoordinator: UpgradeAssistantCoordinator;
   /** Owns on-demand "Where is this used?" / "Analyze cleanup" usage analysis — see src/host/usage/usageCoordinator.ts. */
   private readonly usageCoordinator: UsageAnalysisCoordinator;
+  /** Lazy exact-version metadata used only while the Smart Cleanup workspace is open. */
+  private readonly smartCleanupMetadataCoordinator: SmartCleanupMetadataCoordinator;
+  /** Isolated, project-wide duplicate-consolidation preview and opaque action authority. */
+  private readonly smartCleanupDuplicateCoordinator: SmartCleanupDuplicateCoordinator;
   /**
    * Shared across every controller this panel ever builds (initial open and
    * every reload) so ETag caching survives a reload — only the project
@@ -173,6 +181,8 @@ export class DashboardPanel {
   private projectCompatibilityInvalidationTimer: NodeJS.Timeout | undefined;
   /** Advanced before debouncing so final analysis reads can detect events that race their own snapshot. */
   private projectCompatibilitySourceGeneration = 0;
+  /** Monotonic dependency/source/config identity for on-demand Smart Cleanup evidence. */
+  private smartCleanupSourceGeneration = 0;
   /** Optional built-in Git HEAD subscription for the repository containing the selected manifest. */
   private gitHeadWatcher: vscode.Disposable | undefined;
   private gitWatchedProjectPath: string | undefined;
@@ -237,8 +247,14 @@ export class DashboardPanel {
       etagStore: this.etagStore,
       ensureController: () => this.ensureController(),
       getSelectedProject: () => this.selectedProject,
+      getSmartCleanupDeprecationEvidence: () => this.smartCleanupMetadataCoordinator.currentDeprecationEvidence(),
+      getSmartCleanupDedupeEvidence: (requestId, actionId) =>
+        this.smartCleanupDuplicateCoordinator.evidence(requestId, actionId),
       isDisposed: () => this.disposed,
-      reloadFinalState: () => this.reloadAndScan(undefined, { forceUsageRecheck: true }),
+      reloadFinalState: async () => {
+        await this.reloadAndScan(undefined, { forceUsageRecheck: true });
+      },
+      reloadSmartCleanupFinalState: () => this.reloadAndCaptureFinalState(),
       readAndApplyMutationLocalState: () => this.readAndApplyMutationLocalState(),
       refreshMutationEnrichmentInBackground: (refreshId, packageName, structurallyCurrent) =>
         this.refreshMutationEnrichmentInBackground(refreshId, packageName, structurallyCurrent),
@@ -256,6 +272,8 @@ export class DashboardPanel {
       storeProjectCompatibilityReferences: (packageName, references, folder) =>
         this.usageCoordinator.storeProjectCompatibilityReferences(packageName, references, folder),
       projectCompatibilitySourceGeneration: () => this.projectCompatibilitySourceGeneration,
+      smartCleanupRemovalEvidence: (requestId, packages) =>
+        this.usageCoordinator.smartCleanupRemovalEvidence(requestId, packages),
     });
     this.usageCoordinator = new UsageAnalysisCoordinator({
       sink: this.sink,
@@ -264,6 +282,20 @@ export class DashboardPanel {
       isDisposed: () => this.disposed,
       isUpgradeBusy: () => this.upgradeCoordinator.isBusy(),
       performanceEnabled: this.performanceEnabled,
+    });
+    this.smartCleanupMetadataCoordinator = new SmartCleanupMetadataCoordinator({
+      sink: this.sink,
+      httpClient: this.httpClient,
+      etagStore: this.etagStore,
+      ensureController: () => this.ensureController(),
+      isDisposed: () => this.disposed,
+      sourceGeneration: () => this.smartCleanupSourceGeneration,
+    });
+    this.smartCleanupDuplicateCoordinator = new SmartCleanupDuplicateCoordinator({
+      sink: this.sink,
+      ensureController: () => this.ensureController(),
+      isDisposed: () => this.disposed,
+      sourceGeneration: () => this.smartCleanupSourceGeneration,
     });
     this.backgroundTimer = new BackgroundRefreshTimer(realTimerScheduler, BACKGROUND_REFRESH_INTERVAL_MS, () => {
       this.onBackgroundTick();
@@ -312,6 +344,8 @@ export class DashboardPanel {
         // session alive until install/verification/rollback completes.
         this.upgradeCoordinator.disposeWhenIdle();
         this.usageCoordinator.dispose();
+        this.smartCleanupMetadataCoordinator.dispose();
+        this.smartCleanupDuplicateCoordinator.dispose();
         this.disposeWatchers();
         this.gitHeadWatcher?.dispose();
         this.gitHeadWatcher = undefined;
@@ -387,6 +421,10 @@ export class DashboardPanel {
     }
     if (message.type === 'bulk-remove') {
       await this.upgradeCoordinator.handleAnalyzeBulkRemove(message);
+      return;
+    }
+    if (message.type === 'smart-cleanup-remove') {
+      await this.upgradeCoordinator.handleAnalyzeSmartCleanupRemove(message);
       return;
     }
     if (message.type === 'confirm-remove') {
@@ -466,6 +504,38 @@ export class DashboardPanel {
         return;
       }
       await this.usageCoordinator.handleAnalyzeCleanup();
+      return;
+    }
+    if (message.type === 'analyze-smart-cleanup-metadata') {
+      if (this.upgradeCoordinator.isBusy()) {
+        this.sink.postMessage({
+          status: 'smart-cleanup-metadata-error',
+          requestId: message.requestId,
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another dependency operation is already in progress.' },
+        });
+        return;
+      }
+      await this.smartCleanupMetadataCoordinator.analyze(message.requestId);
+      return;
+    }
+    if (message.type === 'cancel-smart-cleanup-metadata') {
+      this.smartCleanupMetadataCoordinator.cancel(message.requestId);
+      return;
+    }
+    if (message.type === 'analyze-smart-cleanup-duplicates') {
+      if (this.upgradeCoordinator.isBusy()) {
+        this.sink.postMessage({
+          status: 'smart-cleanup-duplicates-error',
+          requestId: message.requestId,
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another dependency operation is already in progress.' },
+        });
+        return;
+      }
+      await this.smartCleanupDuplicateCoordinator.analyze(message.requestId);
+      return;
+    }
+    if (message.type === 'cancel-smart-cleanup-duplicates') {
+      this.smartCleanupDuplicateCoordinator.cancel(message.requestId);
       return;
     }
     if (message.type === 'cancel-usage-analysis') {
@@ -674,12 +744,13 @@ export class DashboardPanel {
   private async reloadAndScan(
     candidate: DiscoveredProject | undefined = this.selectedProject,
     options: { forceUsageRecheck?: boolean; clearOnLoadFailure?: boolean } = {}
-  ): Promise<void> {
-    if (candidate === undefined) return; // nothing selected yet; only reachable before init ever completes
+  ): Promise<BackgroundRefreshOutcome | undefined> {
+    if (candidate === undefined) return undefined; // nothing selected yet; only reachable before init ever completes
 
     const previousProjectId = this.selectedProject?.id;
     const sameProjectReload = isSameProjectReload(previousProjectId, candidate.id);
     if (!sameProjectReload) {
+      this.smartCleanupSourceGeneration += 1;
       this.usageCoordinator.invalidateProjectSource(previousProjectId);
       this.usageCoordinator.invalidateProjectSource(candidate.id);
     }
@@ -768,11 +839,9 @@ export class DashboardPanel {
     // above) while the forced scan runs. A genuine project switch must still
     // clear the old project's rows so they are never presented under the new
     // project identity.
-    if (sameProjectReload) {
-      await controller.refreshInBackground(this.sink);
-    } else {
-      await controller.handleRefresh(this.sink);
-    }
+    const scanOutcome = sameProjectReload
+      ? await controller.refreshInBackground(this.sink)
+      : await controller.handleRefresh(this.sink);
 
     // The network scan can take long enough for an
     // entirely separate, newer reloadAndScan call (a faster project switch,
@@ -783,7 +852,7 @@ export class DashboardPanel {
     // duplicate that newer flush or, worse, act on pending state that
     // belongs to whatever project is now actually selected, not the one this
     // call was for. Bail without flushing anything.
-    if (this.disposed || generation !== this.reloadGeneration) return;
+    if (this.disposed || generation !== this.reloadGeneration) return undefined;
 
     // Queued, not awaited: dependency data is already published to the
     // webview above, so usage/cleanup analysis must never block on it — it
@@ -800,6 +869,45 @@ export class DashboardPanel {
     // nothing arrived, otherwise a fresh, mandatory second disk read through
     // the normal `reloadAfterFileChange` path.
     await this.fileChangeCoordinator.flush();
+    return scanOutcome;
+  }
+
+  /**
+   * Reloads the dashboard and then performs one bounded final disk reread.
+   * Smart Cleanup uses this host-only evidence to prove that its completion
+   * report belongs to the exact stable source which produced the refreshed
+   * rows. Ordinary upgrade/removal callers use the normal reload path.
+   */
+  private async reloadAndCaptureFinalState(): Promise<SmartCleanupFinalRefreshEvidence | undefined> {
+    const outcome = await this.reloadAndScan(undefined, { forceUsageRecheck: true });
+    if (outcome?.status !== 'succeeded') return undefined;
+    const controller = this.controller;
+    const candidate = this.selectedProject;
+    const evidence = controller?.lastResultEvidence() ?? null;
+    if (controller === undefined || candidate === undefined || evidence === null || this.disposed) return undefined;
+
+    const generationAtReadStart = this.smartCleanupSourceGeneration;
+    const confirmed = await this.loadProjectMeasured(candidate, 'Smart Cleanup final evidence reread');
+    const generationAfterRead = this.smartCleanupSourceGeneration;
+    if (this.disposed || candidate !== this.selectedProject || controller !== this.controller) return undefined;
+
+    const confirmedSourceFingerprint = computeSourceFingerprint({
+      manifestText: confirmed.manifestText,
+      lockfileText: confirmed.lockfileText,
+      lockfilePath: confirmed.lockfilePath,
+      packageManager: confirmed.packageManager,
+      importerId: confirmed.importerId,
+    });
+    if (!sourceFingerprintsMatch(evidence.sourceFingerprint, confirmedSourceFingerprint)) return undefined;
+
+    return {
+      snapshot: evidence.snapshot,
+      projectId: candidate.id,
+      generationAtReadStart,
+      generationAfterRead,
+      sourceFingerprint: evidence.sourceFingerprint,
+      confirmedSourceFingerprint,
+    };
   }
 
   /**
@@ -1007,6 +1115,7 @@ export class DashboardPanel {
       lockfileName: project.lockfileName,
       registry: project.registry,
       resolvedRegistry: project.resolvedRegistry,
+      peerPolicy: project.peerPolicy,
       httpClient: this.httpClient,
       etagStore: this.etagStore,
       auditRunner: this.auditRunner,
@@ -1102,6 +1211,7 @@ export class DashboardPanel {
     this.controller?.beginRevalidation();
     this.controller?.announceRevalidating(this.sink);
     this.projectCompatibilitySourceGeneration += 1;
+    this.smartCleanupSourceGeneration += 1;
     this.usageCoordinator.invalidateProjectSource(this.selectedProject?.id);
     this.upgradeCoordinator.handleProjectSourceChanged();
     this.fileChangeCoordinator.discardPending();
@@ -1250,6 +1360,7 @@ export class DashboardPanel {
       if (relative === '' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return;
       if (relative.split(path.sep).some((segment) => DEFAULT_EXCLUDED_DIRS.includes(segment))) return;
       this.projectCompatibilitySourceGeneration += 1;
+      this.smartCleanupSourceGeneration += 1;
       this.usageCoordinator.invalidateProjectSource(candidate.id);
       this.upgradeCoordinator.handleProjectSourceChanged();
       if (this.projectCompatibilityInvalidationTimer !== undefined) {
@@ -1314,6 +1425,7 @@ export class DashboardPanel {
     if (this.disposed) return;
     this.controller?.beginRevalidation();
     this.controller?.announceRevalidating(this.sink);
+    this.smartCleanupSourceGeneration += 1;
     this.usageCoordinator.invalidateProjectSource(this.selectedProject?.id);
     this.upgradeCoordinator.handleProjectSourceChanged();
     if (this.branchChangeCoordinator.hasPending) return;

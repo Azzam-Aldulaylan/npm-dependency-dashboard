@@ -136,9 +136,15 @@ function describeRemovedPackages(packageNames: readonly string[]): string {
 export function describeRemoveTransactionOutcome(
   packageNames: readonly string[],
   packageManager: 'npm' | 'pnpm',
-  transaction: UpgradeTransactionResult
+  transaction: UpgradeTransactionResult,
+  options: { dedupe?: boolean } = {}
 ): UpgradeCompletionPresentation {
   const removed = describeRemovedPackages(packageNames);
+  const applied = options.dedupe === true
+    ? packageNames.length === 0
+      ? 'Applied the reviewed project deduplication'
+      : `Removed ${removed} and applied the reviewed project deduplication`
+    : `Removed ${removed}`;
 
   if (transaction.rollback.status === 'conflict') {
     return {
@@ -184,19 +190,21 @@ export function describeRemoveTransactionOutcome(
   }
 
   if (transaction.completion === 'kept' && transaction.reason === 'verified') {
-    return { kind: 'verified', message: `Removed ${removed}; verification passed.` };
+    return { kind: 'verified', message: `${applied}; verification passed.` };
   }
   if (transaction.completion === 'kept') {
     return {
       kind: 'unverified',
-      message: `Removed ${removed}, but the application is not verified after removal.`,
+      message: `${applied}, but the application is not verified after cleanup.`,
     };
   }
   if (transaction.completion === 'rolled-back') {
     return {
       kind: 'rolled-back',
       message:
-        `Dependency files for ${removed} were restored to their pre-removal state. ` +
+        (options.dedupe === true
+          ? 'Dependency files for the selected cleanup actions were restored to their pre-cleanup state. '
+          : `Dependency files for ${removed} were restored to their pre-removal state. `) +
         `node_modules was not restored; run ${packageManager} install to reconcile installed packages with the restored lockfile.`,
     };
   }

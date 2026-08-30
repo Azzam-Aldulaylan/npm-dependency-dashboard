@@ -1376,6 +1376,35 @@ test('analyze-cleanup and cancel-usage-analysis carry no payload', () => {
   assert.equal(isWebviewToHostMessage({ type: 'analyze-cleanup', extra: 1 }), false);
 });
 
+test('Smart Cleanup metadata requests require a correlation id and no forged payload', () => {
+  assert.equal(isWebviewToHostMessage({ type: 'analyze-smart-cleanup-metadata', requestId: 'cleanup-1' }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'cancel-smart-cleanup-metadata', requestId: 'cleanup-1' }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'analyze-smart-cleanup-metadata' }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'cancel-smart-cleanup-metadata', requestId: '' }), false);
+  assert.equal(
+    isWebviewToHostMessage({ type: 'analyze-smart-cleanup-metadata', requestId: 'cleanup-1', package: 'forged' }),
+    false
+  );
+});
+
+test('Smart Cleanup removal requires a correlated canonical package set', () => {
+  assert.equal(
+    isWebviewToHostMessage({ type: 'smart-cleanup-remove', requestId: 'cleanup-1', removalRequestId: 'impact-1', packages: ['@scope/b', 'a'] }),
+    true
+  );
+  assert.equal(
+    isWebviewToHostMessage({ type: 'smart-cleanup-remove', requestId: 'cleanup-1', packages: [], dedupeActionId: 'dedupe-1' }),
+    true
+  );
+  assert.equal(isWebviewToHostMessage({ type: 'smart-cleanup-remove', packages: ['a'] }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'smart-cleanup-remove', requestId: '', packages: ['a'] }), false);
+  assert.equal(isWebviewToHostMessage({ type: 'smart-cleanup-remove', requestId: 'cleanup-1', packages: [] }), false);
+  assert.equal(
+    isWebviewToHostMessage({ type: 'smart-cleanup-remove', requestId: 'cleanup-1', packages: ['a', 'a'] }),
+    false
+  );
+});
+
 test('a well-formed open-usage-reference request is accepted', () => {
   assert.equal(isWebviewToHostMessage({ type: 'open-usage-reference', usageId: 'abc', referenceIndex: 0 }), true);
 });
@@ -1478,6 +1507,64 @@ test('cleanup-analyzing, cleanup-result, and cleanup-error are accepted', () => 
   assert.equal(isHostToWebviewMessage({ status: 'cleanup-error', error: { code: 'X', message: 'Y' } }), true);
 });
 
+test('Smart Cleanup exact-version metadata states are validated', () => {
+  assert.equal(
+    isHostToWebviewMessage({ status: 'smart-cleanup-metadata-analyzing', requestId: 'cleanup-1', completed: 2, total: 4 }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'smart-cleanup-metadata-result',
+      requestId: 'cleanup-1',
+      findings: [],
+      unavailablePackages: ['private-package'],
+      capability: { executionSupported: true },
+    }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({ status: 'smart-cleanup-metadata-analyzing', requestId: 'cleanup-1', completed: 5, total: 4 }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'smart-cleanup-metadata-error',
+      requestId: 'cleanup-1',
+      error: { code: 'NETWORK', message: 'offline' },
+    }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'smart-cleanup-metadata-result',
+      requestId: 'cleanup-1',
+      findings: [],
+      unavailablePackages: [],
+      capability: { executionSupported: false, reason: 'Workspace member is analysis-only.' },
+    }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'smart-cleanup-metadata-result',
+      findings: [],
+      unavailablePackages: [],
+      capability: { executionSupported: true },
+    }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'smart-cleanup-metadata-result',
+      requestId: 'cleanup-1',
+      findings: [],
+      unavailablePackages: [],
+      capability: { executionSupported: false, reason: '' },
+    }),
+    false
+  );
+});
+
 test('DashboardData with a well-formed hygieneFindings entry is accepted', () => {
   const data = {
     ...DATA,
@@ -1536,6 +1623,8 @@ test('confirm-remove and cancel-remove mirror confirm-upgrade / cancel-upgrade\'
   assert.equal(isWebviewToHostMessage({ type: 'confirm-remove', analysisId: 'abc123', changes: [] }), false);
   assert.equal(isWebviewToHostMessage({ type: 'cancel-remove', analysisId: 'abc123' }), true);
   assert.equal(isWebviewToHostMessage({ type: 'cancel-remove', analysisId: null }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'cancel-remove', analysisId: null, requestId: 'impact-1' }), true);
+  assert.equal(isWebviewToHostMessage({ type: 'cancel-remove', analysisId: null, requestId: '' }), false);
   assert.equal(isWebviewToHostMessage({ type: 'cancel-remove' }), false);
 });
 
@@ -1557,6 +1646,48 @@ test('remove-analyzing is accepted with just a package name, and rejects a missi
 
 test('a well-formed remove-analysis is accepted', () => {
   assert.equal(isHostToWebviewMessage({ status: 'remove-analysis', analysis: MINIMAL_REMOVE_ANALYSIS }), true);
+});
+
+test('a stable coordinated removal result is accepted and malformed results are rejected', () => {
+  const result = {
+    analysisId: 'remove-analysis-1',
+    packages: ['left-pad'],
+    outcome: 'verified',
+    verification: 'passed',
+    rollback: 'not-needed',
+    message: 'Removed left-pad; verification passed.',
+  };
+  assert.equal(isHostToWebviewMessage({ status: 'remove-result', result }), true);
+  const smartCleanup = {
+    status: 'verified',
+    metrics: [{ id: 'dependencies', label: 'Direct dependencies', before: 4, after: 3, detail: 'Correlated inventory' }],
+    removedAdvisories: [{
+      sourceId: '123',
+      identifiers: ['GHSA-AAAA-BBBB-CCCC'],
+      flaggedPackage: 'left-pad',
+      severity: 'high',
+      title: 'Example advisory',
+    }],
+    introducedAdvisories: [],
+    completedActionIds: ['remove-direct:left-pad'],
+    skippedActionIds: [],
+    failedActionIds: [],
+  };
+  assert.equal(isHostToWebviewMessage({ status: 'remove-result', result: { ...result, smartCleanup } }), true);
+  assert.equal(
+    isHostToWebviewMessage({ status: 'remove-result', result: { ...result, smartCleanup: { ...smartCleanup, status: 'claimed' } } }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({ status: 'remove-result', result: { ...result, packages: ['left-pad', 'left-pad'] } }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({ status: 'remove-result', result: { ...result, outcome: 'partially-kept' } }),
+    false
+  );
+  const { analysisId, ...withoutAnalysisId } = result;
+  assert.equal(isHostToWebviewMessage({ status: 'remove-result', result: withoutAnalysisId }), false);
 });
 
 test('remove-analysis rejects a missing payload, extra top-level keys, and a missing required field', () => {
@@ -1658,7 +1789,13 @@ const REVIEW_ASSESSMENT = {
 };
 const BLOCKED_ASSESSMENT = {
   status: 'blocked',
-  evidence: [{ kind: 'peer-requirement', summary: 'package-x requires this package as a peer dependency' }],
+  evidence: [{
+    kind: 'peer-requirement',
+    summary: 'package-x requires this package as a peer dependency',
+    requiredBy: 'package-x',
+    requestedRange: '^1.0.0',
+    optional: false,
+  }],
 };
 
 test('removal-impact-analyzing, removal-impact-result, and removal-impact-error are accepted', () => {

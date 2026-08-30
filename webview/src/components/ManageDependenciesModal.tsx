@@ -45,6 +45,7 @@ import {
 } from '../icons.js';
 import { REMOVAL_IMPACT_LABEL } from '../removalImpactState.js';
 import type { RemovalImpactState } from '../removalImpactState.js';
+import { DirectionalButton } from './DirectionalButton.js';
 
 export interface BulkUpgradeCandidate {
   packageName: string;
@@ -667,14 +668,12 @@ export function ManageDependenciesModal({
 
         <footer className={`modal__footer${step === 'review' ? ' modal__footer--split' : ''}`}>
           {step === 'select' ? (
-            <button type="button" className="button button--primary" onClick={() => setStep('review')} disabled={batchRows.length === 0}>
-              Review {batchRows.length > 0 ? `${batchRows.length} ` : ''}dependencies →
-            </button>
+            <DirectionalButton direction="forward" className="button button--primary" onClick={() => setStep('review')} disabled={batchRows.length === 0}>
+              Review {batchRows.length > 0 ? `${batchRows.length} ` : ''}dependencies
+            </DirectionalButton>
           ) : (
             <>
-              <button type="button" className="button button--secondary" onClick={() => setStep('select')}>
-                ← Back
-              </button>
+              <DirectionalButton direction="back" onClick={() => setStep('select')}>Back</DirectionalButton>
               <div className="bulk-modal__step-actions">
                 <button
                   type="button"

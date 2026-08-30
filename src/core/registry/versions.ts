@@ -183,6 +183,8 @@ export async function fetchDistTags(
 export interface PackageVersionMetadata {
   name: string;
   version: string;
+  /** Maintainer-published deprecation notice for this exact version. */
+  deprecated?: string;
   dependencies: Record<string, string>;
   optionalDependencies: Record<string, string>;
   peerDependencies: Record<string, string>;
@@ -303,6 +305,9 @@ export async function fetchPackageVersionMetadata(
     peerDependencies: readStringMap(json['peerDependencies']),
     peerDependenciesMeta: readPeerMeta(json['peerDependenciesMeta']),
   };
+  if (typeof json['deprecated'] === 'string' && json['deprecated'].trim() !== '') {
+    metadata.deprecated = json['deprecated'];
+  }
   const engines = readStringMap(json['engines']);
   if (Object.keys(engines).length > 0) metadata.engines = engines;
   const bin = readBin(json['bin']);

@@ -30,11 +30,13 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 
 import * as vscode from 'vscode';
 
 import { buildDependencyGraph } from '../core/lockfile/build.js';
+import { cleanupGraphSignature } from '../core/cleanup/graphSignature.js';
 import { computeSourceFingerprint } from '../core/cache/sourceFingerprint.js';
 import { runSequentialBatch } from '../core/async/sequentialBatch.js';
 import { SharedPromise } from '../core/async/sharedPromise.js';
@@ -115,10 +117,23 @@ import { OperationReservation, SourceGenerationGuard } from './operationReservat
 import { runUpgradeTransaction } from './upgradeTransaction.js';
 import { selectVerificationScripts } from './verificationPolicy.js';
 import type { VerificationScript } from './verificationPolicy.js';
+import { smartCleanupProjectCapability } from './smartCleanupProjectCapability.js';
+import type {
+  SmartCleanupDedupeEvidence,
+  SmartCleanupDedupeSelection,
+} from './smartCleanupDuplicateCoordinator.js';
+import { SMART_CLEANUP_DEDUPE_TIMEOUT_MS } from './smartCleanupDuplicateCoordinator.js';
+import { buildSmartCleanupCompletionReport } from './smartCleanupCompletionReport.js';
+import type {
+  SmartCleanupBeforeSnapshot,
+  SmartCleanupCompletionReportResult,
+  SmartCleanupFinalRefreshEvidence,
+} from './smartCleanupCompletionReport.js';
 import type {
   ProtocolError,
   RemediationOutcomeStatus,
   SecurityOutcome,
+  SmartCleanupCompletionPresentation,
   UpgradeAnalysisSmartPlan,
   UpgradeResultPresentation,
 } from './webviewProtocol.js';
@@ -151,6 +166,20 @@ export interface BulkRemoveMessage {
   changes: RemoveMessage[];
 }
 
+export interface SmartCleanupRemoveMessage {
+  /** Smart Cleanup analysis correlation; resolves optional dedupe authority. */
+  requestId: string;
+  packages: string[];
+  /** Exact removal-impact evidence correlation, required when packages is non-empty. */
+  removalRequestId?: string;
+  /** Opaque, host-issued project-wide dedupe action. */
+  dedupeActionId?: string;
+}
+
+interface SmartCleanupRemovalEvidence {
+  isCurrent(): boolean;
+}
+
 export interface RemediationMessage {
   package: string;
 }
@@ -167,14 +196,26 @@ export interface CancelUpgradeMessage {
   analysisId: string | null;
 }
 
+export interface CancelRemoveMessage extends CancelUpgradeMessage {
+  /** Present for Smart Cleanup so a cancellation can find a just-stored review before its analysisId reaches the webview. */
+  requestId?: string;
+}
+
 export interface UpgradeAssistantCoordinatorOptions {
   sink: MessageSink;
   httpClient: HttpClient;
   etagStore: EtagStore;
   ensureController(): Promise<DashboardController | undefined>;
   getSelectedProject(): DiscoveredProject | undefined;
+  getSmartCleanupDeprecationEvidence?(): {
+    deprecatedPackages: readonly string[];
+    installedVersions: Readonly<Record<string, string>>;
+  } | undefined;
+  getSmartCleanupDedupeEvidence?(requestId: string, actionId: string): SmartCleanupDedupeEvidence | null;
   isDisposed(): boolean;
   reloadFinalState(): Promise<void>;
+  /** Reloads and captures the exact post-transaction evidence used only by Smart Cleanup completion reporting. */
+  reloadSmartCleanupFinalState?(): Promise<SmartCleanupFinalRefreshEvidence | undefined>;
   /** Reads and applies post-mutation package.json/lockfile state without waiting for registry/audit enrichment. */
   readAndApplyMutationLocalState?(): Promise<
     { project: ResolvedProject; structurallyCurrent: boolean } | undefined
@@ -210,6 +251,11 @@ export interface UpgradeAssistantCoordinatorOptions {
   ): string | null;
   /** Monotonic generation advanced synchronously by relevant source/config watcher events. */
   projectCompatibilitySourceGeneration?: () => number;
+  /** Resolves one webview request to the exact host-owned removal-impact evidence it reviewed. */
+  smartCleanupRemovalEvidence?(
+    requestId: string,
+    packages: readonly string[]
+  ): SmartCleanupRemovalEvidence | null;
 }
 
 /** Removal review retention is unchanged; Upgrade Review has its own longer, soft-stale-aware retention. */
@@ -422,16 +468,34 @@ interface StoredRemoval {
   id: string;
   requests: RemoveMessage[];
   /** The first, host-validated removal — the session's reserve/release key, same convention as StoredAnalysis.eligibility. */
-  eligibility: EligibleRemoval;
+  eligibility: EligibleRemoval | null;
   eligibilities: EligibleRemoval[];
+  reservationKey: string;
   snapshot: ResolvedProject;
   ignoreScripts: boolean;
   verificationScripts: VerificationScript[];
+  /** Present only for Smart Cleanup; generic removal reviews remain unchanged. */
+  smartCleanupEvidence?: SmartCleanupRemovalEvidence;
+  smartCleanupDedupeEvidence?: SmartCleanupDedupeEvidence;
+  smartCleanupDedupeSelection?: SmartCleanupDedupeSelection;
+  /** Client correlation only; never mutation authority. */
+  smartCleanupRequestId?: string;
+  /** Host-owned baseline for the correlated completion report. */
+  smartCleanupBefore?: SmartCleanupBeforeSnapshot;
   expiresAt: number;
+}
+
+interface SmartCleanupRemovalContext {
+  evidence?: SmartCleanupRemovalEvidence;
+  dedupeEvidence?: SmartCleanupDedupeEvidence;
+  requestId: string;
+  removalRequestId?: string;
 }
 
 interface PendingRemovalAnalysis {
   packageName: string;
+  smartCleanupRequestId?: string;
+  dedupeAbort?: AbortController;
   cancelled: boolean;
   reservationHeld: boolean;
   releaseStarted: boolean;
@@ -443,6 +507,96 @@ interface SharedRemediationWork {
     materialized: Awaited<ReturnType<IsolatedResolverVerifier['materializeResolvedGraph']>>;
     advisoriesByName: ReturnType<typeof advisoriesByNameFromRows>;
   }>;
+}
+
+function duplicateExcessVersionCount(snapshot: SmartCleanupBeforeSnapshot['snapshot']): number | null {
+  if (snapshot.hygieneFindings === undefined) return null;
+  return snapshot.hygieneFindings.reduce((count, finding) => {
+    if (finding.kind !== 'duplicate-version' || finding.evidence.kind !== 'duplicate-version') return count;
+    return count + Math.max(0, finding.evidence.versions.length - 1);
+  }, 0);
+}
+
+function smartCleanupDedupeSelectionsMatch(
+  left: SmartCleanupDedupeSelection,
+  right: SmartCleanupDedupeSelection
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function verifiedDeprecatedPackagesAfter(
+  before: SmartCleanupBeforeSnapshot,
+  after: SmartCleanupFinalRefreshEvidence
+): readonly string[] | undefined {
+  const deprecatedPackages = before.deprecatedDirectPackages;
+  const installedVersions = before.deprecationInstalledVersions;
+  if (deprecatedPackages === undefined || installedVersions === undefined) return undefined;
+
+  const afterNames = new Set<string>();
+  for (const row of after.snapshot.rows) {
+    if (row.current === null || installedVersions[row.name] !== row.current) return undefined;
+    afterNames.add(row.name);
+  }
+  return deprecatedPackages.filter((name) => afterNames.has(name));
+}
+
+function toSmartCleanupCompletionPresentation(
+  result: SmartCleanupCompletionReportResult,
+  before: SmartCleanupBeforeSnapshot,
+  after: SmartCleanupFinalRefreshEvidence
+): SmartCleanupCompletionPresentation {
+  const metrics: SmartCleanupCompletionPresentation['metrics'] = [];
+  const addMetric = (
+    id: SmartCleanupCompletionPresentation['metrics'][number]['id'],
+    label: string,
+    metric: SmartCleanupCompletionReportResult['report']['metrics'][keyof SmartCleanupCompletionReportResult['report']['metrics']],
+    detail: string
+  ): void => {
+    if (metric.status === 'verified') metrics.push({ id, label, before: metric.before, after: metric.after, detail });
+  };
+  addMetric('dependencies', 'Direct dependencies', result.report.metrics.directDependencies, 'Measured from the correlated dependency inventory');
+  addMetric('deprecated-dependencies', 'Deprecated direct dependencies', result.report.metrics.deprecatedDirectDependencies, 'Exact installed-version metadata');
+  addMetric('duplicate-groups', 'Duplicate-version groups', result.report.metrics.duplicateVersionGroups, 'Measured from the correlated dependency graph');
+
+  const beforeExcess = duplicateExcessVersionCount(before.snapshot);
+  const afterExcess = duplicateExcessVersionCount(after.snapshot);
+  if (beforeExcess !== null && afterExcess !== null) {
+    metrics.push({
+      id: 'excess-versions',
+      label: 'Excess resolved versions',
+      before: beforeExcess,
+      after: afterExcess,
+      detail: 'Versions beyond one resolved version per package',
+    });
+  }
+  if (result.security !== null) {
+    metrics.push({
+      id: 'vulnerable-dependencies',
+      label: 'Vulnerable direct dependencies',
+      before: result.security.before.affectedDirectDependencies,
+      after: result.security.after.affectedDirectDependencies,
+      detail: 'Matches the dashboard Vulnerable Dependencies count',
+    });
+  }
+  addMetric('advisory-findings', 'Advisory findings', result.report.metrics.vulnerabilities, 'Distinct advisory records across the installed graph');
+
+  const advisory = (finding: NonNullable<SmartCleanupCompletionReportResult['security']>['removedAdvisories'][number]) => ({
+    sourceId: finding.sourceId,
+    identifiers: [...finding.identifiers],
+    flaggedPackage: finding.flaggedPackage,
+    severity: finding.severity,
+    title: finding.title,
+  });
+  return {
+    status: result.status,
+    metrics,
+    removedAdvisories: result.security?.removedAdvisories.map(advisory) ?? [],
+    introducedAdvisories: result.security?.introducedAdvisories.map(advisory) ?? [],
+    completedActionIds: result.report.actions.filter((action) => action.status === 'completed').map((action) => action.actionId),
+    skippedActionIds: result.report.actions.filter((action) => action.status === 'skipped').map((action) => action.actionId),
+    failedActionIds: result.report.actions.filter((action) => action.status === 'failed').map((action) => action.actionId),
+    ...(result.reason === undefined ? {} : { reason: result.reason }),
+  };
 }
 
 export class UpgradeAssistantCoordinator {
@@ -469,6 +623,8 @@ export class UpgradeAssistantCoordinator {
   private sourceInvalidatedAnalyzePackage: string | null = null;
   private activeRemediationAbort: AbortController | undefined;
   private activeUpgradeAnalysisAbort: AbortController | undefined;
+  /** Bounded final dedupe recheck that runs after the review is confirmed. */
+  private activeSmartCleanupFinalCheckAbort: AbortController | undefined;
   /** One exact deep inventory is enough to make immediate re-analysis/cache reuse cheap without retaining many large file lists. */
   private readonly targetPackageSurfaceCache = new TargetPackageSurfaceCache();
 
@@ -503,6 +659,8 @@ export class UpgradeAssistantCoordinator {
   disposeWhenIdle(): void {
     this.activeRemediationAbort?.abort();
     this.activeUpgradeAnalysisAbort?.abort();
+    this.pendingRemovalAnalysis?.dedupeAbort?.abort();
+    this.activeSmartCleanupFinalCheckAbort?.abort();
     if (this.reservation.isMutationBusy) return;
     this.analysis = undefined;
     this.removal = undefined;
@@ -537,6 +695,9 @@ export class UpgradeAssistantCoordinator {
     this.sourceGeneration.advance();
     if (this.reservation.isMutationBusy) return;
 
+    this.pendingRemovalAnalysis?.dedupeAbort?.abort();
+    this.activeSmartCleanupFinalCheckAbort?.abort();
+
     if (this.pendingAnalyzePackage !== null) {
       const packageName = this.pendingAnalyzePackage;
       const webviewAlreadyCancelled =
@@ -566,13 +727,13 @@ export class UpgradeAssistantCoordinator {
       this.removal = undefined;
       this.options.sink.postMessage({
         status: 'remove-error',
-        package: stored.eligibility.packageName,
+        package: stored.reservationKey,
         error: {
           code: 'STALE_SOURCE',
           message: 'Project files changed while the removal review was open. Analyze again.',
         },
       });
-      void this.releaseReservation(stored.eligibility.packageName);
+      void this.releaseReservation(stored.reservationKey);
     }
   }
 
@@ -587,7 +748,7 @@ export class UpgradeAssistantCoordinator {
   /** Same reclaim as reclaimExpiredAnalysis, for an abandoned removal review. */
   private reclaimExpiredRemoval(): void {
     if (this.removal !== undefined && Date.now() >= this.removal.expiresAt) {
-      void this.releaseReservation(this.removal.eligibility.packageName);
+      void this.releaseReservation(this.removal.reservationKey);
       this.removal = undefined;
     }
   }
@@ -1543,7 +1704,49 @@ export class UpgradeAssistantCoordinator {
    * storing the analysis and posting it, exactly like handleAnalyzeUpgrade —
    * never by executing anything.
    */
-  async handleAnalyzeBulkRemove(message: BulkRemoveMessage): Promise<void> {
+  /**
+   * Smart Cleanup's mutation entry point. Unlike the generic bulk-removal UI,
+   * this path is authorized only by a still-current host removal-impact result;
+   * the webview's package list is merely a canonical selection lookup.
+   */
+  async handleAnalyzeSmartCleanupRemove(message: SmartCleanupRemoveMessage): Promise<void> {
+    const requestedPackage = message.packages[0] ?? 'Smart Cleanup';
+    const removalEvidence = message.packages.length === 0 || message.removalRequestId === undefined
+      ? undefined
+      : this.options.smartCleanupRemovalEvidence?.(message.removalRequestId, message.packages) ?? null;
+    const dedupeEvidence = message.dedupeActionId === undefined
+      ? undefined
+      : this.options.getSmartCleanupDedupeEvidence?.(message.requestId, message.dedupeActionId) ?? null;
+    if (
+      (message.packages.length > 0 && (removalEvidence == null || !removalEvidence.isCurrent())) ||
+      (message.dedupeActionId !== undefined && (dedupeEvidence == null || !dedupeEvidence.isCurrent())) ||
+      (removalEvidence === undefined && dedupeEvidence === undefined)
+    ) {
+      this.options.sink.postMessage({
+        status: 'remove-error',
+        package: requestedPackage,
+        error: {
+          code: 'STALE_ANALYSIS',
+          message: 'This Smart Cleanup selection is no longer current. Analyze again.',
+        },
+      });
+      return;
+    }
+    await this.handleAnalyzeBulkRemove(
+      { changes: message.packages.map((packageName) => ({ package: packageName })) },
+      {
+        requestId: message.requestId,
+        ...(message.removalRequestId === undefined ? {} : { removalRequestId: message.removalRequestId }),
+        ...(removalEvidence == null ? {} : { evidence: removalEvidence }),
+        ...(dedupeEvidence == null ? {} : { dedupeEvidence }),
+      }
+    );
+  }
+
+  async handleAnalyzeBulkRemove(
+    message: BulkRemoveMessage,
+    smartCleanup?: SmartCleanupRemovalContext
+  ): Promise<void> {
     this.reclaimExpiredAnalysis();
     this.reclaimExpiredRemoval();
 
@@ -1556,7 +1759,7 @@ export class UpgradeAssistantCoordinator {
       return;
     }
 
-    const requestedPackage = message.changes[0]?.package ?? 'unknown';
+    const requestedPackage = message.changes[0]?.package ?? (smartCleanup?.dedupeEvidence === undefined ? 'unknown' : 'Smart Cleanup');
     if (this.pendingRemovalAnalysis !== undefined) {
       this.options.sink.postMessage({
         status: 'remove-error',
@@ -1567,6 +1770,7 @@ export class UpgradeAssistantCoordinator {
     }
     const pending: PendingRemovalAnalysis = {
       packageName: requestedPackage,
+      ...(smartCleanup === undefined ? {} : { smartCleanupRequestId: smartCleanup.requestId }),
       cancelled: false,
       reservationHeld: false,
       releaseStarted: false,
@@ -1579,29 +1783,64 @@ export class UpgradeAssistantCoordinator {
       return;
     }
 
-    const batch = controller.validateBulkRemoveRequest(message.changes);
-    if (!batch.ok) {
-      this.options.sink.postMessage({
-        status: 'remove-error',
-        package: batch.packageName ?? message.changes[0]?.package ?? 'unknown',
-        error: describeBulkRemoveRejection(batch),
-      });
-      if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
-      return;
+    if (smartCleanup !== undefined) {
+      const capability = smartCleanupProjectCapability(controller.upgradeSource);
+      if (!capability.executionSupported) {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: requestedPackage,
+          error: { code: 'NOT_ELIGIBLE', message: capability.reason },
+        });
+        if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
+        return;
+      }
+      if (
+        (smartCleanup.evidence !== undefined && !smartCleanup.evidence.isCurrent()) ||
+        (smartCleanup.dedupeEvidence !== undefined && !smartCleanup.dedupeEvidence.isCurrent())
+      ) {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: requestedPackage,
+          error: {
+            code: 'STALE_ANALYSIS',
+            message: 'This Smart Cleanup selection is no longer current. Analyze again.',
+          },
+        });
+        if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
+        return;
+      }
     }
-    const eligibility = batch.removals[0];
-    if (eligibility === undefined) {
-      if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
-      return;
+
+    let eligibilities: EligibleRemoval[];
+    if (message.changes.length > 0) {
+      const batch = controller.validateBulkRemoveRequest(message.changes);
+      if (!batch.ok) {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: batch.packageName ?? message.changes[0]?.package ?? 'unknown',
+          error: describeBulkRemoveRejection(batch),
+        });
+        if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
+        return;
+      }
+      eligibilities = batch.removals;
+    } else {
+      if (smartCleanup?.dedupeEvidence === undefined) {
+        if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
+        return;
+      }
+      eligibilities = [];
     }
-    const eligibilities = batch.removals;
+    const eligibility = eligibilities[0] ?? null;
+    const reservationKey = eligibility?.packageName ?? requestedPackage;
+    pending.packageName = reservationKey;
 
     // Same reservation discipline as an upgrade — held across analysis and
     // however long the review modal stays open, not merely execution.
-    if (!this.reserve(eligibility.packageName)) {
+    if (!this.reserve(reservationKey)) {
       this.options.sink.postMessage({
         status: 'remove-error',
-        package: eligibility.packageName,
+        package: reservationKey,
         // Reuses the upgrade flow's own code: it is the same panel-wide
         // lock, so the webview's existing upgradeErrorClearsActiveState/
         // upgradeErrorIsUserVisible already treat this race the right way
@@ -1632,13 +1871,13 @@ export class UpgradeAssistantCoordinator {
       ) {
         this.options.sink.postMessage({
           status: 'remove-error',
-          package: eligibility.packageName,
+          package: reservationKey,
           error: { code: 'STALE_SOURCE', message: 'Project dependency files changed. Refresh and try again.' },
         });
         return;
       }
 
-      this.options.sink.postMessage({ status: 'remove-analyzing', package: eligibility.packageName });
+      this.options.sink.postMessage({ status: 'remove-analyzing', package: reservationKey });
 
       const manifest = parseManifest(preflightProject.manifestText);
       const graph = buildDependencyGraph({
@@ -1674,6 +1913,44 @@ export class UpgradeAssistantCoordinator {
         classification: item.classification,
         stillRequiredBy: stillRequiredBy(graph, manifest.dependencies, item.packageName, removingNames, whyInstalledIndex),
       }));
+      const stagedManifest = eligibilities.length === 0
+        ? preflightProject.manifestText
+        : buildStagedManifestForRemoval(
+            preflightProject.manifestText,
+            eligibilities.map((item) => ({ packageName: item.packageName, classification: item.classification }))
+          );
+      let dedupeSelection: SmartCleanupDedupeSelection | undefined;
+      if (smartCleanup?.dedupeEvidence !== undefined) {
+        const dedupeAbort = new AbortController();
+        pending.dedupeAbort = dedupeAbort;
+        let dedupeTimedOut = false;
+        const dedupeTimeout = setTimeout(() => {
+          dedupeTimedOut = true;
+          dedupeAbort.abort();
+        }, SMART_CLEANUP_DEDUPE_TIMEOUT_MS);
+        let verifiedDedupe: Awaited<ReturnType<SmartCleanupDedupeEvidence['verifySelection']>>;
+        try {
+          verifiedDedupe = await smartCleanup.dedupeEvidence.verifySelection(stagedManifest, dedupeAbort.signal);
+        } finally {
+          clearTimeout(dedupeTimeout);
+          if (pending.dedupeAbort === dedupeAbort) delete pending.dedupeAbort;
+        }
+        if (pending.cancelled || this.pendingRemovalAnalysis !== pending || this.options.isDisposed()) return;
+        if (!verifiedDedupe.ok) {
+          this.options.sink.postMessage({
+            status: 'remove-error',
+            package: reservationKey,
+            error: {
+              code: 'STALE_ANALYSIS',
+              message: dedupeTimedOut
+                ? 'The final dedupe safety check timed out. Analyze Smart Cleanup again.'
+                : `${verifiedDedupe.reason} Analyze Smart Cleanup again.`,
+            },
+          });
+          return;
+        }
+        dedupeSelection = verifiedDedupe;
+      }
 
       const manifestPath = path.join(controller.root, 'package.json');
       const expectedLockfilePath =
@@ -1689,23 +1966,68 @@ export class UpgradeAssistantCoordinator {
       const verificationScripts = selectVerificationScripts(source.manifestText, configuredVerification);
 
       const analysisId = randomBytes(16).toString('hex');
+      const smartCleanupSnapshot = smartCleanup === undefined ? null : controller.lastResultSnapshot?.() ?? null;
+      const deprecationEvidence = smartCleanup === undefined
+        ? undefined
+        : this.options.getSmartCleanupDeprecationEvidence?.();
+      const smartCleanupBefore: SmartCleanupBeforeSnapshot | undefined = smartCleanupSnapshot === null || smartCleanup === undefined
+        ? undefined
+        : {
+            snapshot: smartCleanupSnapshot,
+            projectId: selected.id,
+            sourceGeneration: analysisSourceGeneration,
+            sourceFingerprint: computeSourceFingerprint({
+              manifestText: preflightProject.manifestText,
+              lockfileText: preflightProject.lockfileText,
+              lockfilePath: preflightProject.lockfilePath,
+              packageManager: preflightProject.packageManager,
+              importerId: preflightProject.importerId,
+            }),
+            ...(deprecationEvidence === undefined
+              ? {}
+              : {
+                  deprecatedDirectPackages: deprecationEvidence.deprecatedPackages,
+                  deprecationInstalledVersions: deprecationEvidence.installedVersions,
+                }),
+          };
       const removal: StoredRemoval = {
         id: analysisId,
         requests: [...message.changes],
         eligibility,
         eligibilities,
+        reservationKey,
         snapshot: preflightProject,
         ignoreScripts,
         verificationScripts,
+        ...(smartCleanup?.evidence === undefined ? {} : { smartCleanupEvidence: smartCleanup.evidence }),
+        ...(smartCleanup?.dedupeEvidence === undefined ? {} : { smartCleanupDedupeEvidence: smartCleanup.dedupeEvidence }),
+        ...(dedupeSelection === undefined ? {} : { smartCleanupDedupeSelection: dedupeSelection }),
+        ...(smartCleanup === undefined ? {} : { smartCleanupRequestId: smartCleanup.requestId }),
+        ...(smartCleanupBefore === undefined ? {} : { smartCleanupBefore }),
         expiresAt: Date.now() + REMOVAL_ANALYSIS_TTL_MS,
       };
       if (pending.cancelled || this.pendingRemovalAnalysis !== pending || this.options.isDisposed()) return;
+      if (
+        smartCleanup !== undefined &&
+        ((smartCleanup.evidence !== undefined && !smartCleanup.evidence.isCurrent()) ||
+          (smartCleanup.dedupeEvidence !== undefined && !smartCleanup.dedupeEvidence.isCurrent()))
+      ) {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: reservationKey,
+          error: {
+            code: 'STALE_ANALYSIS',
+            message: 'Project usage evidence changed while Smart Cleanup removal was being prepared. Analyze again.',
+          },
+        });
+        return;
+      }
       if (!this.sourceGeneration.commitIfCurrent(analysisSourceGeneration, () => {
         this.removal = removal;
       })) {
         this.options.sink.postMessage({
           status: 'remove-error',
-          package: eligibility.packageName,
+          package: reservationKey,
           error: {
             code: 'STALE_SOURCE',
             message: 'Project files changed while removal impact was being analyzed. Analyze again.',
@@ -1718,11 +2040,20 @@ export class UpgradeAssistantCoordinator {
         status: 'remove-analysis',
         analysis: buildRemoveAnalysisPresentation({
           analysisId,
-          packageName: eligibility.packageName,
+          packageName: reservationKey,
           changes,
           verificationScriptNames: verificationScripts.map((script) => script.scriptName),
           manifestPath,
           lockfilePath: expectedLockfilePath,
+          ...(smartCleanup?.dedupeEvidence === undefined || dedupeSelection === undefined
+            ? {}
+            : {
+                dedupe: {
+                  actionId: smartCleanup.dedupeEvidence.actionId,
+                  affectedPackages: [...dedupeSelection.affectedPackages],
+                  expectedRemovedVersions: dedupeSelection.expectedRemovedVersions,
+                },
+              }),
         }),
       });
       // Lock intentionally NOT released here — held until confirm, cancel, or TTL reclaim.
@@ -1730,14 +2061,14 @@ export class UpgradeAssistantCoordinator {
       return;
     } catch (cause) {
       if (!pending.cancelled && this.pendingRemovalAnalysis === pending && !this.options.isDisposed()) {
-        this.options.sink.postMessage({ status: 'remove-error', package: eligibility.packageName, error: toProtocolError(cause) });
+        this.options.sink.postMessage({ status: 'remove-error', package: reservationKey, error: toProtocolError(cause) });
       }
       return;
     } finally {
       if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
       if (!succeeded && pending.reservationHeld && !pending.releaseStarted) {
         pending.releaseStarted = true;
-        await this.releaseReservation(eligibility.packageName);
+        await this.releaseReservation(reservationKey);
       }
     }
   }
@@ -1746,23 +2077,35 @@ export class UpgradeAssistantCoordinator {
     await this.executeStoredRemoval(message.analysisId);
   }
 
-  handleCancelRemove(message: CancelUpgradeMessage): void {
+  handleCancelRemove(message: CancelRemoveMessage): void {
     if (message.analysisId === null) {
       const pending = this.pendingRemovalAnalysis;
-      if (pending === undefined || pending.cancelled) return;
-      pending.cancelled = true;
-      // Free the request slot synchronously. The abandoned operation compares
-      // identity after every await, so it cannot clear or publish over a
-      // replacement that starts immediately after this cancellation.
-      this.pendingRemovalAnalysis = undefined;
-      if (pending.reservationHeld && !pending.releaseStarted) {
-        pending.releaseStarted = true;
-        void this.releaseReservation(pending.packageName);
+      if (
+        pending !== undefined &&
+        !pending.cancelled &&
+        (message.requestId === undefined || pending.smartCleanupRequestId === message.requestId)
+      ) {
+        pending.cancelled = true;
+        pending.dedupeAbort?.abort();
+        // Free the request slot synchronously. The abandoned operation compares
+        // identity after every await, so it cannot clear or publish over a
+        // replacement that starts immediately after this cancellation.
+        this.pendingRemovalAnalysis = undefined;
+        if (pending.reservationHeld && !pending.releaseStarted) {
+          pending.releaseStarted = true;
+          void this.releaseReservation(pending.packageName);
+        }
+        return;
+      }
+      const stored = this.removal;
+      if (message.requestId !== undefined && stored?.smartCleanupRequestId === message.requestId) {
+        this.removal = undefined;
+        void this.releaseReservation(stored.reservationKey);
       }
       return;
     }
     if (this.removal === undefined || this.removal.id !== message.analysisId) return;
-    void this.releaseReservation(this.removal.eligibility.packageName);
+    void this.releaseReservation(this.removal.reservationKey);
     this.removal = undefined;
   }
 
@@ -2380,12 +2723,12 @@ export class UpgradeAssistantCoordinator {
     if (stored === undefined || stored.id !== analysisId || now >= stored.expiresAt) {
       this.options.sink.postMessage({
         status: 'remove-error',
-        package: stored?.eligibility.packageName ?? 'unknown',
+        package: stored?.reservationKey ?? 'unknown',
         error: { code: 'STALE_ANALYSIS', message: 'This removal analysis is no longer current. Analyze again.' },
       });
       if (stored !== undefined && now >= stored.expiresAt) {
         this.removal = undefined;
-        await this.releaseReservation(stored.eligibility.packageName);
+        await this.releaseReservation(stored.reservationKey);
       }
       return;
     }
@@ -2396,7 +2739,7 @@ export class UpgradeAssistantCoordinator {
 
     const controller = await this.options.ensureController();
     if (controller === undefined) {
-      await this.releaseReservation(stored.eligibility.packageName);
+      await this.releaseReservation(stored.reservationKey);
       return;
     }
 
@@ -2413,17 +2756,41 @@ export class UpgradeAssistantCoordinator {
         disk.registry === stored.snapshot.registry &&
         disk.packageManager === stored.snapshot.packageManager &&
         disk.importerId === stored.snapshot.importerId;
-      const rechecked = controller.validateBulkRemoveRequest(stored.requests);
+      const rechecked = stored.requests.length === 0
+        ? { ok: true as const }
+        : controller.validateBulkRemoveRequest(stored.requests);
       if (!sourceStillMatches || !rechecked.ok) {
         this.options.sink.postMessage({
           status: 'remove-error',
-          package: stored.eligibility.packageName,
+          package: stored.reservationKey,
           error: {
             code: 'STALE_SOURCE',
             message: 'Project dependency files changed while the analysis was open. Refresh and try again.',
           },
         });
         return;
+      }
+      if (stored.smartCleanupEvidence !== undefined || stored.smartCleanupDedupeEvidence !== undefined) {
+        const capability = smartCleanupProjectCapability(controller.upgradeSource);
+        if (!capability.executionSupported) {
+          this.options.sink.postMessage({
+            status: 'remove-error',
+            package: stored.reservationKey,
+            error: { code: 'NOT_ELIGIBLE', message: capability.reason },
+          });
+          return;
+        }
+        if (stored.smartCleanupEvidence !== undefined && !stored.smartCleanupEvidence.isCurrent()) {
+          this.options.sink.postMessage({
+            status: 'remove-error',
+            package: stored.reservationKey,
+            error: {
+              code: 'STALE_ANALYSIS',
+              message: 'Project usage evidence changed while the Smart Cleanup review was open. Analyze again.',
+            },
+          });
+          return;
+        }
       }
 
       const source = controller.upgradeSource;
@@ -2433,10 +2800,55 @@ export class UpgradeAssistantCoordinator {
         path.join(controller.root, source.packageManager === 'pnpm' ? 'pnpm-lock.yaml' : 'package-lock.json');
       const allowlistedPaths = [manifestPath, expectedLockfilePath];
 
-      const stagedManifest = buildStagedManifestForRemoval(
-        disk.manifestText,
-        stored.eligibilities.map((item) => ({ packageName: item.packageName, classification: item.classification }))
-      );
+      const stagedManifest = stored.eligibilities.length === 0
+        ? disk.manifestText
+        : buildStagedManifestForRemoval(
+            disk.manifestText,
+            stored.eligibilities.map((item) => ({ packageName: item.packageName, classification: item.classification }))
+          );
+      if (stored.smartCleanupDedupeEvidence !== undefined) {
+        if (!stored.smartCleanupDedupeEvidence.isCurrent()) {
+          this.options.sink.postMessage({
+            status: 'remove-error',
+            package: stored.reservationKey,
+            error: { code: 'STALE_ANALYSIS', message: 'Duplicate evidence changed while the Smart Cleanup review was open. Analyze again.' },
+          });
+          return;
+        }
+        const dedupeAbort = new AbortController();
+        this.activeSmartCleanupFinalCheckAbort = dedupeAbort;
+        let dedupeTimedOut = false;
+        const dedupeTimeout = setTimeout(() => {
+          dedupeTimedOut = true;
+          dedupeAbort.abort();
+        }, SMART_CLEANUP_DEDUPE_TIMEOUT_MS);
+        let verifiedDedupe: Awaited<ReturnType<SmartCleanupDedupeEvidence['verifySelection']>>;
+        try {
+          verifiedDedupe = await stored.smartCleanupDedupeEvidence.verifySelection(stagedManifest, dedupeAbort.signal);
+        } finally {
+          clearTimeout(dedupeTimeout);
+          if (this.activeSmartCleanupFinalCheckAbort === dedupeAbort) {
+            this.activeSmartCleanupFinalCheckAbort = undefined;
+          }
+        }
+        if (
+          !verifiedDedupe.ok ||
+          stored.smartCleanupDedupeSelection === undefined ||
+          !smartCleanupDedupeSelectionsMatch(stored.smartCleanupDedupeSelection, verifiedDedupe)
+        ) {
+          this.options.sink.postMessage({
+            status: 'remove-error',
+            package: stored.reservationKey,
+            error: {
+              code: 'STALE_ANALYSIS',
+              message: dedupeTimedOut
+                ? 'The final dedupe safety check timed out. Analyze Smart Cleanup again.'
+                : `${verifiedDedupe.ok ? 'The final duplicate plan changed.' : verifiedDedupe.reason} Analyze Smart Cleanup again.`,
+            },
+          });
+          return;
+        }
+      }
 
       const files = await createNodeUpgradeTransactionFileAdapter({
         workspaceRoot: selected.folder.uri.fsPath,
@@ -2447,11 +2859,13 @@ export class UpgradeAssistantCoordinator {
         cwd: controller.root,
         ignoreScripts: stored.ignoreScripts,
         packageManager: source.packageManager,
+        reconcileManifest: stored.eligibilities.length > 0,
+        dedupe: stored.smartCleanupDedupeEvidence !== undefined,
       });
       if (!prepared.ok) {
         this.options.sink.postMessage({
           status: 'remove-error',
-          package: stored.eligibility.packageName,
+          package: stored.reservationKey,
           error: { code: prepared.code, message: prepared.message },
         });
         return;
@@ -2460,7 +2874,7 @@ export class UpgradeAssistantCoordinator {
       if (!this.sourceGeneration.isCurrent(executionSourceGeneration)) {
         this.options.sink.postMessage({
           status: 'remove-error',
-          package: stored.eligibility.packageName,
+          package: stored.reservationKey,
           error: {
             code: 'STALE_SOURCE',
             message: 'Project files changed before removal could begin. Refresh and try again.',
@@ -2468,15 +2882,41 @@ export class UpgradeAssistantCoordinator {
         });
         return;
       }
-      if (!this.reservation.beginMutation(stored.eligibility.packageName)) return;
+      if (stored.smartCleanupEvidence !== undefined && !stored.smartCleanupEvidence.isCurrent()) {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: stored.reservationKey,
+          error: {
+            code: 'STALE_ANALYSIS',
+            message: 'Project usage evidence changed before Smart Cleanup could begin. Analyze again.',
+          },
+        });
+        return;
+      }
+      if (
+        stored.smartCleanupDedupeEvidence !== undefined &&
+        !stored.smartCleanupDedupeEvidence.isCurrent()
+      ) {
+        this.options.sink.postMessage({
+          status: 'remove-error',
+          package: stored.reservationKey,
+          error: { code: 'STALE_ANALYSIS', message: 'Duplicate evidence changed before Smart Cleanup could begin. Analyze again.' },
+        });
+        return;
+      }
+      if (!this.reservation.beginMutation(stored.reservationKey)) return;
       const transaction = await runUpgradeTransaction({
         allowlistedPaths,
         files,
-        manifestStage: {
-          path: manifestPath,
-          expectedContents: Buffer.from(disk.manifestText, 'utf8'),
-          contents: Buffer.from(stagedManifest, 'utf8'),
-        },
+        ...(stored.eligibilities.length === 0
+          ? {}
+          : {
+              manifestStage: {
+                path: manifestPath,
+                expectedContents: Buffer.from(disk.manifestText, 'utf8'),
+                contents: Buffer.from(stagedManifest, 'utf8'),
+              },
+            }),
         install: {
           execute: async () => {
             const outcome = await prepared.execute();
@@ -2485,68 +2925,286 @@ export class UpgradeAssistantCoordinator {
               : { status: 'failed' as const, code: outcome.code, message: outcome.message };
           },
         },
-        ...(stored.verificationScripts.length === 0
-          ? {}
-          : {
-              verifier: {
-                verify: () =>
-                  this.session.verify({
-                    packageName: stored.eligibility.packageName,
-                    cwd: controller.root,
-                    packageManager: source.packageManager,
-                    scripts: stored.verificationScripts,
-                  }),
+        verifier: {
+          verify: async () => {
+            const checks: Array<{ id: string; status: 'passed' | 'failed'; message?: string }> = [];
+            try {
+              const appliedManifestText = await readFile(manifestPath, 'utf8');
+              const appliedLockfileText = await readFile(expectedLockfilePath, 'utf8');
+              if (appliedManifestText !== stagedManifest) {
+                checks.push({ id: 'smart-cleanup-structure', status: 'failed', message: 'package.json does not match the reviewed cleanup plan.' });
+              } else {
+                const appliedGraph = buildDependencyGraph({
+                  root: controller.root,
+                  manifest: parseManifest(appliedManifestText),
+                  lockfileText: appliedLockfileText,
+                  packageManager: source.packageManager,
+                  importerId: source.importerId,
+                });
+                const direct = new Map(directNodes(appliedGraph).map((node) => [node.name, node.version]));
+                const removalStillPresent = stored.eligibilities.find((item) => direct.has(item.packageName));
+                let structuralFailure = removalStillPresent === undefined
+                  ? null
+                  : `${removalStillPresent.packageName} is still a direct dependency.`;
+                const selection = stored.smartCleanupDedupeSelection;
+                if (structuralFailure === null && selection !== undefined) {
+                  const actualDirect = Object.fromEntries([...direct].sort(([left], [right]) => left.localeCompare(right)));
+                  if (JSON.stringify(actualDirect) !== JSON.stringify(selection.expectedDirectVersions)) {
+                    structuralFailure = 'A direct dependency resolved differently from the reviewed cleanup preview.';
+                  }
+                  if (structuralFailure === null) {
+                    for (const [packageName, targetVersion] of Object.entries(selection.expectedTargets)) {
+                      const versions = [...new Set(
+                        [...appliedGraph.nodes.values()]
+                          .filter((node) => node.name === packageName && node.version !== null)
+                          .map((node) => node.version as string)
+                      )].sort((left, right) => left.localeCompare(right));
+                      if (versions.length !== 1 || versions[0] !== targetVersion) {
+                        structuralFailure = `${packageName} did not converge to the reviewed ${targetVersion} target.`;
+                        break;
+                      }
+                    }
+                  }
+                  if (structuralFailure === null) {
+                    const actualInventory = new Map<string, Set<string>>();
+                    for (const node of appliedGraph.nodes.values()) {
+                      if (node.version === null) continue;
+                      const versions = actualInventory.get(node.name) ?? new Set<string>();
+                      versions.add(node.version);
+                      actualInventory.set(node.name, versions);
+                    }
+                    const normalizedInventory = Object.fromEntries(
+                      [...actualInventory]
+                        .sort(([left], [right]) => left.localeCompare(right))
+                        .map(([name, versions]) => [name, [...versions].sort((left, right) => left.localeCompare(right))])
+                    );
+                    if (JSON.stringify(normalizedInventory) !== JSON.stringify(selection.expectedInventory)) {
+                      structuralFailure = 'The resolved dependency inventory differs from the reviewed cleanup preview.';
+                    }
+                  }
+                  if (
+                    structuralFailure === null &&
+                    cleanupGraphSignature(appliedGraph) !== selection.expectedGraphSignature
+                  ) {
+                    structuralFailure = 'The resolved dependency relationships differ from the reviewed cleanup preview.';
+                  }
+                }
+                checks.push(structuralFailure === null
+                  ? { id: 'smart-cleanup-structure', status: 'passed' }
+                  : { id: 'smart-cleanup-structure', status: 'failed', message: structuralFailure });
+              }
+            } catch (cause) {
+              checks.push({
+                id: 'smart-cleanup-structure',
+                status: 'failed',
+                message: `Could not verify the applied dependency graph: ${cause instanceof Error ? cause.message : String(cause)}`,
+              });
+            }
+            if (checks.some((check) => check.status === 'failed')) {
+              const message = checks.find((check) => check.status === 'failed')?.message;
+              return {
+                status: 'failed' as const,
+                checks,
+                ...(message === undefined ? {} : { message }),
+              };
+            }
+            if (stored.verificationScripts.length === 0) return { status: 'passed' as const, checks };
+            const scripts = await this.session.verify({
+              packageName: stored.reservationKey,
+              cwd: controller.root,
+              packageManager: source.packageManager,
+              scripts: stored.verificationScripts,
+            });
+            return scripts.status === 'passed'
+              ? { status: 'passed' as const, checks: [...checks, ...scripts.checks] }
+              : { ...scripts, checks: [...checks, ...scripts.checks] };
+          },
+        },
+        verificationFailureDecider: {
+          decide: async (result) => {
+            if (result.checks.some((check) => check.id === 'smart-cleanup-structure' && check.status === 'failed')) {
+              return 'rollback' as const;
+            }
+            if (this.options.isDisposed()) return 'rollback' as const;
+            const choice = await vscode.window.showWarningMessage(
+              'Cleanup was applied, but a configured verification check failed.',
+              {
+                modal: true,
+                detail:
+                  'Rollback restores only package.json and the active lockfile captured by this cleanup transaction; ' +
+                  'it does not restore node_modules or files changed by lifecycle/verification scripts.',
               },
-              verificationFailureDecider: {
-                decide: async () => {
-                  if (this.options.isDisposed()) return 'rollback' as const;
-                  const choice = await vscode.window.showWarningMessage(
-                    'The dependencies were removed, but post-removal verification failed.',
-                    {
-                      modal: true,
-                      detail:
-                        'Rollback restores only package.json and the active lockfile captured by this removal transaction; ' +
-                        'it does not restore node_modules or files changed by lifecycle/verification scripts.',
-                    },
-                    'Rollback',
-                    'Keep Changes'
-                  );
-                  return choice === 'Keep Changes' ? ('keep' as const) : ('rollback' as const);
-                },
-              },
-            }),
+              'Rollback',
+              'Keep Changes'
+            );
+            return choice === 'Keep Changes' ? ('keep' as const) : ('rollback' as const);
+          },
+        },
       });
 
       // Reload the kept/restored/partial state while the coordinator still owns the project-wide mutation lock.
-      if (!this.options.isDisposed()) await this.options.reloadFinalState();
+      // Smart Cleanup also performs one bounded final reread so its report is
+      // correlated to the exact source that produced the refreshed snapshot.
+      const finalEvidence = !this.options.isDisposed() && stored.smartCleanupRequestId !== undefined
+        ? await this.options.reloadSmartCleanupFinalState?.()
+        : undefined;
+      if (
+        !this.options.isDisposed() &&
+        (stored.smartCleanupRequestId === undefined || this.options.reloadSmartCleanupFinalState === undefined)
+      ) {
+        await this.options.reloadFinalState();
+      }
       if (this.options.isDisposed()) return;
 
       const presentation = describeRemoveTransactionOutcome(
         stored.eligibilities.map((item) => item.packageName),
         source.packageManager,
-        transaction
+        transaction,
+        { dedupe: stored.smartCleanupDedupeEvidence !== undefined }
       );
+      const removedPackages = stored.eligibilities.map((item) => item.packageName);
+      const verification =
+        transaction.verification.status === 'passed'
+          ? 'passed'
+          : transaction.verification.status === 'failed'
+            ? 'failed'
+            : transaction.verification.status === 'cancelled'
+              ? 'not-run'
+              : transaction.verification.reason === 'not-configured'
+                ? 'not-configured'
+                : 'not-run';
+      const smartCleanupPresentation: SmartCleanupCompletionPresentation | undefined =
+        stored.smartCleanupRequestId === undefined
+          ? undefined
+          : stored.smartCleanupBefore === undefined || finalEvidence === undefined
+            ? {
+                status: 'partial',
+                metrics: [],
+                removedAdvisories: [],
+                introducedAdvisories: [],
+                completedActionIds: [],
+                skippedActionIds: [],
+                failedActionIds: stored.smartCleanupDedupeEvidence === undefined
+                  ? removedPackages.map((packageName) => `remove-direct:${packageName}`)
+                  : [
+                      ...removedPackages.map((packageName) => `remove-direct:${packageName}`),
+                      stored.smartCleanupDedupeEvidence.actionId,
+                    ],
+                reason: 'Fresh correlated dashboard evidence was unavailable after cleanup.',
+              }
+            : (() => {
+                const refreshId = randomBytes(12).toString('hex');
+                const actionStatus = presentation.kind === 'rolled-back' ? 'skipped' as const : 'completed' as const;
+                const deprecatedDirectPackages = verifiedDeprecatedPackagesAfter(stored.smartCleanupBefore, finalEvidence);
+                const afterEvidence: SmartCleanupFinalRefreshEvidence = {
+                  ...finalEvidence,
+                  ...(deprecatedDirectPackages === undefined ? {} : { deprecatedDirectPackages }),
+                };
+                const completion = buildSmartCleanupCompletionReport({
+                  operation: {
+                    requestId: stored.smartCleanupRequestId,
+                    analysisId: stored.id,
+                    projectId: stored.smartCleanupBefore.projectId,
+                    refreshId,
+                    sourceGeneration: stored.smartCleanupBefore.sourceGeneration,
+                    sourceFingerprint: stored.smartCleanupBefore.sourceFingerprint,
+                  },
+                  before: stored.smartCleanupBefore,
+                  after: {
+                    ...afterEvidence,
+                    requestId: stored.smartCleanupRequestId,
+                    analysisId: stored.id,
+                    refreshId,
+                  },
+                  actions: [
+                    ...removedPackages.map((packageName) => {
+                      const removed = !afterEvidence.snapshot.rows.some((row) => row.name === packageName);
+                      return {
+                        actionId: `remove-direct:${packageName}`,
+                        packageName,
+                        status: presentation.kind === 'rolled-back' ? 'skipped' as const : removed ? actionStatus : 'failed' as const,
+                        ...(presentation.kind === 'rolled-back'
+                          ? { message: 'Project dependency files were restored.' }
+                          : removed
+                            ? {}
+                            : { message: 'The dependency still appears in the refreshed project inventory.' }),
+                      };
+                    }),
+                    ...(stored.smartCleanupDedupeEvidence === undefined
+                      ? []
+                      : (() => {
+                          const remainingDuplicates = new Set(
+                            (afterEvidence.snapshot.hygieneFindings ?? [])
+                              .filter((finding) => finding.kind === 'duplicate-version')
+                              .map((finding) => finding.packageName)
+                          );
+                          const expectedPackages = stored.smartCleanupDedupeSelection?.affectedPackages ?? [];
+                          const converged = transaction.verification.status === 'passed' &&
+                            (afterEvidence.snapshot.hygieneFindings === undefined || expectedPackages.every(
+                              (packageName) => !remainingDuplicates.has(packageName)
+                            ));
+                          return [{
+                            actionId: stored.smartCleanupDedupeEvidence.actionId,
+                            packageName: 'Project deduplication',
+                            status: presentation.kind === 'rolled-back' ? 'skipped' as const : converged ? actionStatus : 'failed' as const,
+                            ...(presentation.kind === 'rolled-back'
+                              ? { message: 'Project dependency files were restored.' }
+                              : converged
+                                ? {}
+                                : { message: 'At least one reviewed duplicate group remains after refresh.' }),
+                          }];
+                        })()),
+                  ],
+                });
+                return toSmartCleanupCompletionPresentation(completion, stored.smartCleanupBefore, afterEvidence);
+              })();
       if (presentation.kind === 'verified') {
+        this.options.sink.postMessage({
+          status: 'remove-result',
+          result: {
+            analysisId: stored.id,
+            packages: removedPackages,
+            outcome: 'verified',
+            verification,
+            rollback: 'not-needed',
+            message: presentation.message,
+            ...(smartCleanupPresentation === undefined ? {} : { smartCleanup: smartCleanupPresentation }),
+          },
+        });
         void vscode.window.showInformationMessage(presentation.message);
       } else if (presentation.kind === 'error') {
         this.options.sink.postMessage({
           status: 'remove-error',
-          package: stored.eligibility.packageName,
+          package: stored.reservationKey,
           error: presentation.error,
         });
       } else {
+        if (presentation.kind === 'unverified' || presentation.kind === 'rolled-back') {
+          this.options.sink.postMessage({
+            status: 'remove-result',
+            result: {
+              analysisId: stored.id,
+              packages: removedPackages,
+              outcome: presentation.kind,
+              verification,
+              rollback: presentation.kind === 'rolled-back' ? 'succeeded' : 'not-needed',
+              message: presentation.message,
+              ...(smartCleanupPresentation === undefined ? {} : { smartCleanup: smartCleanupPresentation }),
+            },
+          });
+        }
         void vscode.window.showWarningMessage(presentation.message);
       }
     } catch (cause) {
       if (!this.options.isDisposed()) {
         this.options.sink.postMessage({
           status: 'remove-error',
-          package: stored.eligibility.packageName,
+          package: stored.reservationKey,
           error: toProtocolError(cause),
         });
       }
     } finally {
-      await this.releaseReservation(stored.eligibility.packageName);
+      await this.releaseReservation(stored.reservationKey);
     }
   }
 }

@@ -70,6 +70,37 @@ test('exact-version metadata exposes bounded engine, bin, and exports evidence',
   assert.deepEqual(metadata.exports, { '.': './index.js', './server': { import: './server.mjs', require: './server.cjs' } });
 });
 
+test('exact-version metadata exposes only a non-empty maintainer deprecation notice', async () => {
+  const metadata = await fetchPackageVersionMetadata(
+    { async get() {
+      return response({
+        name: 'legacy-package',
+        version: '1.4.0',
+        deprecated: 'This release is deprecated. Please use maintained-package instead.',
+      });
+    } },
+    new MemoryEtagStore(),
+    'https://registry.example',
+    'legacy-package',
+    '1.4.0'
+  );
+  assert.equal(
+    metadata.deprecated,
+    'This release is deprecated. Please use maintained-package instead.'
+  );
+
+  const empty = await fetchPackageVersionMetadata(
+    { async get() {
+      return response({ name: 'current-package', version: '2.0.0', deprecated: '   ' });
+    } },
+    new MemoryEtagStore(),
+    'https://registry.example',
+    'current-package',
+    '2.0.0'
+  );
+  assert.equal(empty.deprecated, undefined);
+});
+
 test('scoped package names are encoded and use scoped registry routing lazily', async () => {
   const calls = [];
   const client = {

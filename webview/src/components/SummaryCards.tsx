@@ -38,7 +38,7 @@ function buildCards(metrics: SummaryMetrics, availability: ScanDataAvailability)
     },
     {
       id: 'vulnerabilities',
-      label: 'Vulnerabilities',
+      label: 'Vulnerable Dependencies',
       icon: <IconShield />,
       count: vulnerabilities.count,
       subtitle: vulnerabilities.subtitle,

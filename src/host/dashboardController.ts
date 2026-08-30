@@ -31,6 +31,7 @@ import { buildPackageRows } from '../core/pipeline.js';
 import type { HttpClient } from '../core/registry/http.js';
 import { FetchError } from '../core/registry/http.js';
 import type { EtagStore } from '../core/registry/versions.js';
+import type { PeerResolutionPolicy } from '../core/registry/npmrc.js';
 import type { AdvisoryLookupRequest } from '../core/advisories/resolve.js';
 import { resolveTrustedAdvisoryUrl } from '../core/advisories/resolve.js';
 import type {
@@ -77,6 +78,8 @@ export interface DashboardControllerOptions {
   registry: string;
   /** Full registry routing, including scoped overrides, for on-demand package metadata. */
   resolvedRegistry?: ResolvedRegistry;
+  /** Host-parsed peer policy used by isolated package-manager checks. */
+  peerPolicy?: PeerResolutionPolicy;
   httpClient: HttpClient;
   etagStore: EtagStore;
   /** Omit to skip the optional `npm audit` enrichment. */
@@ -149,6 +152,7 @@ export type ProjectSnapshot = Pick<
   | 'lockfileName'
   | 'registry'
   | 'resolvedRegistry'
+  | 'peerPolicy'
   | 'projectInfo'
   | 'canChangeProject'
   | 'cacheKey'
@@ -157,6 +161,8 @@ export type ProjectSnapshot = Pick<
 export class DashboardController {
   private options: DashboardControllerOptions;
   private lastResult: ScanSnapshot | undefined;
+  /** Fingerprint captured from the exact controller inputs that produced `lastResult`. */
+  private lastResultSourceFingerprint: ProjectSourceFingerprint | undefined;
   private lastGeneratedAt: string | undefined;
   private inFlight: AbortController | undefined;
   private disposed = false;
@@ -247,6 +253,7 @@ export class DashboardController {
     lockfilePath: string | null;
     registry: string;
     resolvedRegistry: ResolvedRegistry;
+    peerPolicy: PeerResolutionPolicy;
     packageManager: PackageManagerKind;
     importerId: string;
     lockfileName: 'package-lock.json' | 'npm-shrinkwrap.json' | 'pnpm-lock.yaml' | null;
@@ -260,6 +267,11 @@ export class DashboardController {
         url: this.options.registry,
         source: 'default',
         scoped: {},
+      },
+      peerPolicy: this.options.peerPolicy ?? {
+        strictPeerDeps: false,
+        legacyPeerDeps: false,
+        sources: { strictPeerDeps: 'default', legacyPeerDeps: 'default' },
       },
       packageManager: this.options.packageManager ?? 'npm',
       importerId: this.options.importerId ?? '.',
@@ -501,6 +513,26 @@ export class DashboardController {
     return this.lastResult?.rows ?? [];
   }
 
+  /** Host-only immutable facts for a correlated post-mutation report. */
+  lastResultSnapshot(): ScanSnapshot | null {
+    return this.lastResult === undefined ? null : toScanSnapshot(this.lastResult);
+  }
+
+  /** Host-only snapshot bound to the exact source inputs which produced it. */
+  lastResultEvidence(): { snapshot: ScanSnapshot; sourceFingerprint: ProjectSourceFingerprint } | null {
+    return this.lastResult === undefined || this.lastResultSourceFingerprint === undefined
+      ? null
+      : {
+          snapshot: toScanSnapshot(this.lastResult),
+          sourceFingerprint: this.lastResultSourceFingerprint,
+        };
+  }
+
+  /** Fingerprint of the exact manifest/lockfile inputs currently owned by this controller. */
+  sourceFingerprint(): ProjectSourceFingerprint {
+    return this.currentSourceFingerprint();
+  }
+
   /**
    * S7 — a watched file affecting this project's manifest or lockfile changed
    * (or a successful upgrade just rewrote them). Drops the persisted entry so
@@ -563,6 +595,7 @@ export class DashboardController {
     // carries those extra fields along invisibly; nothing that reads
     // `lastResult` as a ScanSnapshot ever looks at them.
     this.lastResult = cached;
+    this.lastResultSourceFingerprint = cached.sourceFingerprint;
     this.lastGeneratedAt = cached.generatedAt;
   }
 
@@ -655,11 +688,12 @@ export class DashboardController {
    * left as-is until `run()` either replaces it with the new result or
    * decides (via its own aborted/failure checks) not to.
    */
-  async handleRefresh(sink: MessageSink): Promise<void> {
+  async handleRefresh(sink: MessageSink): Promise<BackgroundRefreshOutcome> {
     this.lastResult = undefined;
+    this.lastResultSourceFingerprint = undefined;
     this.lastGeneratedAt = undefined;
     sink.postMessage({ status: 'loading' });
-    await this.run(sink);
+    return this.run(sink);
   }
 
   /**
@@ -759,6 +793,7 @@ export class DashboardController {
     // `announceRevalidating`'s own doc.
     if (effectiveReason === 'structural') this.announceRevalidating(sink);
 
+    const scanSourceFingerprint = this.currentSourceFingerprint();
     const buildOptions: BuildPackageRowsOptions = {
       root: this.options.root,
       manifestText: this.options.manifestText,
@@ -801,6 +836,7 @@ export class DashboardController {
       const generatedAt = new Date().toISOString();
       const snapshot = toScanSnapshot(result);
       this.lastResult = snapshot;
+      this.lastResultSourceFingerprint = scanSourceFingerprint;
       this.lastGeneratedAt = generatedAt;
       this.persistSnapshot(snapshot, generatedAt, performance);
       // Only a scan whose source didn't change out from under it restores

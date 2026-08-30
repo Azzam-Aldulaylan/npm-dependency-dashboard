@@ -1,0 +1,155 @@
+{
+  "removal": {
+    "safe": {
+      "findingId": "unused:unused-tool",
+      "actionId": "remove:unused-tool",
+      "packageName": "unused-tool",
+      "classification": "dev",
+      "directUsage": "not-found",
+      "transitivelyPresent": false,
+      "assessment": {
+        "status": "low-risk",
+        "evidence": []
+      }
+    },
+    "blocked": {
+      "findingId": "unused:tiptap-pm",
+      "actionId": "remove:tiptap-pm",
+      "packageName": "@tiptap/pm",
+      "classification": "prod",
+      "directUsage": "not-found",
+      "transitivelyPresent": true,
+      "assessment": {
+        "status": "blocked",
+        "evidence": [
+          {
+            "kind": "peer-requirement",
+            "summary": "@tiptap/core requires @tiptap/pm as a peer dependency.",
+            "requiredBy": "@tiptap/core",
+            "requestedRange": "^2.0.0",
+            "optional": false
+          }
+        ]
+      }
+    }
+  },
+  "deprecated": {
+    "unused": {
+      "findingId": "deprecated:legacy-unused",
+      "packageName": "legacy-unused",
+      "message": "This package is deprecated. Please use maintained-tool instead.",
+      "directUsage": "not-found",
+      "suggestedReplacement": "maintained-tool"
+    },
+    "used": {
+      "findingId": "deprecated:legacy-used",
+      "packageName": "legacy-used",
+      "message": "This package is deprecated. Please use maintained-runtime instead.",
+      "directUsage": "used",
+      "suggestedReplacement": "maintained-runtime"
+    }
+  },
+  "duplicates": {
+    "convergent": {
+      "findingId": "duplicate:nanoid",
+      "packageName": "nanoid",
+      "versions": ["3.3.8", "3.3.11"],
+      "keepBoth": false,
+      "constraints": [
+        {
+          "dependentPackage": "postcss",
+          "dependentVersion": "8.5.6",
+          "kind": "dependency",
+          "range": "^3.3.8"
+        },
+        {
+          "dependentPackage": "cssnano",
+          "dependentVersion": "7.1.0",
+          "kind": "dependency",
+          "range": ">=3.3.8 <4"
+        }
+      ],
+      "simulation": {
+        "status": "complete",
+        "resolvedVersions": ["3.3.11"],
+        "constraints": [
+          {
+            "dependentPackage": "postcss",
+            "dependentVersion": "8.5.6",
+            "kind": "dependency",
+            "range": "^3.3.8"
+          },
+          {
+            "dependentPackage": "cssnano",
+            "dependentVersion": "7.1.0",
+            "kind": "dependency",
+            "range": ">=3.3.8 <4"
+          }
+        ],
+        "constraintsComplete": true,
+        "parentUpgrades": []
+      }
+    },
+    "keepBoth": {
+      "findingId": "duplicate:react",
+      "packageName": "react",
+      "versions": ["17.0.2", "18.3.1"],
+      "keepBoth": true,
+      "constraints": [
+        {
+          "dependentPackage": "legacy-widget",
+          "dependentVersion": "2.0.0",
+          "kind": "peer",
+          "range": "^17.0.0"
+        },
+        {
+          "dependentPackage": "modern-widget",
+          "dependentVersion": "5.0.0",
+          "kind": "peer",
+          "range": "^18.0.0"
+        }
+      ],
+      "simulation": {
+        "status": "complete",
+        "resolvedVersions": ["17.0.2", "18.3.1"],
+        "constraints": [
+          {
+            "dependentPackage": "legacy-widget",
+            "dependentVersion": "2.0.0",
+            "kind": "peer",
+            "range": "^17.0.0"
+          },
+          {
+            "dependentPackage": "modern-widget",
+            "dependentVersion": "5.0.0",
+            "kind": "peer",
+            "range": "^18.0.0"
+          }
+        ],
+        "constraintsComplete": true,
+        "parentUpgrades": []
+      }
+    }
+  },
+  "security": {
+    "advisory": {
+      "id": 1139427,
+      "severity": "high",
+      "title": "nanoid generators can loop indefinitely",
+      "url": "https://github.com/advisories/GHSA-2V37-7H3G-55P8",
+      "vulnerableVersions": "<3.3.8",
+      "identifiers": [
+        { "type": "GHSA", "value": "GHSA-2V37-7H3G-55P8" },
+        { "type": "CVE", "value": "CVE-2024-55565" }
+      ]
+    }
+  },
+  "reports": {
+    "stale": {
+      "reason": "The refreshed project snapshot no longer matches the cleanup source fingerprint."
+    },
+    "unavailableSecurity": {
+      "reason": "Advisory data was unavailable after cleanup."
+    }
+  }
+}

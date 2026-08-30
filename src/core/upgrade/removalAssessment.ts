@@ -58,8 +58,20 @@ function configEvidence(references: readonly DependencyReference[]): RemovalEvid
 
 function peerEvidence(requirement: PeerRequirementEvidence): RemovalEvidence {
   return requirement.optional
-    ? { kind: 'peer-requirement', summary: `${requirement.requiredBy} has an optional peer dependency on this package` }
-    : { kind: 'peer-requirement', summary: `${requirement.requiredBy} requires this package as a peer dependency` };
+    ? {
+        kind: 'peer-requirement',
+        summary: `${requirement.requiredBy} has an optional peer dependency on this package`,
+        requiredBy: requirement.requiredBy,
+        requestedRange: requirement.range,
+        optional: true,
+      }
+    : {
+        kind: 'peer-requirement',
+        summary: `${requirement.requiredBy} requires this package as a peer dependency`,
+        requiredBy: requirement.requiredBy,
+        requestedRange: requirement.range,
+        optional: false,
+      };
 }
 
 function transitiveEvidence(stillRequiredBy: readonly string[]): RemovalEvidence | null {

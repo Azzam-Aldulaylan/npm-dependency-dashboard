@@ -20,6 +20,7 @@ import {
 import { REMOVAL_IMPACT_LABEL } from '../removalImpactState.js';
 import type { RemovalImpactState } from '../removalImpactState.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
+import { DirectionalButton } from './DirectionalButton.js';
 import { SeverityBadge } from './SeverityBadge.js';
 import { CurrentVersionCell } from './VersionCell.js';
 import { patchedVersionText } from './VulnerabilityCard.js';
@@ -138,15 +139,15 @@ function UpgradeCard({
           ) : null}
           {updateKind !== null ? <span className="status-badge">{UPDATE_KIND_LABEL[updateKind]} update</span> : null}
         </p>
-        <button
-          type="button"
+        <DirectionalButton
+          direction="forward"
           className="button button--primary manage-action-card__cta"
           disabled={actionsDisabled}
           title={actionsDisabled ? 'Another dependency operation is already in progress.' : state.tooltip}
           onClick={() => onStartUpgradeReview(state.target)}
         >
-          Review upgrade →
-        </button>
+          Review upgrade
+        </DirectionalButton>
       </ActionCard>
     );
   }
@@ -247,14 +248,14 @@ function RemoveCard({
           </span>
         </div>
       ) : (
-        <button
-          type="button"
+        <DirectionalButton
+          direction="forward"
           className="button button--primary manage-action-card__cta"
           disabled={actionsDisabled}
           onClick={entry !== undefined ? () => onChangeTab('removal') : onStartRemovalReview}
         >
-          {entry !== undefined ? 'Review removal →' : 'Analyze removal →'}
-        </button>
+          {entry !== undefined ? 'Review removal' : 'Analyze removal'}
+        </DirectionalButton>
       )}
       {removalImpact.phase === 'error' ? (
         <p className="manage-action-card__status manage-action-card__status--error">
@@ -299,9 +300,9 @@ function TransitiveFixCard({
         <code>{subject}</code> is introduced through <code>{introducedThrough}</code>.
       </p>
       {remediation === undefined ? (
-        <button type="button" className="button button--primary manage-action-card__cta" disabled={actionsDisabled} onClick={onAnalyzeRemediation}>
-          Check transitive fixes →
-        </button>
+        <DirectionalButton direction="forward" className="button button--primary manage-action-card__cta" disabled={actionsDisabled} onClick={onAnalyzeRemediation}>
+          Check transitive fixes
+        </DirectionalButton>
       ) : remediation.phase === 'analyzing' ? (
         <p className="manage-action-card__status">
           <IconRefresh className="manage-action-card__status-icon manage-action-card__status-icon--spin" />

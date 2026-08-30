@@ -404,11 +404,11 @@ export interface RemoveAnalysisFiles {
  * source-reference evidence entry opens through the existing
  * `open-usage-reference` trust boundary, never a new one.
  *
- * Deliberately read-only and non-authoritative: it never gates the actual
- * removal transaction (`bulk-remove` -> `confirm-remove` is unchanged and
- * re-validates everything fresh from disk regardless of what this preview
- * showed) — see removeAnalysisPresentation.ts and
- * UpgradeAssistantCoordinator.executeStoredRemoval.
+ * The preview is read-only. Generic `bulk-remove` remains independent and
+ * re-validates everything fresh from disk; Smart Cleanup additionally binds
+ * `smart-cleanup-remove` to this host-owned evidence and revokes that authority
+ * on source/config changes. Both paths still use the same single-use removal
+ * analysis and transaction — see UpgradeAssistantCoordinator.
  */
 export interface RemovalImpactAssessment {
   packageName: string;
@@ -424,6 +424,83 @@ export interface RemoveAnalysisPresentation {
   /** Same policy/shape as an upgrade's verification — post-removal scripts run the same way a coordinated upgrade's do. */
   verification: UpgradeAnalysisVerification;
   files: RemoveAnalysisFiles;
+  /** Present only for a host-verified Smart Cleanup project-wide dedupe. */
+  dedupe?: {
+    actionId: string;
+    affectedPackages: string[];
+    expectedRemovedVersions: number;
+  };
+}
+
+export type SmartCleanupCompletionMetricId =
+  | 'dependencies'
+  | 'deprecated-dependencies'
+  | 'duplicate-groups'
+  | 'excess-versions'
+  | 'vulnerable-dependencies'
+  | 'advisory-findings';
+
+export interface SmartCleanupCompletionMetricPresentation {
+  id: SmartCleanupCompletionMetricId;
+  label: string;
+  before: number;
+  after: number;
+  detail: string;
+}
+
+export interface SmartCleanupAdvisoryOutcomePresentation {
+  sourceId: string;
+  identifiers: string[];
+  flaggedPackage: string;
+  severity: 'critical' | 'high' | 'moderate' | 'low' | 'info';
+  title: string;
+}
+
+export interface SmartCleanupCompletionPresentation {
+  status: 'verified' | 'partial' | 'stale';
+  metrics: SmartCleanupCompletionMetricPresentation[];
+  removedAdvisories: SmartCleanupAdvisoryOutcomePresentation[];
+  introducedAdvisories: SmartCleanupAdvisoryOutcomePresentation[];
+  completedActionIds: string[];
+  skippedActionIds: string[];
+  failedActionIds: string[];
+  reason?: string;
+}
+
+/**
+ * Terminal, host-owned result for a coordinated removal. The dashboard reload
+ * remains the authority for the new dependency/security facts; this message
+ * only tells a guided workflow whether the transaction was kept or restored.
+ */
+export interface RemoveResultPresentation {
+  /** Correlates this terminal outcome to the exact host-issued removal review that was confirmed. */
+  analysisId: string;
+  packages: string[];
+  outcome: 'verified' | 'unverified' | 'rolled-back';
+  verification: 'passed' | 'not-configured' | 'failed' | 'not-run';
+  rollback: 'not-needed' | 'succeeded';
+  message: string;
+  /** Present only for Smart Cleanup; derived and correlated entirely by the host. */
+  smartCleanup?: SmartCleanupCompletionPresentation;
+}
+
+export type SmartCleanupExecutionCapability =
+  | { executionSupported: true }
+  | { executionSupported: false; reason: string };
+
+export interface SmartCleanupDuplicateAssessmentPresentation {
+  packageName: string;
+  outcome: 'safe-convergence' | 'keep-both' | 'unknown';
+  currentVersions: string[];
+  targetVersion?: string;
+  reason: string;
+}
+
+/** One host-owned project-wide dedupe opportunity; the command is never package-scoped. */
+export interface SmartCleanupDedupeActionPresentation {
+  actionId: string;
+  affectedPackages: string[];
+  expectedRemovedVersions: number;
 }
 
 // Re-exported for every existing import site (dashboardController.ts,
@@ -533,6 +610,8 @@ export type HostToWebviewMessage =
   | { status: 'remove-analyzing'; package: string }
   /** The host-owned removal analysis, ready for the review/confirm modal to render. */
   | { status: 'remove-analysis'; analysis: RemoveAnalysisPresentation }
+  /** A coordinated removal reached a stable kept/restored boundary. */
+  | { status: 'remove-result'; result: RemoveResultPresentation }
   /** A removal could not run — rejected by host-side validation, cancelled, or the task itself failed. */
   | { status: 'remove-error'; package: string; error: ProtocolError }
   /** A transitive-vulnerability "Analyze remediation" request has started — see analyze-remediation below. */
@@ -572,7 +651,26 @@ export type HostToWebviewMessage =
    */
   | { status: 'cleanup-result'; findings: DependencyFinding[]; analyzedAt: string; cacheExpiresAt: string }
   /** The cleanup run failed or was cancelled before producing a result. */
-  | { status: 'cleanup-error'; error: ProtocolError };
+  | { status: 'cleanup-error'; error: ProtocolError }
+  /** Exact installed-version registry metadata is fetched lazily for Smart Cleanup. */
+  | { status: 'smart-cleanup-metadata-analyzing'; requestId: string; completed: number; total: number }
+  | {
+      status: 'smart-cleanup-metadata-result';
+      requestId: string;
+      findings: DependencyFinding[];
+      unavailablePackages: string[];
+      capability: SmartCleanupExecutionCapability;
+    }
+  | { status: 'smart-cleanup-metadata-error'; requestId: string; error: ProtocolError }
+  | { status: 'smart-cleanup-duplicates-analyzing'; requestId: string }
+  | {
+      status: 'smart-cleanup-duplicates-result';
+      requestId: string;
+      assessments: SmartCleanupDuplicateAssessmentPresentation[];
+      action?: SmartCleanupDedupeActionPresentation;
+      unavailableReason?: string;
+    }
+  | { status: 'smart-cleanup-duplicates-error'; requestId: string; error: ProtocolError };
 
 /**
  * `package` and `target` are the smallest request that lets the host verify
@@ -589,7 +687,7 @@ export type HostToWebviewMessage =
 /**
  * `open-advisory` never carries a URL — only the identifier of an advisory
  * already present in the host's own last scan and, optionally, one displayed
- * CVE/GHSA/npm reference. See
+ * public CVE/GHSA reference. See
  * src/core/advisories/resolve.ts and DashboardController.resolveAdvisoryUrl
  * for why: the host resolves the actual URL itself from trusted data, so
  * there is nothing here for a compromised or buggy webview to redirect
@@ -614,6 +712,14 @@ export type WebviewToHostMessage =
   | { type: 'bulk-upgrade'; changes: Array<{ package: string; target: string }>; requestId: string }
   /** Coordinated removal of one or more declared direct dependencies — see src/core/upgrade/validate.ts's validateBulkRemoveRequest. */
   | { type: 'bulk-remove'; changes: Array<{ package: string }> }
+  /** Smart Cleanup final plan: host re-resolves the opaque dedupe action and optional removal evidence. */
+  | {
+      type: 'smart-cleanup-remove';
+      requestId: string;
+      packages: string[];
+      removalRequestId?: string;
+      dedupeActionId?: string;
+    }
   | { type: 'open-advisory'; package: string; advisoryId: string | number; path: string[]; reference?: string }
   | { type: 'confirm-upgrade'; analysisId: string }
   /**
@@ -629,7 +735,7 @@ export type WebviewToHostMessage =
   | { type: 'retry-upgrade-enrichment'; refreshId: string }
   /** Same analysisId-lookup discipline as confirm-upgrade/cancel-upgrade, targeting a stored removal analysis instead. */
   | { type: 'confirm-remove'; analysisId: string }
-  | { type: 'cancel-remove'; analysisId: string | null }
+  | { type: 'cancel-remove'; analysisId: string | null; requestId?: string }
   | { type: 'configure-verification' }
   /**
    * Only ever a package name — see resolveRemediationRequest
@@ -648,6 +754,11 @@ export type WebviewToHostMessage =
   | { type: 'reanalyze-usage'; package: string }
   /** On-demand usage scan across every direct dependency at once — see usageCoordinator.ts's handleAnalyzeCleanup. No payload: there is nothing for the webview to choose here either. */
   | { type: 'analyze-cleanup' }
+  /** Lazy, exact-version deprecation metadata for the dedicated Smart Cleanup workspace. */
+  | { type: 'analyze-smart-cleanup-metadata'; requestId: string }
+  | { type: 'cancel-smart-cleanup-metadata'; requestId: string }
+  | { type: 'analyze-smart-cleanup-duplicates'; requestId: string }
+  | { type: 'cancel-smart-cleanup-duplicates'; requestId: string }
   /**
    * A read-only removal-impact preview for one or more packages — the single
    * "Analyze removal" card in the Manage dependency modal, and the bulk
@@ -811,7 +922,12 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   }
   if (type === 'cancel-remove') {
     const analysisId = value['analysisId'];
-    return hasOnlyKeys(value, ['type', 'analysisId']) && (analysisId === null || isNonEmptyString(analysisId));
+    const requestId = value['requestId'];
+    return (
+      hasOnlyKeys(value, ['type', 'analysisId', 'requestId']) &&
+      (analysisId === null || isNonEmptyString(analysisId)) &&
+      (requestId === undefined || isNonEmptyString(requestId))
+    );
   }
   if (type === 'open-advisory') {
     const advisoryId = value['advisoryId'];
@@ -855,8 +971,19 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   if (type === 'analyze-remediation' || type === 'where-used' || type === 'reanalyze-usage') {
     return hasOnlyKeys(value, ['type', 'package']) && isNonEmptyString(value['package']);
   }
-  if (type === 'analyze-cleanup' || type === 'cancel-usage-analysis') {
+  if (
+    type === 'analyze-cleanup' ||
+    type === 'cancel-usage-analysis'
+  ) {
     return hasOnlyKeys(value, ['type']);
+  }
+  if (
+    type === 'analyze-smart-cleanup-metadata' ||
+    type === 'cancel-smart-cleanup-metadata' ||
+    type === 'analyze-smart-cleanup-duplicates' ||
+    type === 'cancel-smart-cleanup-duplicates'
+  ) {
+    return hasOnlyKeys(value, ['type', 'requestId']) && isNonEmptyString(value['requestId']);
   }
   if (type === 'analyze-removal-impact') {
     const packages = value['packages'];
@@ -864,6 +991,19 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
       hasOnlyKeys(value, ['type', 'requestId', 'packages']) &&
       isNonEmptyString(value['requestId']) &&
       isCanonicalRemovalPackageSet(packages)
+    );
+  }
+  if (type === 'smart-cleanup-remove') {
+    const packages = value['packages'];
+    const removalRequestId = value['removalRequestId'];
+    const dedupeActionId = value['dedupeActionId'];
+    return (
+      hasOnlyKeys(value, ['type', 'requestId', 'packages', 'removalRequestId', 'dedupeActionId']) &&
+      isNonEmptyString(value['requestId']) &&
+      isCanonicalRemovalPackageSet(packages, true) &&
+      (removalRequestId === undefined || isNonEmptyString(removalRequestId)) &&
+      (dedupeActionId === undefined || isNonEmptyString(dedupeActionId)) &&
+      ((packages.length > 0 && isNonEmptyString(removalRequestId)) || isNonEmptyString(dedupeActionId))
     );
   }
   if (type === 'cancel-removal-impact') {
@@ -1387,11 +1527,11 @@ function isVerification(value: unknown): value is UpgradeAnalysisVerification {
 
 function isRemoveAnalysisPresentation(value: unknown): value is RemoveAnalysisPresentation {
   if (!isRecord(value)) return false;
-  if (!hasOnlyKeys(value, ['analysisId', 'package', 'changes', 'verification', 'files'])) return false;
+  if (!hasOnlyKeys(value, ['analysisId', 'package', 'changes', 'verification', 'files', 'dedupe'])) return false;
   if (!isVerification(value['verification'])) return false;
 
   const changes = value['changes'];
-  if (!Array.isArray(changes) || changes.length === 0 || changes.length > MAX_BULK_REMOVE_CHANGES) return false;
+  if (!Array.isArray(changes) || changes.length > MAX_BULK_REMOVE_CHANGES) return false;
   const changeNames = new Set<string>();
   for (const change of changes) {
     if (
@@ -1408,6 +1548,10 @@ function isRemoveAnalysisPresentation(value: unknown): value is RemoveAnalysisPr
     }
     changeNames.add(change['packageName']);
   }
+
+  const dedupe = value['dedupe'];
+  if (changes.length === 0 && dedupe === undefined) return false;
+  if (dedupe !== undefined && !isSmartCleanupDedupeAction(dedupe)) return false;
 
   const files = value['files'];
   if (
@@ -1474,13 +1618,19 @@ const REMOVAL_EVIDENCE_KINDS: ReadonlySet<string> = new Set<RemovalEvidenceKind>
 const REMOVAL_ASSESSMENT_STATUSES: ReadonlySet<string> = new Set(['low-risk', 'review', 'blocked', 'unknown']);
 
 function isRemovalEvidence(value: unknown): value is RemovalEvidence {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['kind', 'summary']) &&
-    typeof value['kind'] === 'string' &&
-    REMOVAL_EVIDENCE_KINDS.has(value['kind']) &&
-    typeof value['summary'] === 'string'
-  );
+  if (!isRecord(value) || typeof value['kind'] !== 'string' || !REMOVAL_EVIDENCE_KINDS.has(value['kind'])) {
+    return false;
+  }
+  if (value['kind'] === 'peer-requirement') {
+    return (
+      hasOnlyKeys(value, ['kind', 'summary', 'requiredBy', 'requestedRange', 'optional']) &&
+      typeof value['summary'] === 'string' &&
+      isNonEmptyString(value['requiredBy']) &&
+      typeof value['requestedRange'] === 'string' &&
+      typeof value['optional'] === 'boolean'
+    );
+  }
+  return hasOnlyKeys(value, ['kind', 'summary']) && typeof value['summary'] === 'string';
 }
 
 function isRemovalAssessment(value: unknown): value is RemovalAssessment {
@@ -1502,6 +1652,42 @@ function isRemovalImpactAssessment(value: unknown): value is RemovalImpactAssess
     isNonEmptyString(value['packageName']) &&
     isRemovalAssessment(value['assessment']) &&
     isNonEmptyString(value['usageId'])
+  );
+}
+
+function isSmartCleanupDuplicateAssessment(
+  value: unknown
+): value is SmartCleanupDuplicateAssessmentPresentation {
+  if (!isRecord(value)) return false;
+  const outcome = value['outcome'];
+  const versions = value['currentVersions'];
+  const allowedKeys = outcome === 'safe-convergence'
+    ? ['packageName', 'outcome', 'currentVersions', 'targetVersion', 'reason']
+    : ['packageName', 'outcome', 'currentVersions', 'reason'];
+  return (
+    hasOnlyKeys(value, allowedKeys) &&
+    isNonEmptyString(value['packageName']) &&
+    (outcome === 'safe-convergence' || outcome === 'keep-both' || outcome === 'unknown') &&
+    Array.isArray(versions) && versions.length >= 2 && versions.length <= 50 &&
+    versions.every((version) => isNonEmptyString(version) && version.length <= 100) &&
+    new Set(versions).size === versions.length &&
+    (outcome !== 'safe-convergence' || (isNonEmptyString(value['targetVersion']) && value['targetVersion'].length <= 100)) &&
+    isNonEmptyString(value['reason']) && value['reason'].length <= 1000
+  );
+}
+
+function isSmartCleanupDedupeAction(value: unknown): value is SmartCleanupDedupeActionPresentation {
+  if (!isRecord(value)) return false;
+  const packages = value['affectedPackages'];
+  return (
+    hasOnlyKeys(value, ['actionId', 'affectedPackages', 'expectedRemovedVersions']) &&
+    isNonEmptyString(value['actionId']) && value['actionId'].length <= 200 &&
+    Array.isArray(packages) && packages.length > 0 && packages.length <= 500 &&
+    packages.every((name) => isNonEmptyString(name) && name.length <= 214) &&
+    new Set(packages).size === packages.length &&
+    typeof value['expectedRemovedVersions'] === 'number' &&
+    Number.isInteger(value['expectedRemovedVersions']) &&
+    value['expectedRemovedVersions'] > 0 && value['expectedRemovedVersions'] <= 10_000
   );
 }
 
@@ -1540,6 +1726,62 @@ function isUpgradeTargetOptions(value: unknown): value is UpgradeTargetOptions {
     new Set(options.map((option) => option.version)).size === options.length &&
     typeof value['truncated'] === 'boolean' &&
     (recommendedVersion === null || options.some((option) => option.version === recommendedVersion))
+  );
+}
+
+const SMART_CLEANUP_COMPLETION_METRIC_IDS: ReadonlySet<string> = new Set([
+  'dependencies',
+  'deprecated-dependencies',
+  'duplicate-groups',
+  'excess-versions',
+  'vulnerable-dependencies',
+  'advisory-findings',
+]);
+
+function isSmartCleanupCompletionMetric(value: unknown): value is SmartCleanupCompletionMetricPresentation {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['id', 'label', 'before', 'after', 'detail']) &&
+    typeof value['id'] === 'string' &&
+    SMART_CLEANUP_COMPLETION_METRIC_IDS.has(value['id']) &&
+    isNonEmptyString(value['label']) &&
+    typeof value['before'] === 'number' && Number.isInteger(value['before']) && value['before'] >= 0 &&
+    typeof value['after'] === 'number' && Number.isInteger(value['after']) && value['after'] >= 0 &&
+    isNonEmptyString(value['detail'])
+  );
+}
+
+function isSmartCleanupAdvisoryOutcome(value: unknown): value is SmartCleanupAdvisoryOutcomePresentation {
+  const identifiers = isRecord(value) ? value['identifiers'] : undefined;
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['sourceId', 'identifiers', 'flaggedPackage', 'severity', 'title']) &&
+    isNonEmptyString(value['sourceId']) &&
+    Array.isArray(identifiers) && identifiers.every(isNonEmptyString) &&
+    isNonEmptyString(value['flaggedPackage']) &&
+    (value['severity'] === 'critical' || value['severity'] === 'high' || value['severity'] === 'moderate' || value['severity'] === 'low' || value['severity'] === 'info') &&
+    isNonEmptyString(value['title'])
+  );
+}
+
+function isSmartCleanupCompletionPresentation(value: unknown): value is SmartCleanupCompletionPresentation {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['status', 'metrics', 'removedAdvisories', 'introducedAdvisories', 'completedActionIds', 'skippedActionIds', 'failedActionIds', 'reason'])) return false;
+  const metrics = value['metrics'];
+  const removed = value['removedAdvisories'];
+  const introduced = value['introducedAdvisories'];
+  const completedActionIds = value['completedActionIds'];
+  const skippedActionIds = value['skippedActionIds'];
+  const failedActionIds = value['failedActionIds'];
+  return (
+    (value['status'] === 'verified' || value['status'] === 'partial' || value['status'] === 'stale') &&
+    Array.isArray(metrics) && metrics.every(isSmartCleanupCompletionMetric) &&
+    new Set(metrics.map((metric) => metric.id)).size === metrics.length &&
+    Array.isArray(removed) && removed.every(isSmartCleanupAdvisoryOutcome) &&
+    Array.isArray(introduced) && introduced.every(isSmartCleanupAdvisoryOutcome) &&
+    Array.isArray(completedActionIds) && completedActionIds.every(isNonEmptyString) &&
+    Array.isArray(skippedActionIds) && skippedActionIds.every(isNonEmptyString) &&
+    Array.isArray(failedActionIds) && failedActionIds.every(isNonEmptyString) &&
+    (value['reason'] === undefined || isNonEmptyString(value['reason']))
   );
 }
 
@@ -1674,6 +1916,28 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   if (status === 'remove-analysis') {
     return hasOnlyKeys(value, ['status', 'analysis']) && isRemoveAnalysisPresentation(value['analysis']);
   }
+  if (status === 'remove-result') {
+    const result = value['result'];
+    if (!isRecord(result) || !hasOnlyKeys(result, ['analysisId', 'packages', 'outcome', 'verification', 'rollback', 'message', 'smartCleanup'])) {
+      return false;
+    }
+    const packages = result['packages'];
+    return (
+      isNonEmptyString(result['analysisId']) &&
+      Array.isArray(packages) &&
+      (packages.length > 0 || result['smartCleanup'] !== undefined) &&
+      packages.every(isNonEmptyString) &&
+      new Set(packages).size === packages.length &&
+      (result['outcome'] === 'verified' || result['outcome'] === 'unverified' || result['outcome'] === 'rolled-back') &&
+      (result['verification'] === 'passed' ||
+        result['verification'] === 'not-configured' ||
+        result['verification'] === 'failed' ||
+        result['verification'] === 'not-run') &&
+      (result['rollback'] === 'not-needed' || result['rollback'] === 'succeeded') &&
+      isNonEmptyString(result['message']) &&
+      (result['smartCleanup'] === undefined || isSmartCleanupCompletionPresentation(result['smartCleanup']))
+    );
+  }
   if (status === 'remove-error') {
     return (
       hasOnlyKeys(value, ['status', 'package', 'error']) &&
@@ -1759,6 +2023,67 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
   }
   if (status === 'cleanup-error') {
     return hasOnlyKeys(value, ['status', 'error']) && isProtocolError(value['error']);
+  }
+  if (status === 'smart-cleanup-metadata-analyzing') {
+    const completed = value['completed'];
+    const total = value['total'];
+    return (
+      hasOnlyKeys(value, ['status', 'requestId', 'completed', 'total']) &&
+      isNonEmptyString(value['requestId']) &&
+      typeof completed === 'number' && Number.isInteger(completed) && completed >= 0 &&
+      typeof total === 'number' && Number.isInteger(total) && total >= 0 &&
+      completed <= total
+    );
+  }
+  if (status === 'smart-cleanup-metadata-result') {
+    const findings = value['findings'];
+    const unavailablePackages = value['unavailablePackages'];
+    const capability = value['capability'];
+    const capabilityValid = isRecord(capability) && (
+      (hasOnlyKeys(capability, ['executionSupported']) && capability['executionSupported'] === true) ||
+      (hasOnlyKeys(capability, ['executionSupported', 'reason']) &&
+        capability['executionSupported'] === false && isNonEmptyString(capability['reason']))
+    );
+    return (
+      hasOnlyKeys(value, ['status', 'requestId', 'findings', 'unavailablePackages', 'capability']) &&
+      isNonEmptyString(value['requestId']) &&
+      Array.isArray(findings) && findings.length <= 500 &&
+      findings.every((finding) => isDependencyFinding(finding) && finding.kind === 'deprecated') &&
+      Array.isArray(unavailablePackages) && unavailablePackages.length <= 500 &&
+      unavailablePackages.every((name) => isNonEmptyString(name) && name.length <= 214) &&
+      new Set(unavailablePackages).size === unavailablePackages.length &&
+      capabilityValid
+    );
+  }
+  if (status === 'smart-cleanup-metadata-error') {
+    return (
+      hasOnlyKeys(value, ['status', 'requestId', 'error']) &&
+      isNonEmptyString(value['requestId']) &&
+      isProtocolError(value['error'])
+    );
+  }
+  if (status === 'smart-cleanup-duplicates-analyzing') {
+    return hasOnlyKeys(value, ['status', 'requestId']) && isNonEmptyString(value['requestId']);
+  }
+  if (status === 'smart-cleanup-duplicates-result') {
+    const assessments = value['assessments'];
+    const action = value['action'];
+    const unavailableReason = value['unavailableReason'];
+    return (
+      hasOnlyKeys(value, ['status', 'requestId', 'assessments', 'action', 'unavailableReason']) &&
+      isNonEmptyString(value['requestId']) &&
+      Array.isArray(assessments) && assessments.length <= 500 &&
+      assessments.every(isSmartCleanupDuplicateAssessment) &&
+      (action === undefined || isSmartCleanupDedupeAction(action)) &&
+      (unavailableReason === undefined || (isNonEmptyString(unavailableReason) && unavailableReason.length <= 1000))
+    );
+  }
+  if (status === 'smart-cleanup-duplicates-error') {
+    return (
+      hasOnlyKeys(value, ['status', 'requestId', 'error']) &&
+      isNonEmptyString(value['requestId']) &&
+      isProtocolError(value['error'])
+    );
   }
   if (status === 'removal-impact-analyzing') {
     const packages = value['packages'];

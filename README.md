@@ -97,6 +97,8 @@ The dashboard's webview has no network access of its own (`default-src 'none'`, 
 
 ## Development
 
+To run the extension in a VS Code Extension Development Host against any local npm or pnpm project, follow [Testing the Extension in VS Code](docs/testing-in-vscode-extension-host.md).
+
 ```bash
 npm install
 npm run watch      # esbuild in watch mode

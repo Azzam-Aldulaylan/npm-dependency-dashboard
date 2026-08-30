@@ -2,7 +2,7 @@ import type { Advisory } from '../types.js';
 
 const PUBLIC_IDENTIFIER_PATTERN = /\b(?:GHSA-[a-z0-9-]+|CVE-\d{4}-\d{4,})\b/gi;
 
-/** Human-facing identifiers: public aliases first, then npm's clearly-labelled source id. */
+/** Human-facing public identifiers. npm's source id remains internal. */
 export function vulnerabilityIdentifiers(advisory: Advisory): string[] {
   const identifiers: string[] = [];
   const seen = new Set<string>();
@@ -22,12 +22,6 @@ export function vulnerabilityIdentifiers(advisory: Advisory): string[] {
   }
   for (const source of [advisory.url, advisory.title]) {
     for (const match of source.match(PUBLIC_IDENTIFIER_PATTERN) ?? []) add(match.toUpperCase());
-  }
-  const npmSourceId = String(advisory.id);
-  if (PUBLIC_IDENTIFIER_PATTERN.test(npmSourceId)) {
-    add(npmSourceId.toUpperCase());
-  } else {
-    add(`npm:${npmSourceId}`);
   }
   PUBLIC_IDENTIFIER_PATTERN.lastIndex = 0;
   return identifiers;

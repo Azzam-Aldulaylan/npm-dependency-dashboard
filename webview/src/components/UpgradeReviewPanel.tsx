@@ -11,6 +11,7 @@ import { classifyUpdate } from '../../../src/host/updateClassification.js';
 import { severityDisplay } from '../../../src/host/severityDisplay.js';
 import { summarizeUpgradeSecurity } from '../../../src/host/upgradeSecuritySummary.js';
 import { IconAlertTriangle, IconFile, IconRefresh, IconTrendUp } from '../icons.js';
+import { DirectionalButton } from './DirectionalButton.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
 import {
@@ -204,14 +205,14 @@ function RecommendedActionCard({
       </h3>
       <p className="vuln-recommended__message">{message}</p>
       {action !== null ? (
-        <button
-          type="button"
+        <DirectionalButton
+          direction="forward"
           className={semanticButtonClassName(action.variant, 'vuln-recommended__cta upgrade-recommended__cta')}
           disabled={busy || executionBlocked}
           onClick={action.onClick === 'confirm' ? onConfirm : onUseSmartPlan}
         >
-          {action.label} →
-        </button>
+          {action.label}
+        </DirectionalButton>
       ) : null}
     </section>
   );
@@ -470,14 +471,14 @@ export function UpgradeReviewPanel({
           {targetVersion}
         </p>
         <p className="review-panel__empty-status">Not analyzed yet</p>
-        <button
-          type="button"
+        <DirectionalButton
+          direction="forward"
           className="button button--primary review-panel__empty-cta"
           disabled={busy || disabled || targetState.phase === 'loading'}
           onClick={() => onAnalyzeUpgrade(targetVersion)}
         >
-          Analyze upgrade →
-        </button>
+          Analyze upgrade
+        </DirectionalButton>
       </div>
     );
   }

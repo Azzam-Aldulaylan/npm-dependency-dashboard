@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 
 import type { DependencyFinding } from '../../src/core/hygiene/types.js';
@@ -42,6 +42,9 @@ import type {
   HostToWebviewMessage,
   RemoveAnalysisPresentation,
   ScanProgressStage,
+  SmartCleanupExecutionCapability,
+  SmartCleanupDedupeActionPresentation,
+  SmartCleanupDuplicateAssessmentPresentation,
   UpgradeAnalysisPresentation,
   UpgradeResultPresentation,
 } from '../../src/host/webviewProtocol.js';
@@ -62,11 +65,21 @@ import { Pagination } from './components/Pagination.js';
 import { PackageTable } from './components/PackageTable.js';
 import { RemoveAnalysisModal } from './components/RemoveAnalysisModal.js';
 import { SummaryCards } from './components/SummaryCards.js';
+import { SmartCleanupWorkspace } from './components/SmartCleanupWorkspace.js';
 import { UpgradeAnalysisModal } from './components/UpgradeAnalysisModal.js';
 import type { UpgradeTargetLoadState } from './components/UpgradeTargetSelector.js';
 import type { UsageRequestState } from './components/UsageReferencesPanel.js';
-import { IconAlertTriangle, IconListChecks, IconRefresh } from './icons.js';
+import { IconAlertTriangle, IconBroom, IconListChecks, IconRefresh } from './icons.js';
 import type { RemovalImpactState } from './removalImpactState.js';
+import { buildSmartCleanupPlan } from './smartCleanupPlanAdapter.js';
+import {
+  createSmartCleanupState,
+  SMART_CLEANUP_REVIEW_CACHE_MS,
+  selectedSmartCleanupDedupeAction,
+  smartCleanupReducer,
+  smartCleanupReviewIsReusable,
+} from './smartCleanupState.js';
+import type { SmartCleanupResult, SmartCleanupReviewCacheIdentity } from './smartCleanupState.js';
 import { vscode } from './vscodeApi.js';
 
 function formatTime(iso: string): string {
@@ -87,6 +100,32 @@ function partialErrorText(data: DashboardData): string | null {
     reasons.push('npm audit could not run, so upgrade targets are self-computed');
   }
   return reasons.length === 0 ? null : reasons.join('; ');
+}
+
+function duplicateGroupCount(data: DashboardData): number {
+  return data.hygieneFindings.filter((finding) => finding.kind === 'duplicate-version').length;
+}
+
+function excessDuplicateVersionCount(data: DashboardData): number {
+  return data.hygieneFindings.reduce((count, finding) => {
+    if (finding.kind !== 'duplicate-version' || finding.evidence.kind !== 'duplicate-version') return count;
+    return count + Math.max(0, finding.evidence.versions.length - 1);
+  }, 0);
+}
+
+function smartCleanupProjectKey(data: DashboardData): string {
+  return `${data.project.label}\u0000${data.project.manifestPath}`;
+}
+
+interface SmartCleanupExecutionSnapshot {
+  before: DashboardData;
+  actionIds: readonly string[];
+  packages: readonly string[];
+  analysisId: string | null;
+  /** Smart Cleanup analysis request, used to resolve the opaque dedupe action and cancel the combined review. */
+  requestId: string;
+  removalRequestId?: string;
+  dedupeActionId?: string;
 }
 
 interface UpgradeErrorState {
@@ -178,11 +217,15 @@ export function App(): ReactElement {
   // of "Cancel" and return to Manage rather than the dashboard. Starting a
   // removal from Manage never clears `manageRow`, so "closing" this review
   // is enough to reveal Manage again with its state intact.
-  const [removeOrigin, setRemoveOrigin] = useState<'dashboard' | 'manage-dependency' | null>(null);
+  const [removeOrigin, setRemoveOrigin] = useState<'dashboard' | 'manage-dependency' | 'smart-cleanup' | null>(null);
+  const removeOriginRef = useRef<'dashboard' | 'manage-dependency' | 'smart-cleanup' | null>(null);
   const activeRemoveRef = useRef<string | null>(null);
   useEffect(() => {
     activeRemoveRef.current = activeRemove;
   }, [activeRemove]);
+  useEffect(() => {
+    removeOriginRef.current = removeOrigin;
+  }, [removeOrigin]);
 
   // UI-only, entirely derived from data already on screen — see
   // src/host/{summaryMetrics,dependencyTypeFilter,tableSort,pagination}.ts.
@@ -264,6 +307,39 @@ export function App(): ReactElement {
   >({ phase: 'idle' });
   const [cleanupFindings, setCleanupFindings] = useState<DependencyFinding[]>([]);
   const [cleanupError, setCleanupError] = useState<string | null>(null);
+  const [smartCleanupOpen, setSmartCleanupOpen] = useState(false);
+  const [smartCleanupState, dispatchSmartCleanup] = useReducer(
+    smartCleanupReducer,
+    createSmartCleanupState('Current project')
+  );
+  const [smartCleanupMetadata, setSmartCleanupMetadata] = useState<{
+    phase: 'idle' | 'analyzing' | 'done' | 'error';
+    findings: DependencyFinding[];
+    unavailablePackages: string[];
+    capability: SmartCleanupExecutionCapability | null;
+    message?: string;
+  }>({ phase: 'idle', findings: [], unavailablePackages: [], capability: null });
+  const [smartCleanupDuplicates, setSmartCleanupDuplicates] = useState<{
+    phase: 'idle' | 'analyzing' | 'done' | 'error';
+    assessments: SmartCleanupDuplicateAssessmentPresentation[];
+    action: SmartCleanupDedupeActionPresentation | null;
+    unavailableReason?: string;
+    message?: string;
+  }>({ phase: 'idle', assessments: [], action: null });
+  const smartCleanupOpenRef = useRef(false);
+  const smartCleanupStateRef = useRef(smartCleanupState);
+  const smartCleanupRequestIdRef = useRef(0);
+  const activeSmartCleanupRequestIdRef = useRef<string | null>(null);
+  const smartCleanupExecutionRef = useRef<SmartCleanupExecutionSnapshot | null>(null);
+  const smartCleanupReviewCacheRef = useRef<SmartCleanupReviewCacheIdentity | null>(null);
+  const smartCleanupDrilldownRef = useRef<{
+    projectKey: string;
+    dashboardGeneratedAt: string;
+    requestId: string;
+    removalImpact: RemovalImpactState;
+  } | null>(null);
+  const dashboardDataRef = useRef<DashboardData | null>(null);
+  const dashboardSnapshotStatusRef = useRef<'empty' | 'ready' | 'stale' | 'partial-error' | null>(null);
   // The one shared removal-impact preview state — see removalImpactState.ts's
   // own doc for why the bulk Review step and the single-package "Analyze
   // removal" card share it rather than each keeping their own copy.
@@ -278,6 +354,14 @@ export function App(): ReactElement {
   /** False immediately on Cancel so already-queued progress cannot put the cleanup banner back into analyzing. */
   const cleanupProgressActiveRef = useRef(false);
   const [minuteClock, setMinuteClock] = useState(() => Date.now());
+
+  useEffect(() => {
+    smartCleanupOpenRef.current = smartCleanupOpen;
+  }, [smartCleanupOpen]);
+
+  useEffect(() => {
+    smartCleanupStateRef.current = smartCleanupState;
+  }, [smartCleanupState]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setMinuteClock(Date.now()), 60_000);
@@ -460,6 +544,7 @@ export function App(): ReactElement {
       }
 
       if (incoming.status === 'remove-error') {
+        const smartCleanupRemoval = removeOriginRef.current === 'smart-cleanup';
         // Same shared-lock discipline as upgrade-error — reused directly
         // since UPGRADE_IN_PROGRESS is the one code both flows post when the
         // panel-wide lock is held by the other, and neither predicate looks
@@ -473,8 +558,49 @@ export function App(): ReactElement {
           setRemoveBusy(false);
         }
         setPendingManageRemoval(null);
-        if (upgradeErrorIsUserVisible(incoming.error.code)) {
+        if (!smartCleanupRemoval && upgradeErrorIsUserVisible(incoming.error.code)) {
           setRemoveError({ package: incoming.package, code: incoming.error.code, message: incoming.error.message });
+        }
+        if (smartCleanupRemoval) {
+          if (incoming.error.code === 'STALE_SOURCE' || incoming.error.code === 'STALE_ANALYSIS') {
+            dispatchSmartCleanup({ type: 'source-stale', message: incoming.error.message });
+          } else if (
+            incoming.error.code !== 'ROLLBACK_CONFLICT' &&
+            incoming.error.code !== 'ROLLBACK_FAILED' &&
+            incoming.error.code !== 'REMOVE_TRANSACTION_FAILED' &&
+            incoming.error.code !== 'UNKNOWN'
+          ) {
+            dispatchSmartCleanup({
+              type: 'operation-rejected',
+              message: `${incoming.error.message} No cleanup changes were made.`,
+            });
+          } else {
+            const snapshot = smartCleanupExecutionRef.current;
+            const failedIds = snapshot?.actionIds ?? [];
+            const result: SmartCleanupResult = {
+              metrics: [],
+              completedActionIds: [],
+              skippedActionIds: [],
+              failedActionIds: [...failedIds],
+              resolvedAdvisories: [],
+              introducedAdvisories: [],
+              verification: 'not-run',
+              rollback: 'incomplete',
+              detail: incoming.error.message,
+            };
+            dispatchSmartCleanup({ type: 'execution-incomplete', result, message: incoming.error.message });
+          }
+          smartCleanupExecutionRef.current = null;
+          activeSmartCleanupRequestIdRef.current = null;
+          activeRemoveRef.current = null;
+          removeOriginRef.current = null;
+          setActiveRemove(null);
+          setActiveRemoveChanges([]);
+          setRemoveMatchTags(new Map());
+          setRemoveAnalysis(null);
+          setRemoveBusy(false);
+          setRemoveError(null);
+          setRemoveOrigin(null);
         }
         return;
       }
@@ -488,8 +614,177 @@ export function App(): ReactElement {
       }
 
       if (incoming.status === 'remove-analysis') {
-        if (incoming.analysis.package === activeRemoveRef.current) {
+        const smartSnapshot = smartCleanupExecutionRef.current;
+        const smartPackagesMatch = smartSnapshot !== null &&
+          incoming.analysis.changes.length === smartSnapshot.packages.length &&
+          incoming.analysis.changes.every((change, index) => change.packageName === smartSnapshot.packages[index]);
+        const smartDedupeMatches = smartSnapshot !== null &&
+          incoming.analysis.dedupe?.actionId === smartSnapshot.dedupeActionId;
+        if (
+          incoming.analysis.package === activeRemoveRef.current &&
+          (removeOriginRef.current !== 'smart-cleanup' || (smartPackagesMatch && smartDedupeMatches))
+        ) {
           setRemoveAnalysis(incoming.analysis);
+          if (removeOriginRef.current === 'smart-cleanup') {
+            smartCleanupExecutionRef.current = smartSnapshot === null
+              ? null
+              : { ...smartSnapshot, analysisId: incoming.analysis.analysisId };
+            setRemoveBusy(false);
+          }
+        }
+        return;
+      }
+
+      if (incoming.status === 'remove-result') {
+        if (removeOriginRef.current === 'smart-cleanup') {
+          const snapshot = smartCleanupExecutionRef.current;
+          const resultPackagesMatch = snapshot !== null &&
+            incoming.result.analysisId === snapshot.analysisId &&
+            incoming.result.packages.length === snapshot.packages.length &&
+            incoming.result.packages.every((name, index) => name === snapshot.packages[index]);
+          if (!resultPackagesMatch) return;
+          const hostCompletion = incoming.result.smartCleanup;
+          if (snapshot !== null && hostCompletion !== undefined) {
+            const kept = incoming.result.outcome !== 'rolled-back';
+            const result: SmartCleanupResult = {
+              metrics: hostCompletion.metrics,
+              completedActionIds: kept ? hostCompletion.completedActionIds : [],
+              skippedActionIds: kept ? hostCompletion.skippedActionIds : [...snapshot.actionIds],
+              failedActionIds: kept ? hostCompletion.failedActionIds : [],
+              resolvedAdvisories: hostCompletion.removedAdvisories,
+              introducedAdvisories: hostCompletion.introducedAdvisories,
+              verification: incoming.result.verification === 'passed'
+                ? 'passed'
+                : incoming.result.verification === 'failed'
+                  ? 'failed'
+                  : 'not-run',
+              rollback: incoming.result.outcome === 'rolled-back' ? 'restored' : 'not-needed',
+              detail: [incoming.result.message, hostCompletion.reason].filter((part) => part !== undefined).join(' '),
+            };
+            dispatchSmartCleanup(incoming.result.outcome === 'rolled-back'
+              ? { type: 'execution-cancelled-and-restored', result }
+              : incoming.result.outcome === 'verified' && hostCompletion.status === 'verified'
+                ? { type: 'execution-complete', result }
+                : {
+                    type: 'execution-incomplete',
+                    result,
+                    message: hostCompletion.status === 'stale'
+                      ? 'Cleanup finished, but the final project source changed before results could be verified.'
+                      : 'Cleanup finished, but some refreshed result evidence was unavailable.',
+                  });
+          } else {
+          const after = dashboardDataRef.current;
+          const afterStatus = dashboardSnapshotStatusRef.current;
+          if (
+            snapshot !== null &&
+            (after === null || after === snapshot.before || afterStatus === null || afterStatus === 'stale')
+          ) {
+            const kept = incoming.result.outcome !== 'rolled-back';
+            const result: SmartCleanupResult = {
+              metrics: [],
+              completedActionIds: kept ? [...snapshot.actionIds] : [],
+              skippedActionIds: kept ? [] : [...snapshot.actionIds],
+              failedActionIds: [],
+              resolvedAdvisories: [],
+              introducedAdvisories: [],
+              verification: incoming.result.verification === 'passed'
+                ? 'passed'
+                : incoming.result.verification === 'failed'
+                  ? 'failed'
+                  : 'not-run',
+              rollback: incoming.result.outcome === 'rolled-back' ? 'restored' : 'not-needed',
+              detail: `${incoming.result.message} Fresh dashboard evidence was unavailable, so before/after metrics could not be verified.`,
+            };
+            dispatchSmartCleanup(
+              incoming.result.outcome === 'rolled-back'
+                ? { type: 'execution-cancelled-and-restored', result }
+                : {
+                    type: 'execution-incomplete',
+                    result,
+                    message: 'Cleanup finished, but the refreshed project state could not be verified.',
+                  }
+            );
+          } else if (snapshot !== null && after !== null) {
+            const kept = incoming.result.outcome !== 'rolled-back';
+            const metrics: SmartCleanupResult['metrics'] = [
+              {
+                id: 'dependencies',
+                label: 'Direct dependencies',
+                before: snapshot.before.rows.length,
+                after: after.rows.length,
+                detail: kept
+                  ? `${Math.max(0, snapshot.before.rows.length - after.rows.length)} removed`
+                  : 'Dependency files were restored',
+              },
+              {
+                id: 'duplicate-groups',
+                label: 'Duplicate-version groups',
+                before: duplicateGroupCount(snapshot.before),
+                after: duplicateGroupCount(after),
+                detail: 'Measured from the refreshed dependency graph',
+              },
+              {
+                id: 'excess-versions',
+                label: 'Excess resolved versions',
+                before: excessDuplicateVersionCount(snapshot.before),
+                after: excessDuplicateVersionCount(after),
+                detail: 'Versions beyond one resolved version per package',
+              },
+              ...(snapshot.before.availability.advisories === 'complete' && after.availability.advisories === 'complete'
+                ? [
+                    {
+                      id: 'vulnerable-dependencies' as const,
+                      label: 'Vulnerable direct dependencies',
+                      before: summaryMetrics(snapshot.before.rows).vulnerable,
+                      after: summaryMetrics(after.rows).vulnerable,
+                      detail: 'Matches the dashboard Vulnerable Dependencies count',
+                    },
+                    {
+                      id: 'advisory-findings' as const,
+                      label: 'Advisory findings',
+                      before: summaryMetrics(snapshot.before.rows).advisoryFindings,
+                      after: summaryMetrics(after.rows).advisoryFindings,
+                      detail: 'Distinct advisory records across the installed graph',
+                    },
+                  ]
+                : []),
+            ];
+            const result: SmartCleanupResult = {
+              metrics,
+              completedActionIds: kept ? [...snapshot.actionIds] : [],
+              skippedActionIds: kept ? [] : [...snapshot.actionIds],
+              failedActionIds: [],
+              resolvedAdvisories: [],
+              introducedAdvisories: [],
+              verification: incoming.result.verification === 'passed'
+                ? 'passed'
+                : incoming.result.verification === 'failed'
+                  ? 'failed'
+                  : 'not-run',
+              rollback: incoming.result.outcome === 'rolled-back' ? 'restored' : 'not-needed',
+              detail: incoming.result.message,
+            };
+            dispatchSmartCleanup(incoming.result.outcome === 'rolled-back'
+              ? { type: 'execution-cancelled-and-restored', result }
+              : incoming.result.outcome === 'verified'
+                ? { type: 'execution-complete', result }
+                : {
+                    type: 'execution-incomplete',
+                    result,
+                    message: 'Cleanup was kept, but configured verification did not prove the result.',
+                  });
+          }
+          }
+          smartCleanupExecutionRef.current = null;
+          activeSmartCleanupRequestIdRef.current = null;
+          activeRemoveRef.current = null;
+          removeOriginRef.current = null;
+          setActiveRemove(null);
+          setActiveRemoveChanges([]);
+          setRemoveMatchTags(new Map());
+          setRemoveAnalysis(null);
+          setRemoveBusy(false);
+          setRemoveOrigin(null);
         }
         return;
       }
@@ -575,6 +870,15 @@ export function App(): ReactElement {
           cacheExpiresAt: incoming.cacheExpiresAt,
         });
         setCleanupFindings(incoming.findings);
+        if (Date.parse(incoming.cacheExpiresAt) <= Date.now()) {
+          smartCleanupReviewCacheRef.current = null;
+          if (activeSmartCleanupRequestIdRef.current !== null) {
+            dispatchSmartCleanup({
+              type: 'source-stale',
+              message: 'Project source changed after this cleanup review. Analyze again to refresh the evidence.',
+            });
+          }
+        }
         if (cleanupShouldSelectFilter.current) {
           cleanupShouldSelectFilter.current = false;
           setHygieneFilter('likely-unused');
@@ -588,6 +892,83 @@ export function App(): ReactElement {
         cleanupShouldSelectFilter.current = false;
         setCleanupState({ phase: 'idle' });
         setCleanupError(incoming.error.message);
+        if (smartCleanupOpenRef.current) {
+          dispatchSmartCleanup({
+            type: incoming.error.code === 'CANCELLED' ? 'analysis-cancelled' : 'analysis-failed',
+            requestId: `smart-cleanup-${smartCleanupRequestIdRef.current}`,
+            message: incoming.error.message,
+          });
+        }
+        return;
+      }
+
+      if (incoming.status === 'smart-cleanup-metadata-analyzing') {
+        if (incoming.requestId !== activeSmartCleanupRequestIdRef.current) return;
+        setSmartCleanupMetadata((previous) => ({
+          ...previous,
+          phase: 'analyzing',
+        }));
+        return;
+      }
+
+      if (incoming.status === 'smart-cleanup-metadata-result') {
+        if (incoming.requestId !== activeSmartCleanupRequestIdRef.current) return;
+        setSmartCleanupMetadata({
+          phase: 'done',
+          findings: incoming.findings,
+          unavailablePackages: incoming.unavailablePackages,
+          capability: incoming.capability,
+        });
+        return;
+      }
+
+      if (incoming.status === 'smart-cleanup-metadata-error') {
+        if (incoming.requestId !== activeSmartCleanupRequestIdRef.current) return;
+        setSmartCleanupMetadata({
+          phase: 'error',
+          findings: [],
+          unavailablePackages: [],
+          capability: {
+            executionSupported: false,
+            reason: 'Smart Cleanup could not verify whether this project supports automated removal.',
+          },
+          message: incoming.error.message,
+        });
+        if (incoming.error.code === 'STALE_SOURCE') {
+          dispatchSmartCleanup({ type: 'source-stale', message: incoming.error.message });
+        }
+        return;
+      }
+
+      if (incoming.status === 'smart-cleanup-duplicates-analyzing') {
+        if (incoming.requestId !== activeSmartCleanupRequestIdRef.current) return;
+        setSmartCleanupDuplicates((previous) => ({ ...previous, phase: 'analyzing' }));
+        return;
+      }
+
+      if (incoming.status === 'smart-cleanup-duplicates-result') {
+        if (incoming.requestId !== activeSmartCleanupRequestIdRef.current) return;
+        setSmartCleanupDuplicates({
+          phase: 'done',
+          assessments: incoming.assessments,
+          action: incoming.action ?? null,
+          ...(incoming.unavailableReason === undefined ? {} : { unavailableReason: incoming.unavailableReason }),
+        });
+        return;
+      }
+
+      if (incoming.status === 'smart-cleanup-duplicates-error') {
+        if (incoming.requestId !== activeSmartCleanupRequestIdRef.current) return;
+        smartCleanupReviewCacheRef.current = null;
+        setSmartCleanupDuplicates({
+          phase: 'error',
+          assessments: [],
+          action: null,
+          message: incoming.error.message,
+        });
+        if (incoming.error.code === 'STALE_SOURCE') {
+          dispatchSmartCleanup({ type: 'source-stale', message: incoming.error.message });
+        }
         return;
       }
 
@@ -646,6 +1027,19 @@ export function App(): ReactElement {
             packages: incoming.packages,
             message: incoming.error.message,
           });
+          if (incoming.error.code === 'STALE_SOURCE') {
+            smartCleanupReviewCacheRef.current = null;
+            dispatchSmartCleanup({ type: 'source-stale', message: incoming.error.message });
+          }
+          if (smartCleanupOpenRef.current) {
+            if (incoming.error.code !== 'STALE_SOURCE') {
+              dispatchSmartCleanup({
+                type: 'analysis-failed',
+                requestId: `smart-cleanup-${smartCleanupRequestIdRef.current}`,
+                message: incoming.error.message,
+              });
+            }
+          }
         }
         return;
       }
@@ -653,6 +1047,30 @@ export function App(): ReactElement {
       // Any other message is a dashboard snapshot that supersedes whatever
       // optimistic upgrade state was showing.
       let nextMessage = incoming;
+      if ('data' in incoming) {
+        dashboardDataRef.current = incoming.data;
+        dashboardSnapshotStatusRef.current = incoming.status;
+        const cachedReview = smartCleanupReviewCacheRef.current;
+        if (
+          cachedReview !== null &&
+          (
+            cachedReview.projectKey !== smartCleanupProjectKey(incoming.data) ||
+            cachedReview.dashboardGeneratedAt !== incoming.data.generatedAt
+          )
+        ) {
+          smartCleanupReviewCacheRef.current = null;
+        }
+        if (
+          smartCleanupOpenRef.current &&
+          activeSmartCleanupRequestIdRef.current !== null &&
+          smartCleanupExecutionRef.current === null
+        ) {
+          dispatchSmartCleanup({
+            type: 'source-stale',
+            message: 'The project dependency snapshot changed. Analyze Smart Cleanup again before removing anything.',
+          });
+        }
+      }
       const pendingUpgradeResult = upgradeResultRef.current;
       if (pendingUpgradeResult !== null && 'data' in incoming) {
         const enrichment = upgradeEnrichmentRef.current;
@@ -710,7 +1128,10 @@ export function App(): ReactElement {
       setRemoveAnalysis(null);
       setRemoveBusy(false);
       setRemoveError(null);
-      setRemoveOrigin(null);
+      if (!(removeOriginRef.current === 'smart-cleanup' && smartCleanupExecutionRef.current !== null)) {
+        removeOriginRef.current = null;
+        setRemoveOrigin(null);
+      }
       setRemediationByPackage(new Map());
       setRemediationError(null);
       setBulkActionsOpen(false);
@@ -941,7 +1362,7 @@ export function App(): ReactElement {
     (
       packageNames: readonly string[],
       matchTags: ReadonlyMap<string, readonly string[]>,
-      origin: 'dashboard' | 'manage-dependency' = 'dashboard'
+      origin: 'dashboard' | 'manage-dependency' | 'smart-cleanup' = 'dashboard'
     ) => {
       const first = packageNames[0];
       if (first === undefined) return;
@@ -951,7 +1372,9 @@ export function App(): ReactElement {
       setRemoveMatchTags(matchTags);
       setRemoveAnalysis(null);
       setRemoveBusy(false);
+      setRemoveError(null);
       setRemoveOrigin(origin);
+      removeOriginRef.current = origin;
       vscode.postMessage({ type: 'bulk-remove', changes: packageNames.map((name) => ({ package: name })) });
     },
     []
@@ -987,7 +1410,11 @@ export function App(): ReactElement {
   // in-progress removal analysis or file mutation protected from takeover.
   const requestUpgradeFromManage = useCallback(
     (packageName: string, target: string) => {
-      if (manageUpgradeReplacesRemovalReview(packageName, activeRemove, removeOrigin)) {
+      if (manageUpgradeReplacesRemovalReview(
+        packageName,
+        activeRemove,
+        removeOrigin === 'smart-cleanup' ? null : removeOrigin
+      )) {
         if (removeAnalysis === null || removeBusy) return;
         requestCancelRemove();
       }
@@ -1146,9 +1573,47 @@ export function App(): ReactElement {
     setUpgradeTargetState({ phase: 'idle' });
     setSelectedManageTarget(null);
     setPendingManageRemoval(null);
+    if (removeOriginRef.current === 'manage-dependency') {
+      removeOriginRef.current = null;
+      setRemoveOrigin(null);
+      setRemoveError(null);
+    }
+    const drilldown = smartCleanupDrilldownRef.current;
+    if (drilldown !== null) {
+      smartCleanupDrilldownRef.current = null;
+      const currentData = dashboardDataRef.current;
+      const reusable = currentData !== null &&
+        drilldown.projectKey === smartCleanupProjectKey(currentData) &&
+        drilldown.dashboardGeneratedAt === currentData.generatedAt &&
+        smartCleanupReviewIsReusable(
+        smartCleanupStateRef.current,
+        smartCleanupReviewCacheRef.current,
+        {
+          projectKey: smartCleanupProjectKey(currentData),
+          dashboardGeneratedAt: currentData.generatedAt,
+        }
+      );
+      if (reusable) {
+        const savedImpact = drilldown.removalImpact;
+        const impactWasReplaced = savedImpact.phase === 'done' && (
+          removalImpact.phase !== 'done' || removalImpact.requestId !== savedImpact.requestId
+        );
+        if (impactWasReplaced) requestAnalyzeRemovalImpact(savedImpact.packages);
+        else setRemovalImpact(savedImpact);
+        activeSmartCleanupRequestIdRef.current = drilldown.requestId;
+      } else {
+        smartCleanupReviewCacheRef.current = null;
+        dispatchSmartCleanup({
+          type: 'source-stale',
+          message: 'The project changed while package details were open. Analyze again to refresh this cleanup review.',
+        });
+      }
+      setSmartCleanupOpen(true);
+    }
   }, [
     removalImpact,
     requestCancelRemovalImpact,
+    requestAnalyzeRemovalImpact,
     upgradeOrigin,
     activeUpgrade,
     requestCancelUpgrade,
@@ -1177,6 +1642,7 @@ export function App(): ReactElement {
         requestCancelUpgrade();
       }
       setPendingManageRemoval(packageName);
+      setRemoveError(null);
       requestAnalyzeRemovalImpact([packageName]);
     },
     [activeUpgrade, analysis, requestAnalyzeRemovalImpact, requestCancelUpgrade, upgradeOrigin]
@@ -1233,6 +1699,354 @@ export function App(): ReactElement {
     () => [...(data?.hygieneFindings ?? []), ...cleanupFindings],
     [data?.hygieneFindings, cleanupFindings]
   );
+
+  const startSmartCleanup = useCallback(() => {
+    if (data === undefined) return;
+    const currentIdentity = {
+      projectKey: smartCleanupProjectKey(data),
+      dashboardGeneratedAt: data.generatedAt,
+    };
+    if (smartCleanupReviewIsReusable(smartCleanupState, smartCleanupReviewCacheRef.current, currentIdentity)) {
+      activeSmartCleanupRequestIdRef.current = smartCleanupState.requestId;
+      setSmartCleanupOpen(true);
+      return;
+    }
+    smartCleanupReviewCacheRef.current = null;
+    const requestId = `smart-cleanup-${++smartCleanupRequestIdRef.current}`;
+    setSmartCleanupOpen(true);
+    activeSmartCleanupRequestIdRef.current = requestId;
+    setSmartCleanupMetadata({ phase: 'analyzing', findings: [], unavailablePackages: [], capability: null });
+    setSmartCleanupDuplicates({ phase: 'analyzing', assessments: [], action: null });
+    setRemovalImpact({ phase: 'idle' });
+    dispatchSmartCleanup({
+      type: 'analysis-started',
+      projectName: data.project.label,
+      requestId,
+      steps: [
+        { id: 'inventory', label: 'Reading dependency inventory', status: 'complete' },
+        { id: 'usage', label: 'Checking project usage', status: 'running' },
+        { id: 'removal-safety', label: 'Checking removal safety', status: 'waiting' },
+        { id: 'deprecation', label: 'Checking installed-version deprecations', status: 'running' },
+        { id: 'duplicates', label: 'Simulating safe duplicate consolidation', status: 'running' },
+        {
+          id: 'security',
+          label: 'Preparing security impact',
+          status: data.availability.advisories === 'complete' ? 'complete' : 'unavailable',
+        },
+      ],
+    });
+    cleanupShouldSelectFilter.current = false;
+    setCleanupError(null);
+    const reusableUsage =
+      cleanupState.phase === 'done' && Date.parse(cleanupState.cacheExpiresAt) > Date.now();
+    if (!reusableUsage) {
+      cleanupProgressActiveRef.current = true;
+      vscode.postMessage({ type: 'analyze-cleanup' });
+    }
+    vscode.postMessage({ type: 'analyze-smart-cleanup-metadata', requestId });
+    vscode.postMessage({ type: 'analyze-smart-cleanup-duplicates', requestId });
+  }, [cleanupState, data, smartCleanupState]);
+
+  const closeSmartCleanup = useCallback(() => {
+    if (smartCleanupState.phase === 'analyzing') {
+      smartCleanupReviewCacheRef.current = null;
+      cleanupProgressActiveRef.current = false;
+      vscode.postMessage({ type: 'cancel-usage-analysis' });
+      const requestId = activeSmartCleanupRequestIdRef.current;
+      if (requestId !== null) vscode.postMessage({ type: 'cancel-smart-cleanup-metadata', requestId });
+      if (requestId !== null) vscode.postMessage({ type: 'cancel-smart-cleanup-duplicates', requestId });
+      requestCancelRemovalImpact();
+    }
+    const execution = smartCleanupExecutionRef.current;
+    if (smartCleanupState.phase === 'confirming' && execution !== null) {
+      vscode.postMessage({ type: 'cancel-remove', analysisId: execution.analysisId, requestId: execution.requestId });
+      smartCleanupExecutionRef.current = null;
+      activeRemoveRef.current = null;
+      removeOriginRef.current = null;
+      setActiveRemove(null);
+      setActiveRemoveChanges([]);
+      setRemoveAnalysis(null);
+      setRemoveBusy(false);
+      setRemoveOrigin(null);
+      dispatchSmartCleanup({ type: 'back-to-review' });
+    }
+    activeSmartCleanupRequestIdRef.current = null;
+    setSmartCleanupOpen(false);
+  }, [requestCancelRemovalImpact, smartCleanupState.phase]);
+
+  const openDependencyReviewFromSmartCleanup = useCallback((packageName: string, tab: ManageTabId) => {
+    const currentData = dashboardDataRef.current;
+    const requestId = smartCleanupState.requestId;
+    if (currentData === null || requestId === null) return;
+    smartCleanupDrilldownRef.current = {
+      projectKey: smartCleanupProjectKey(currentData),
+      dashboardGeneratedAt: currentData.generatedAt,
+      requestId,
+      removalImpact,
+    };
+    setSmartCleanupOpen(false);
+    openManage(packageName);
+    setManageTab(tab);
+  }, [openManage, removalImpact, smartCleanupState.requestId]);
+
+  useEffect(() => {
+    if (!smartCleanupOpen || smartCleanupState.phase !== 'analyzing' || cleanupState.phase !== 'done') return;
+    const unusedPackages = cleanupFindings
+      .filter((finding) => finding.kind === 'likely-unused')
+      .map((finding) => finding.packageName)
+      .sort((left, right) => left.localeCompare(right));
+    if (unusedPackages.length === 0 || removalImpact.phase !== 'idle') return;
+    requestAnalyzeRemovalImpact(unusedPackages);
+  }, [
+    cleanupFindings,
+    cleanupState.phase,
+    removalImpact.phase,
+    requestAnalyzeRemovalImpact,
+    smartCleanupOpen,
+    smartCleanupState.phase,
+  ]);
+
+  useEffect(() => {
+    if (!smartCleanupOpen || smartCleanupState.phase !== 'analyzing' || data === undefined) return;
+    const unusedPackages = cleanupFindings
+      .filter((finding) => finding.kind === 'likely-unused')
+      .map((finding) => finding.packageName);
+    const usageReady = cleanupState.phase === 'done';
+    const impactReady = unusedPackages.length === 0 || removalImpact.phase === 'done';
+    const metadataReady = smartCleanupMetadata.phase === 'done' || smartCleanupMetadata.phase === 'error';
+    const duplicatesReady = smartCleanupDuplicates.phase === 'done' || smartCleanupDuplicates.phase === 'error';
+    if (!usageReady || !impactReady || !metadataReady || !duplicatesReady) return;
+
+    const requestId = smartCleanupState.requestId;
+    if (requestId === null) return;
+    const usageCacheExpiry = cleanupState.phase === 'done' ? Date.parse(cleanupState.cacheExpiresAt) : Number.NaN;
+    const reviewExpiresAt = Math.min(
+      Date.now() + SMART_CLEANUP_REVIEW_CACHE_MS,
+      Number.isFinite(usageCacheExpiry) && usageCacheExpiry > Date.now()
+        ? usageCacheExpiry
+        : Date.now() + SMART_CLEANUP_REVIEW_CACHE_MS
+    );
+    const rememberReview = (): void => {
+      smartCleanupReviewCacheRef.current = {
+        projectKey: smartCleanupProjectKey(data),
+        dashboardGeneratedAt: data.generatedAt,
+        expiresAt: reviewExpiresAt,
+      };
+    };
+    const plan = buildSmartCleanupPlan({
+      projectName: data.project.label,
+      requestId,
+      rows: data.rows,
+      hygieneFindings: allHygieneFindings,
+      exactDeprecatedFindings: smartCleanupMetadata.findings,
+      removalImpact,
+      capability: smartCleanupMetadata.capability ?? {
+        executionSupported: false,
+        reason: 'Smart Cleanup could not verify whether this project supports automated removal.',
+      },
+      duplicateAssessments: smartCleanupDuplicates.assessments,
+      dedupeAction: smartCleanupDuplicates.action,
+    });
+    const findings = plan.recommendations.length + plan.deprecated.length + plan.duplicates.length + plan.security.length;
+    if (findings === 0) {
+      rememberReview();
+      dispatchSmartCleanup({
+        type: 'analysis-empty',
+        requestId,
+        message: 'No unused, deprecated, duplicate-version, or security cleanup findings were detected.',
+      });
+      return;
+    }
+    const partialReasons: string[] = [];
+    if (smartCleanupMetadata.phase === 'error') partialReasons.push('exact deprecation metadata was unavailable');
+    if (smartCleanupMetadata.unavailablePackages.length > 0) {
+      partialReasons.push(`exact metadata was unavailable for ${smartCleanupMetadata.unavailablePackages.length} packages`);
+    }
+    if (smartCleanupDuplicates.phase === 'error') partialReasons.push('duplicate consolidation analysis was unavailable');
+    else if (smartCleanupDuplicates.unavailableReason !== undefined) {
+      partialReasons.push(smartCleanupDuplicates.unavailableReason);
+    }
+    if (data.availability.advisories !== 'complete') partialReasons.push('security data was unavailable');
+    if (partialReasons.length > 0) {
+      rememberReview();
+      dispatchSmartCleanup({
+        type: 'analysis-partial',
+        requestId,
+        plan,
+        message: `Some checks are partial: ${partialReasons.join('; ')}.`,
+      });
+    } else {
+      rememberReview();
+      dispatchSmartCleanup({ type: 'analysis-ready', requestId, plan });
+    }
+  }, [
+    allHygieneFindings,
+    cleanupFindings,
+    cleanupState.phase,
+    data,
+    removalImpact,
+    smartCleanupMetadata,
+    smartCleanupDuplicates,
+    smartCleanupOpen,
+    smartCleanupState.phase,
+    smartCleanupState.requestId,
+  ]);
+
+  useEffect(() => {
+    if (!smartCleanupOpen || smartCleanupState.phase !== 'analyzing') return;
+    const usageDone = cleanupState.phase === 'done';
+    const removalDone = removalImpact.phase === 'done' || (
+      usageDone && cleanupFindings.every((finding) => finding.kind !== 'likely-unused')
+    );
+    dispatchSmartCleanup({
+      type: 'analysis-progress',
+      requestId: smartCleanupState.requestId ?? '',
+      steps: [
+        { id: 'inventory', label: 'Reading dependency inventory', status: 'complete' },
+        { id: 'usage', label: 'Checking project usage', status: usageDone ? 'complete' : 'running' },
+        {
+          id: 'removal-safety',
+          label: 'Checking removal safety',
+          status: removalDone ? 'complete' : usageDone ? 'running' : 'waiting',
+        },
+        {
+          id: 'duplicates',
+          label: 'Simulating safe duplicate consolidation',
+          status: smartCleanupDuplicates.phase === 'done'
+            ? 'complete'
+            : smartCleanupDuplicates.phase === 'error'
+              ? 'unavailable'
+              : 'running',
+        },
+        {
+          id: 'deprecation',
+          label: 'Checking installed-version deprecations',
+          status: smartCleanupMetadata.phase === 'done'
+            ? 'complete'
+            : smartCleanupMetadata.phase === 'error'
+              ? 'unavailable'
+              : 'running',
+        },
+        {
+          id: 'security',
+          label: 'Preparing security impact',
+          status: data?.availability.advisories === 'complete' ? 'complete' : 'unavailable',
+        },
+      ],
+    });
+  }, [
+    cleanupFindings,
+    cleanupState.phase,
+    removalImpact.phase,
+    smartCleanupMetadata.phase,
+    smartCleanupDuplicates.phase,
+    smartCleanupOpen,
+    smartCleanupState.phase,
+    smartCleanupState.requestId,
+    data?.availability.advisories,
+  ]);
+
+  const prepareSmartCleanup = useCallback((actionIds: readonly string[]) => {
+    if (
+      smartCleanupExecutionRef.current !== null ||
+      data === undefined ||
+      smartCleanupState.plan === null ||
+      smartCleanupState.requestId === null ||
+      actionIds.length === 0
+    ) return;
+    const byId = new Map(smartCleanupState.plan.recommendations.map((item) => [item.id, item]));
+    const selectedDedupe = selectedSmartCleanupDedupeAction(smartCleanupState);
+    const recommendations = actionIds.flatMap((id) => {
+      const recommendation = byId.get(id);
+      return recommendation === undefined ? [] : [recommendation];
+    });
+    const dedupeActionId = selectedDedupe?.id;
+    const recognizedCount = recommendations.length + (dedupeActionId !== undefined && actionIds.includes(dedupeActionId) ? 1 : 0);
+    if (recognizedCount !== actionIds.length) {
+      dispatchSmartCleanup({ type: 'source-stale', message: 'The cleanup selection is no longer current. Analyze again.' });
+      return;
+    }
+    const packages = recommendations.map((item) => item.packageName).sort((left, right) => left.localeCompare(right));
+    const analyzed = removalImpact.phase === 'done' ? new Set(removalImpact.packages) : new Set<string>();
+    if (packages.length > 0 && (removalImpact.phase !== 'done' || !packages.every((name) => analyzed.has(name)))) {
+      dispatchSmartCleanup({ type: 'source-stale', message: 'The cleanup selection is no longer covered by current removal evidence. Analyze again.' });
+      return;
+    }
+    const removalRequestId = packages.length > 0 && removalImpact.phase === 'done'
+      ? removalImpact.requestId
+      : undefined;
+    smartCleanupExecutionRef.current = {
+      before: data,
+      actionIds: [...actionIds],
+      packages,
+      analysisId: null,
+      requestId: smartCleanupState.requestId,
+      ...(removalRequestId === undefined ? {} : { removalRequestId }),
+      ...(dedupeActionId === undefined ? {} : { dedupeActionId }),
+    };
+    const first = packages[0] ?? 'Smart Cleanup';
+    activeRemoveRef.current = first;
+    removeOriginRef.current = 'smart-cleanup';
+    setActiveRemove(first);
+    setActiveRemoveChanges(packages);
+    setRemoveMatchTags(new Map());
+    setRemoveAnalysis(null);
+    setRemoveBusy(true);
+    setRemoveOrigin('smart-cleanup');
+    vscode.postMessage({
+      type: 'smart-cleanup-remove',
+      requestId: smartCleanupState.requestId,
+      packages,
+      ...(removalRequestId === undefined ? {} : { removalRequestId }),
+      ...(dedupeActionId === undefined ? {} : { dedupeActionId }),
+    });
+  }, [data, removalImpact, smartCleanupState]);
+
+  const confirmSmartCleanup = useCallback((analysisId: string) => {
+    const snapshot = smartCleanupExecutionRef.current;
+    if (snapshot === null || snapshot.analysisId !== analysisId || removeAnalysis?.analysisId !== analysisId) return;
+    setRemoveBusy(true);
+    dispatchSmartCleanup({
+      type: 'execution-started',
+      total: snapshot.actionIds.length,
+      currentLabel: 'Applying the reviewed cleanup actions…',
+    });
+    vscode.postMessage({ type: 'confirm-remove', analysisId });
+  }, [removeAnalysis]);
+
+  const keepDependencyFromSmartCleanupConfirmation = useCallback((actionId: string) => {
+    const snapshot = smartCleanupExecutionRef.current;
+    if (snapshot !== null) {
+      vscode.postMessage({ type: 'cancel-remove', analysisId: snapshot.analysisId, requestId: snapshot.requestId });
+    }
+    smartCleanupExecutionRef.current = null;
+    activeRemoveRef.current = null;
+    removeOriginRef.current = null;
+    setActiveRemove(null);
+    setActiveRemoveChanges([]);
+    setRemoveMatchTags(new Map());
+    setRemoveAnalysis(null);
+    setRemoveBusy(false);
+    setRemoveError(null);
+    setRemoveOrigin(null);
+    dispatchSmartCleanup({ type: 'keep-dependency', actionId });
+  }, []);
+
+  const backFromSmartCleanupConfirmation = useCallback(() => {
+    const snapshot = smartCleanupExecutionRef.current;
+    if (snapshot !== null) {
+      vscode.postMessage({ type: 'cancel-remove', analysisId: snapshot.analysisId, requestId: snapshot.requestId });
+    }
+    smartCleanupExecutionRef.current = null;
+    activeRemoveRef.current = null;
+    removeOriginRef.current = null;
+    setActiveRemove(null);
+    setActiveRemoveChanges([]);
+    setRemoveAnalysis(null);
+    setRemoveBusy(false);
+    setRemoveOrigin(null);
+    dispatchSmartCleanup({ type: 'back-to-review' });
+  }, []);
   // Disabled while an upgrade or removal is active — a manual refresh or
   // project switch mid-operation would race the scan (and, for a project
   // switch, a controller replacement) against a package.json/lockfile the
@@ -1291,7 +2105,7 @@ export function App(): ReactElement {
         </div>
       ) : null}
 
-      {removeError !== null ? (
+      {removeError !== null && removeOrigin !== 'manage-dependency' ? (
         <div className="banner banner--error" role="alert">
           <IconAlertTriangle className="banner__icon" />
           <p className="banner__text">
@@ -1364,6 +2178,7 @@ export function App(): ReactElement {
           actionsDisabled={actionsDisabled}
           cleanupFindings={cleanupFindings}
           cleanupAnalyzed={cleanupState.phase === 'done'}
+          onOpenSmartCleanup={startSmartCleanup}
           onOpenBulkActions={() => setBulkActionsOpen(true)}
           onOpenManage={openManage}
         />
@@ -1435,6 +2250,10 @@ export function App(): ReactElement {
                   active: removeActive,
                   analysis: removeActive ? removeAnalysis : null,
                   busy: removeBusy,
+                  error:
+                    removeOrigin === 'manage-dependency' && removeError?.package === row.name
+                      ? { code: removeError.code, message: removeError.message }
+                      : null,
                   onAnalyze: () => requestRemoveFromManage(row.name),
                   onConfirm: requestConfirmRemove,
                   onConfigureVerification: requestConfigureVerification,
@@ -1446,6 +2265,7 @@ export function App(): ReactElement {
                 onRetryUpgradeEnrichment={requestRetryUpgradeEnrichment}
                 now={minuteClock}
                 onClose={closeManage}
+                closeLabel={smartCleanupDrilldownRef.current === null ? 'Close' : 'Back to Smart Cleanup'}
               />
             );
           })()
@@ -1467,6 +2287,24 @@ export function App(): ReactElement {
             if (removalImpact.phase === 'analyzing') requestCancelRemovalImpact();
             setBulkActionsOpen(false);
           }}
+        />
+      ) : null}
+
+      {smartCleanupOpen ? (
+        <SmartCleanupWorkspace
+          state={smartCleanupState}
+          dispatch={dispatchSmartCleanup}
+          onClose={closeSmartCleanup}
+          onAnalyze={startSmartCleanup}
+          onCancelAnalysis={closeSmartCleanup}
+          removalPreflight={removeOrigin === 'smart-cleanup' ? removeAnalysis : null}
+          preflightBusy={removeOrigin === 'smart-cleanup' && removeBusy}
+          onPrepareRemoval={prepareSmartCleanup}
+          onConfirmRemoval={confirmSmartCleanup}
+          onKeepDependency={keepDependencyFromSmartCleanupConfirmation}
+          onBackToReview={backFromSmartCleanupConfirmation}
+          onOpenDependencyReview={openDependencyReviewFromSmartCleanup}
+          reviewEvidenceRefreshing={smartCleanupState.phase !== 'analyzing' && removalImpact.phase === 'analyzing'}
         />
       ) : null}
 
@@ -1494,7 +2332,7 @@ export function App(): ReactElement {
         />
       ) : null}
 
-      {activeRemove !== null && removeOrigin !== 'manage-dependency' ? (
+      {activeRemove !== null && removeOrigin !== 'manage-dependency' && removeOrigin !== 'smart-cleanup' ? (
         <RemoveAnalysisModal
           packages={activeRemoveChanges}
           analysis={removeAnalysis}
@@ -1534,6 +2372,7 @@ function Dashboard({
   actionsDisabled,
   cleanupFindings,
   cleanupAnalyzed,
+  onOpenSmartCleanup,
   onOpenBulkActions,
   onOpenManage,
 }: {
@@ -1563,6 +2402,7 @@ function Dashboard({
   /** Likely-unused findings from the last completed "Analyze cleanup" run this session — see App.tsx. */
   cleanupFindings: readonly DependencyFinding[];
   cleanupAnalyzed: boolean;
+  onOpenSmartCleanup: () => void;
   onOpenBulkActions: () => void;
   onOpenManage: (packageName: string) => void;
 }): ReactElement {
@@ -1675,6 +2515,16 @@ function Dashboard({
             refreshing={status === 'stale'}
             trailingActions={
               <div className="toolbar__analysis-actions">
+                <button
+                  className="button button--primary"
+                  type="button"
+                  onClick={onOpenSmartCleanup}
+                  disabled={actionsDisabled || upgradesDisabled}
+                  title="Find evidence-backed cleanup opportunities and remove approved unused dependencies"
+                >
+                  <IconBroom />
+                  Smart Cleanup
+                </button>
                 <button
                   className="button button--secondary"
                   type="button"

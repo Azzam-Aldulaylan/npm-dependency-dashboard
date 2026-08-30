@@ -12,6 +12,7 @@ import {
 import type { ManageVulnerabilityContext } from '../../../src/host/vulnerabilityUiState.js';
 import { directUpgradeRecommendation } from '../../../src/host/vulnerabilityRecommendation.js';
 import { IconCheck, IconExternalLink, IconInfo, IconRefresh, IconShield } from '../icons.js';
+import { DirectionalButton } from './DirectionalButton.js';
 import { SeverityBadge } from './SeverityBadge.js';
 import { patchedVersionText, VulnerabilityIdentifierLinks } from './VulnerabilityCard.js';
 import type { OpenAdvisoryHandler } from './VulnerabilityCard.js';
@@ -203,9 +204,9 @@ function RecommendedActionCard({
         {message}
       </p>
       {cta !== null ? (
-        <button type="button" className="button button--primary vuln-recommended__cta" disabled={actionsDisabled} onClick={cta.onClick}>
-          {cta.label} →
-        </button>
+        <DirectionalButton direction="forward" className="button button--primary vuln-recommended__cta" disabled={actionsDisabled} onClick={cta.onClick}>
+          {cta.label}
+        </DirectionalButton>
       ) : null}
     </section>
   );

@@ -313,12 +313,43 @@ test('a superseded run never posts its result', async () => {
   await new Promise((resolve) => setTimeout(resolve, 5));
   const winner = controller.handleRefresh(sink);
 
-  await Promise.all([superseded, winner]);
+  const [supersededOutcome, winnerOutcome] = await Promise.all([superseded, winner]);
   await new Promise((resolve) => setTimeout(resolve, 100));
+
+  assert.equal(supersededOutcome.status, 'superseded');
+  assert.equal(winnerOutcome.status, 'succeeded');
 
   const results = sink.posted.filter((m) => m.status !== 'loading');
   assert.equal(results.length, 1, `expected exactly one result, got ${sink.statuses.join(', ')}`);
   assert.equal(latestOf(results[0]), '1.0.2', 'the newer run is the one that lands');
+});
+
+test('a failed background refresh retains rows bound to their original source fingerprint', async () => {
+  const controller = makeController(staticClient('1.0.1'));
+  const initial = await controller.handleRefresh(recordingSink());
+  assert.equal(initial.status, 'succeeded');
+  const originalEvidence = controller.lastResultEvidence();
+  assert.ok(originalEvidence);
+
+  updateProjectSnapshot(controller, {
+    root: ROOT,
+    manifestText: JSON.stringify({ name: 'app', dependencies: { 'clean-pkg': '^2.0.0' } }),
+    lockfileText: JSON.stringify({ lockfileVersion: 99, packages: {} }),
+    lockfilePath: null,
+    packageManager: 'npm',
+    importerId: '.',
+    lockfileName: 'package-lock.json',
+    registry: REGISTRY,
+    projectInfo: PROJECT_INFO,
+    canChangeProject: false,
+    cacheKey: 'test-project',
+  });
+  const failed = await controller.refreshInBackground(recordingSink());
+  assert.equal(failed.status, 'failed');
+
+  const retainedEvidence = controller.lastResultEvidence();
+  assert.deepEqual(retainedEvidence, originalEvidence);
+  assert.notDeepEqual(retainedEvidence.sourceFingerprint, controller.sourceFingerprint());
 });
 
 test('a repeated ready during a cold scan supersedes the older attempt without publishing its late snapshot', async () => {

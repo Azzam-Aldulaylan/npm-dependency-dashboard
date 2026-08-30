@@ -23,6 +23,8 @@ export interface SummaryMetrics {
   patchUpdates: number;
   otherUpdates: number;
   vulnerable: number;
+  /** Distinct npm advisory records + flagged package pairs reachable from the direct dependency rows. */
+  advisoryFindings: number;
   criticalVulnerabilities: number;
   highVulnerabilities: number;
   moderateVulnerabilities: number;
@@ -103,6 +105,7 @@ export function summaryMetrics(rows: readonly PackageRow[]): SummaryMetrics {
   let vulnerable = 0;
   let needsAttention = 0;
   let deprecatedCount = 0;
+  const advisoryFindingKeys = new Set<string>();
 
   for (const row of rows) {
     if (rowHasUpdate(row)) {
@@ -114,6 +117,10 @@ export function summaryMetrics(rows: readonly PackageRow[]): SummaryMetrics {
       else otherUpdates += 1;
     }
     if (rowHasVulnerability(row)) vulnerable += 1;
+    for (const attributed of row.advisories) {
+      const advisory = attributed.advisory;
+      advisoryFindingKeys.add(`${typeof advisory.id}:${String(advisory.id)}\u0000${attributed.flaggedPackage}`);
+    }
     if (rowNeedsAttention(row)) needsAttention += 1;
     if (row.deprecated !== undefined) deprecatedCount += 1;
   }
@@ -126,6 +133,7 @@ export function summaryMetrics(rows: readonly PackageRow[]): SummaryMetrics {
     patchUpdates,
     otherUpdates,
     vulnerable,
+    advisoryFindings: advisoryFindingKeys.size,
     criticalVulnerabilities: countSeverity(rows, 'critical'),
     highVulnerabilities: countSeverity(rows, 'high'),
     moderateVulnerabilities: countSeverity(rows, 'moderate'),
@@ -189,10 +197,13 @@ export function vulnerabilitiesCardSubtitle(metrics: SummaryMetrics): string {
     ['low', metrics.lowVulnerabilities],
     ['info', metrics.infoVulnerabilities],
   ];
-  return counts
+  const rootBreakdown = counts
     .filter(([, count]) => count > 0)
     .map(([severity, count]) => `${count} ${SEVERITY_LABELS[severity]}`)
     .join(' · ');
+  return metrics.advisoryFindings === 0
+    ? rootBreakdown
+    : `${metrics.advisoryFindings} advisory finding${metrics.advisoryFindings === 1 ? '' : 's'} · ${rootBreakdown}`;
 }
 
 export function vulnerabilitiesCardValue(

@@ -62,6 +62,7 @@ import {
   canJoinBackgroundUsageScan,
   shouldCancelUnderlyingUsageScan,
   usageScanFailureAudience,
+  usageSourceIdentitiesMatch,
   USAGE_ANALYSIS_REUSE_MS,
   type UsageSourceIdentity,
 } from './usageAnalysisState.js';
@@ -127,7 +128,15 @@ export class UsageAnalysisCoordinator {
   /** Cleanup findings have no protocol reset, so retain their real analysis time for an expired empty supersession result. */
   private visibleCleanup: { projectId: string; analyzedAt?: string } | undefined;
   /** Correlation identity for the removal-impact result currently visible in the webview. */
-  private visibleRemovalImpact: { projectId: string; requestId: string; packages: readonly string[] } | undefined;
+  private visibleRemovalImpact: {
+    projectId: string;
+    requestId: string;
+    packages: readonly string[];
+    /** Host-derived packages whose completed assessment permits deliberate removal. */
+    selectablePackages: ReadonlySet<string>;
+    identity: UsageSourceIdentity;
+    ready: boolean;
+  } | undefined;
   /** Registered before the first await so cancel can terminate even controller/project lookup races. */
   private activeRemovalImpactRequest: {
     requestId: string;
@@ -271,6 +280,48 @@ export class UsageAnalysisCoordinator {
 
   private isCurrent(projectId: string, identity: UsageSourceIdentity): boolean {
     return this.analysisState.isCurrent(projectId, identity);
+  }
+
+  /**
+   * Returns a host-only freshness guard for a canonical selected subset of the
+   * exact visible removal-impact result Smart Cleanup is asking to execute.
+   * Source/config watcher events synchronously revoke this guard, including
+   * while the later removal review is open, so a newly-added import can never
+   * reuse an old "unused" result. Blocked/unknown assessments are deliberately
+   * excluded even if a forged webview asks for them.
+   */
+  smartCleanupRemovalEvidence(
+    requestId: string,
+    packages: readonly string[]
+  ): { isCurrent(): boolean } | null {
+    const visible = this.visibleRemovalImpact;
+    const selected = this.options.getSelectedProject();
+    if (
+      visible === undefined ||
+      !visible.ready ||
+      selected === undefined ||
+      visible.projectId !== selected.id ||
+      visible.requestId !== requestId ||
+      packages.length === 0 ||
+      packages.some((name, index) =>
+        (index > 0 && (packages[index - 1]?.localeCompare(name) ?? -1) >= 0) ||
+        !visible.selectablePackages.has(name)
+      )
+    ) return null;
+
+    const captured = visible;
+    return {
+      isCurrent: () => {
+        const current = this.visibleRemovalImpact;
+        return (
+          current === captured &&
+          current.ready &&
+          this.options.getSelectedProject()?.id === captured.projectId &&
+          this.isCurrent(captured.projectId, captured.identity) &&
+          usageSourceIdentitiesMatch(current.identity, captured.identity)
+        );
+      },
+    };
   }
 
   private startScan(input: {
@@ -838,7 +889,14 @@ export class UsageAnalysisCoordinator {
           });
           return;
         }
-        this.visibleRemovalImpact = { projectId: selected.id, requestId: message.requestId, packages: packageNames };
+        this.visibleRemovalImpact = {
+          projectId: selected.id,
+          requestId: message.requestId,
+          packages: packageNames,
+          selectablePackages: new Set(),
+          identity,
+          ready: false,
+        };
         this.options.sink.postMessage({
           status: 'removal-impact-analyzing',
           requestId: message.requestId,
@@ -932,7 +990,18 @@ export class UsageAnalysisCoordinator {
         return [{ packageName: name, assessment, usageId }];
       });
 
-      this.visibleRemovalImpact = { projectId: selected.id, requestId: message.requestId, packages: packageNames };
+      this.visibleRemovalImpact = {
+        projectId: selected.id,
+        requestId: message.requestId,
+        packages: packageNames,
+        selectablePackages: new Set(
+          assessments
+            .filter(({ assessment }) => assessment.status === 'low-risk' || assessment.status === 'review')
+            .map(({ packageName }) => packageName)
+        ),
+        identity,
+        ready: true,
+      };
       this.options.sink.postMessage({
         status: 'removal-impact-result',
         requestId: message.requestId,

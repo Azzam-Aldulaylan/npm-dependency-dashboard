@@ -210,10 +210,18 @@ export type RemovalEvidenceKind =
   | 'peer-requirement'
   | 'transitive-dependency';
 
-export interface RemovalEvidence {
-  kind: RemovalEvidenceKind;
-  summary: string;
-}
+export type RemovalEvidence =
+  | {
+      kind: Exclude<RemovalEvidenceKind, 'peer-requirement'>;
+      summary: string;
+    }
+  | {
+      kind: 'peer-requirement';
+      summary: string;
+      requiredBy: string;
+      requestedRange: string;
+      optional: boolean;
+    };
 
 /**
  * The structured result of a removal-impact assessment for one package — see

@@ -124,6 +124,7 @@ test('an empty row set is all zeros', () => {
     patchUpdates: 0,
     otherUpdates: 0,
     vulnerable: 0,
+    advisoryFindings: 0,
     criticalVulnerabilities: 0,
     highVulnerabilities: 0,
     moderateVulnerabilities: 0,
@@ -156,6 +157,7 @@ test('counts are tallied across a mixed row set', () => {
     patchUpdates: 1,
     otherUpdates: 1,
     vulnerable: 4,
+    advisoryFindings: 0,
     criticalVulnerabilities: 1,
     highVulnerabilities: 1,
     moderateVulnerabilities: 1,
@@ -263,6 +265,29 @@ test('vulnerabilities subtitle: omits zero tiers without hiding moderate or low'
     row({ name: 'b', worstSeverity: 'low' }),
   ];
   assert.equal(vulnerabilitiesCardSubtitle(summaryMetrics(rows)), '1 moderate · 1 low');
+});
+
+test('advisory findings are distinct from vulnerable direct dependency rows', () => {
+  const advisory = { id: 42 };
+  const rows = [
+    row({
+      name: 'root-a',
+      worstSeverity: 'high',
+      advisories: [{ advisory, flaggedPackage: 'shared-transitive' }],
+    }),
+    row({
+      name: 'root-b',
+      worstSeverity: 'high',
+      advisories: [
+        { advisory, flaggedPackage: 'shared-transitive' },
+        { advisory, flaggedPackage: 'different-package' },
+      ],
+    }),
+  ];
+  const metrics = summaryMetrics(rows);
+  assert.equal(metrics.vulnerable, 2);
+  assert.equal(metrics.advisoryFindings, 2);
+  assert.equal(vulnerabilitiesCardSubtitle(metrics), '2 advisory findings · 2 high');
 });
 
 test('attention subtitle: nothing to report on a clean set', () => {

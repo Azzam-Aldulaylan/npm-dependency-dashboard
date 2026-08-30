@@ -23,6 +23,7 @@ import type { UpgradeTargetLoadState } from './UpgradeTargetSelector.js';
 import { UsageReferencesPanel } from './UsageReferencesPanel.js';
 import type { UsageRequestState } from './UsageReferencesPanel.js';
 import { VulnerabilitiesPanel } from './VulnerabilitiesPanel.js';
+import { DirectionalButton } from './DirectionalButton.js';
 
 export type ManageTabId = 'overview' | 'vulnerabilities' | 'usage' | 'upgrade' | 'removal';
 
@@ -58,6 +59,7 @@ interface RemovalReviewState {
   active: boolean;
   analysis: RemoveAnalysisPresentation | null;
   busy: boolean;
+  error: { code: string; message: string } | null;
   onAnalyze: () => void;
   onConfirm: () => void;
   onConfigureVerification: () => void;
@@ -285,6 +287,7 @@ export function ManageDependencyModal({
   onRetryUpgradeEnrichment,
   now,
   onClose,
+  closeLabel = 'Close',
 }: {
   row: PackageRow;
   /** Every host-issued row in the same completed scan, used only to aggregate graph-proven vulnerability roots and paths. */
@@ -314,6 +317,8 @@ export function ManageDependencyModal({
   onRetryUpgradeEnrichment: () => void;
   now: number;
   onClose: () => void;
+  /** When opened from another workspace, closing returns there instead of abandoning the task. */
+  closeLabel?: string;
 }): ReactElement {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -321,6 +326,13 @@ export function ManageDependencyModal({
 
   useEffect(() => {
     previouslyFocused.current = document.activeElement;
+    const returnButton = dialogRef.current?.querySelector<HTMLButtonElement>('[data-smart-cleanup-return]');
+    if (returnButton !== undefined && returnButton !== null && !returnButton.disabled) {
+      returnButton.focus();
+      return () => {
+        if (previouslyFocused.current instanceof HTMLElement) previouslyFocused.current.focus();
+      };
+    }
     const closeButton = closeButtonRef.current;
     if (closeButton !== null && !closeButton.disabled) closeButton.focus();
     else {
@@ -493,6 +505,7 @@ export function ManageDependencyModal({
         active={removal.active}
         analysis={removal.analysis}
         busy={removal.busy}
+        error={removal.error}
         removalImpact={removalImpact}
         usage={usage}
         advisoriesAvailable={quarantineDerivedData ? false : advisoriesAvailable}
@@ -538,9 +551,22 @@ export function ManageDependencyModal({
               ) : null}
             </div>
           </div>
-          <button type="button" className="modal__close" onClick={onClose} ref={closeButtonRef} aria-label="Close" disabled={blockClose}>
-            <IconX />
-          </button>
+          <div className="manage-modal__header-actions">
+            {closeLabel === 'Close' ? null : (
+              <DirectionalButton
+                direction="back"
+                className="button button--small button--secondary"
+                onClick={onClose}
+                disabled={blockClose}
+                data-smart-cleanup-return
+              >
+                {closeLabel}
+              </DirectionalButton>
+            )}
+            <button type="button" className="modal__close" onClick={onClose} ref={closeButtonRef} aria-label={closeLabel} disabled={blockClose}>
+              <IconX />
+            </button>
+          </div>
         </header>
 
         <nav className="manage-tabs" role="tablist" aria-label="Manage dependency sections" aria-orientation="horizontal">
@@ -574,7 +600,7 @@ export function ManageDependencyModal({
             label="Removal review"
             icon={<IconTrash />}
             active={activeTab === 'removal'}
-            dotTone={removal.active ? 'active' : undefined}
+            dotTone={removal.error !== null ? 'critical' : removal.active ? 'active' : undefined}
             onSelect={onChangeTab}
           />
         </nav>
@@ -595,9 +621,20 @@ export function ManageDependencyModal({
               Analysis does not modify your project. Registry metadata and the local package manager may be used during
               analysis.
             </p>
-            <button type="button" className="button button--secondary" onClick={onClose} disabled={blockClose}>
-              Close
-            </button>
+            {closeLabel === 'Close' ? (
+              <button type="button" className="button button--secondary" onClick={onClose} disabled={blockClose}>
+                Close
+              </button>
+            ) : (
+              <DirectionalButton
+                direction="back"
+                className="button button--secondary"
+                onClick={onClose}
+                disabled={blockClose}
+              >
+                {closeLabel}
+              </DirectionalButton>
+            )}
           </footer>
         )}
       </div>

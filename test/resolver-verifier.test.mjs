@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildResolverArgs, IsolatedResolverVerifier } from '../out/host/resolverVerifier.js';
+import {
+  buildDedupeMaterializationArgs,
+  buildResolverArgs,
+  IsolatedResolverVerifier,
+} from '../out/host/resolverVerifier.js';
 
 const proposal = {
   requested: { packageName: 'react', currentVersion: '18.0.0', targetVersion: '19.0.0', classification: 'prod' },
@@ -19,6 +23,48 @@ test('pnpm resolver argv confines writes to temp and never enables lifecycle scr
   assert.deepEqual(buildResolverArgs('pnpm', 'https://registry.npmjs.org', { strictPeerDeps: false, legacyPeerDeps: false }), [
     'install', '--ignore-scripts', '--lockfile=false', '--reporter=silent', '--registry=https://registry.npmjs.org',
   ]);
+});
+
+test('isolated dedupe argv is lockfile-only and script-free for npm and pnpm', () => {
+  const policy = { strictPeerDeps: false, legacyPeerDeps: false };
+  assert.deepEqual(buildDedupeMaterializationArgs('npm', 'https://registry.npmjs.org', policy), [
+    'dedupe', '--package-lock-only', '--ignore-scripts', '--audit=false', '--fund=false', '--json',
+    '--registry=https://registry.npmjs.org',
+  ]);
+  assert.deepEqual(buildDedupeMaterializationArgs('pnpm', 'https://registry.npmjs.org', policy), [
+    'dedupe', '--lockfile-only', '--ignore-scripts', '--reporter=silent', '--registry=https://registry.npmjs.org',
+  ]);
+});
+
+test('combined cleanup simulation reconciles the staged manifest before dedupe', async () => {
+  const calls = [];
+  const manifestText = JSON.stringify({ dependencies: { a: '^1.0.0' } });
+  const lockfileText = JSON.stringify({
+    lockfileVersion: 3,
+    packages: { '': { dependencies: { a: '^1.0.0' } }, 'node_modules/a': { version: '1.0.0' } },
+  });
+  const verifier = new IsolatedResolverVerifier({
+    packageManager: 'npm',
+    packageManagerVersion: '10.0.0',
+    invocation: { executable: '/trusted/node', prefixArgs: ['/trusted/npm-cli.js'] },
+    manifestText,
+    lockfile: { name: 'package-lock.json', text: lockfileText },
+    registry: 'https://registry.npmjs.org',
+    policy: { strictPeerDeps: false, legacyPeerDeps: false },
+    runner: {
+      async run(_invocation, args) {
+        calls.push(args);
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    },
+  });
+
+  const result = await verifier.materializeCleanupGraph(manifestText, true);
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][0], 'install');
+  assert.equal(calls[1][0], 'dedupe');
+  assert.equal(calls.every((args) => args.includes('--ignore-scripts')), true);
 });
 
 test('isolated verifier rewrites only its temporary manifest and reports resolver success', async () => {

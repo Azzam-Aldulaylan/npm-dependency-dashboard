@@ -239,6 +239,95 @@ test('cancel-remove with a null id cancels a pending project load and releases w
   assert.equal(messages.some((message) => message.status === 'remove-error'), false);
 });
 
+test('Smart Cleanup removal is capability-gated and rechecks host usage evidence before confirmation', async () => {
+  const { UpgradeAssistantCoordinator } = await import('../out/host/upgradeAssistantCoordinator.js');
+  const manifestText = JSON.stringify({ dependencies: { react: '^18.0.0' } });
+  const lockfileText = JSON.stringify({
+    lockfileVersion: 3,
+    packages: {
+      '': { dependencies: { react: '^18.0.0' } },
+      'node_modules/react': { version: '18.2.0' },
+    },
+  });
+  const baseSource = {
+    manifestText,
+    lockfileText,
+    lockfilePath: '/workspace/package-lock.json',
+    lockfileName: 'package-lock.json',
+    registry: 'https://registry.npmjs.org/',
+    resolvedRegistry: { defaultRegistry: 'https://registry.npmjs.org/', scopes: {} },
+    packageManager: 'npm',
+    importerId: '.',
+  };
+
+  const makeCoordinator = ({ importerId = '.', evidenceCurrent = () => true } = {}) => {
+    const messages = [];
+    let validationCalls = 0;
+    const source = { ...baseSource, importerId };
+    const coordinator = new UpgradeAssistantCoordinator({
+      sink: { postMessage: (message) => messages.push(message) },
+      httpClient: {},
+      etagStore: {},
+      ensureController: async () => ({
+        root: '/workspace',
+        upgradeSource: source,
+        validateBulkRemoveRequest: () => {
+          validationCalls += 1;
+          return { ok: true, removals: [{ packageName: 'react', classification: 'prod' }] };
+        },
+      }),
+      getSelectedProject: () => ({ id: 'project', dir: '', folder: { uri: { fsPath: '/workspace' } } }),
+      isDisposed: () => false,
+      reloadFinalState: async () => {},
+      flushDeferredChanges: async () => {},
+      smartCleanupRemovalEvidence: () => ({ isCurrent: evidenceCurrent }),
+      loadProject: async () => ({ root: '/workspace', ...source }),
+    });
+    return { coordinator, messages, validationCalls: () => validationCalls };
+  };
+
+  const workspaceMember = makeCoordinator({ importerId: 'packages/app' });
+  await workspaceMember.coordinator.handleAnalyzeSmartCleanupRemove({
+    requestId: 'cleanup-member',
+    removalRequestId: 'impact-member',
+    packages: ['react'],
+  });
+  assert.equal(workspaceMember.validationCalls(), 0, 'unsupported topology is rejected before generic removal eligibility');
+  assert.equal(workspaceMember.messages.findLast((message) => message.status === 'remove-error').error.code, 'NOT_ELIGIBLE');
+
+  let evidenceCurrent = true;
+  const rootProject = makeCoordinator({ evidenceCurrent: () => evidenceCurrent });
+  await rootProject.coordinator.handleAnalyzeSmartCleanupRemove({
+    requestId: 'cleanup-root',
+    removalRequestId: 'impact-root',
+    packages: ['react'],
+  });
+  const review = rootProject.messages.findLast((message) => message.status === 'remove-analysis');
+  assert.ok(review, 'a supported project with current evidence receives a host removal review');
+
+  evidenceCurrent = false;
+  await rootProject.coordinator.handleConfirmRemove({ analysisId: review.analysis.analysisId });
+  assert.equal(rootProject.messages.findLast((message) => message.status === 'remove-error').error.code, 'STALE_ANALYSIS');
+  assert.equal(rootProject.coordinator.isBusy(), false, 'a stale Smart Cleanup review releases its reservation');
+
+  const cancelledBeforeDelivery = makeCoordinator();
+  await cancelledBeforeDelivery.coordinator.handleAnalyzeSmartCleanupRemove({
+    requestId: 'cleanup-cancelled-before-delivery',
+    removalRequestId: 'impact-cancelled-before-delivery',
+    packages: ['react'],
+  });
+  assert.equal(cancelledBeforeDelivery.coordinator.isBusy(), true);
+  cancelledBeforeDelivery.coordinator.handleCancelRemove({
+    analysisId: null,
+    requestId: 'cleanup-cancelled-before-delivery',
+  });
+  assert.equal(
+    cancelledBeforeDelivery.coordinator.isBusy(),
+    false,
+    'request-correlated cancellation releases a review stored just before its analysisId reaches the webview'
+  );
+});
+
 test('bulk removal preflight blocks a required peer unless its direct owner is in the exact removal set', async () => {
   const { UpgradeAssistantCoordinator } = await import('../out/host/upgradeAssistantCoordinator.js');
   const manifestText = JSON.stringify({ dependencies: { consumer: '^1.0.0', react: '^18.0.0' } });

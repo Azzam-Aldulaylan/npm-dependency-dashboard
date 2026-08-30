@@ -20,6 +20,7 @@ export interface BuildRemoveAnalysisPresentationOptions {
   verificationScriptNames: readonly string[];
   manifestPath: string;
   lockfilePath: string;
+  dedupe?: { actionId: string; affectedPackages: readonly string[]; expectedRemovedVersions: number };
 }
 
 export function buildRemoveAnalysisPresentation(
@@ -45,5 +46,14 @@ export function buildRemoveAnalysisPresentation(
       // allowlisted files on failure.
       rollbackAvailable: true,
     },
+    ...(options.dedupe === undefined
+      ? {}
+      : {
+          dedupe: {
+            actionId: options.dedupe.actionId,
+            affectedPackages: [...options.dedupe.affectedPackages],
+            expectedRemovedVersions: options.dedupe.expectedRemovedVersions,
+          },
+        }),
   };
 }

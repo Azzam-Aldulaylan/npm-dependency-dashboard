@@ -75,7 +75,7 @@ test('a valid, trusted advisory resolves to its own https URL', () => {
   assert.equal(url, 'https://github.com/advisories/GHSA-f8q6-p94x-37v3');
 });
 
-test('a trusted CVE badge resolves to the official CVE record', () => {
+test('a trusted CVE badge resolves to its NVD vulnerability detail', () => {
   const cveRow = row({
     advisories: [attributedAdvisory({
       advisory: {
@@ -91,7 +91,7 @@ test('a trusted CVE badge resolves to the official CVE record', () => {
       path: ['minimatch'],
       reference: 'CVE-2026-67213',
     }),
-    'https://www.cve.org/CVERecord?id=CVE-2026-67213'
+    'https://nvd.nist.gov/vuln/detail/CVE-2026-67213'
   );
 });
 
@@ -107,7 +107,7 @@ test('a trusted GHSA badge resolves to its GitHub Advisory Database record', () 
   );
 });
 
-test('the npm source id badge resolves to the advisory URL already trusted by the scan', () => {
+test('an internal npm source id cannot be opened as a visible identifier', () => {
   assert.equal(
     resolveTrustedAdvisoryUrl([row()], {
       package: 'minimatch',
@@ -115,7 +115,7 @@ test('the npm source id badge resolves to the advisory URL already trusted by th
       path: ['minimatch'],
       reference: 'npm:1096549',
     }),
-    'https://github.com/advisories/GHSA-f8q6-p94x-37v3'
+    null
   );
 });
 

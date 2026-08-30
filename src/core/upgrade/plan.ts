@@ -37,6 +37,10 @@ export interface ManifestReconciliationArgsOptions {
   ignoreScripts: boolean;
 }
 
+export interface DedupeArgsOptions {
+  ignoreScripts: boolean;
+}
+
 export function requiresManifestReconciliation(
   changes: readonly Pick<UpgradeArgsOptions, 'classification'>[]
 ): boolean {
@@ -118,6 +122,16 @@ export function buildManifestReconciliationArgs(
   // host-staged manifest change, so the lockfile must be allowed to reconcile
   // even when the extension host itself is running in a CI-like environment.
   if (packageManager === 'pnpm') args.push('--no-frozen-lockfile');
+  if (options.ignoreScripts) args.push('--ignore-scripts');
+  return args;
+}
+
+/** Project-wide deduplication after the host has verified the exact action in an isolated copy. */
+export function buildDedupeArgs(
+  _packageManager: PackageManagerKind,
+  options: DedupeArgsOptions
+): string[] {
+  const args = ['dedupe'];
   if (options.ignoreScripts) args.push('--ignore-scripts');
   return args;
 }

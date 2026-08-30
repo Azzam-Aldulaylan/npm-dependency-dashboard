@@ -23,6 +23,7 @@ import {
 } from '../icons.js';
 import type { RemovalImpactState } from '../removalImpactState.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
+import { DirectionalButton } from './DirectionalButton.js';
 import type { UsageRequestState } from './UsageReferencesPanel.js';
 
 type CheckTone = 'ok' | 'warning' | 'blocked' | 'unknown';
@@ -199,9 +200,9 @@ function RecommendedActionCard({
       </h3>
       <p className="vuln-recommended__message">{message}</p>
       {assessment?.status === 'review' ? (
-        <button type="button" className="usage-show-all removal-recommended__references" onClick={onViewReferences}>
-          View references →
-        </button>
+        <DirectionalButton direction="forward" className="usage-show-all removal-recommended__references" onClick={onViewReferences}>
+          View references
+        </DirectionalButton>
       ) : null}
       {allowed ? (
         <button type="button" className="button button--danger removal-recommended__cta" onClick={onConfirm} disabled={busy}>
@@ -452,6 +453,7 @@ export function RemovalReviewPanel({
   active,
   analysis,
   busy,
+  error,
   removalImpact,
   usage,
   advisoriesAvailable,
@@ -464,6 +466,7 @@ export function RemovalReviewPanel({
   active: boolean;
   analysis: RemoveAnalysisPresentation | null;
   busy: boolean;
+  error: { code: string; message: string } | null;
   removalImpact: RemovalImpactState;
   usage: UsageRequestState | undefined;
   advisoriesAvailable: boolean;
@@ -472,6 +475,37 @@ export function RemovalReviewPanel({
   onViewReferences: () => void;
   onConfigureVerification: () => void;
 }): ReactElement {
+  if (error !== null) {
+    const peerBlocked = error.code === 'REQUIRED_PEER_DEPENDENCY';
+    return (
+      <div className="review-panel removal-review">
+        <section className="analysis-card removal-review__blocked" role="alert" aria-live="assertive">
+          <OutcomeStatus
+            label={peerBlocked ? 'Removal blocked by a peer dependency' : 'Removal analysis failed'}
+            className="conflict"
+            detail={error.message}
+          />
+          <p className="analysis-card__hint">
+            {peerBlocked
+              ? 'Keep this package, or remove the package that requires it in the same coordinated operation.'
+              : 'The project was not changed. Review the reason above, then run the analysis again.'}
+          </p>
+          <div className="removal-review__blocked-actions">
+            <button type="button" className="button button--secondary" onClick={onViewReferences}>
+              View usage and references
+            </button>
+            {!peerBlocked ? (
+              <button type="button" className="button button--subtle" onClick={onAnalyzeRemoval}>
+                <IconRefresh />
+                Re-run analysis
+              </button>
+            ) : null}
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   if (!active) {
     return (
       <div className="review-panel__empty review-panel__empty--remove">
@@ -480,9 +514,13 @@ export function RemovalReviewPanel({
         </span>
         <h3 className="review-panel__empty-heading">Removal review</h3>
         <p className="review-panel__empty-status">Not analyzed yet</p>
-        <button type="button" className="button button--primary review-panel__empty-cta" onClick={onAnalyzeRemoval}>
-          Analyze removal →
-        </button>
+        <DirectionalButton
+          direction="forward"
+          className="button button--primary review-panel__empty-cta"
+          onClick={onAnalyzeRemoval}
+        >
+          Analyze removal
+        </DirectionalButton>
       </div>
     );
   }

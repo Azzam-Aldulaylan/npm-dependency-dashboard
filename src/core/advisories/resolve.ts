@@ -6,9 +6,10 @@
  * `advisoryId` + `path`) naming which attributed advisory it means and,
  * optionally, one ID badge already shown for that advisory. This looks the
  * advisory up in host-owned rows, verifies the badge against the same trusted
- * record, and derives the CVE/GHSA destination locally. npm source IDs use
- * only the URL the scan itself recorded. Every returned destination is
- * `https:`; `http:`, `javascript:`, `file:`, and malformed values are refused.
+ * record, and derives the NVD/GitHub destination locally. Requests without a
+ * displayed public reference use only the URL the scan itself recorded. Every
+ * returned destination is `https:`; `http:`, `javascript:`, `file:`, and
+ * malformed values are refused.
  *
  * Nothing here may import 'vscode' — see types.ts.
  */
@@ -51,13 +52,10 @@ function resolveTrustedReferenceUrl(entry: AttributedAdvisory, reference: string
   if (!belongsToAdvisory) return null;
 
   if (/^CVE-\d{4}-\d{4,}$/.test(normalized)) {
-    return `https://www.cve.org/CVERecord?id=${encodeURIComponent(normalized)}`;
+    return `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(normalized)}`;
   }
   if (/^GHSA-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(normalized)) {
     return `https://github.com/advisories/${encodeURIComponent(normalized)}`;
-  }
-  if (normalized === `NPM:${String(entry.advisory.id).toUpperCase()}`) {
-    return isSafeAdvisoryUrl(entry.advisory.url) ? entry.advisory.url : null;
   }
   return null;
 }

@@ -35,6 +35,7 @@ import { SmartCleanupFindingList } from './SmartCleanupFindingList.js';
 import { DirectionalButton } from './DirectionalButton.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { SeverityBadge } from './SeverityBadge.js';
+import { StatusBanner } from './StatusBanner.js';
 
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
@@ -417,10 +418,9 @@ function ReviewView({
   return (
     <>
       {state.phase === 'partial' || state.message !== null ? (
-        <div className="smart-cleanup-notice" role="status">
-          <IconAlertTriangle />
-          <p>{state.message ?? 'Some checks were unavailable. Only recommendations with complete evidence can be selected.'}</p>
-        </div>
+        <StatusBanner tone="warning">
+          {state.message ?? 'Some checks were unavailable. Only recommendations with complete evidence can be selected.'}
+        </StatusBanner>
       ) : null}
 
       <div className="smart-cleanup-outcome">
@@ -1052,10 +1052,12 @@ export function SmartCleanupWorkspace({
           {showReview ? (
             <>
               {reviewEvidenceRefreshing ? (
-                <div className="smart-cleanup-notice" role="status">
-                  <IconRefresh className="banner__icon--spin" />
-                  <p>Refreshing removal evidence after package review. Your selections are preserved.</p>
-                </div>
+                <StatusBanner
+                  tone="info"
+                  icon={<IconRefresh className="banner__icon--spin" />}
+                >
+                  Refreshing removal evidence after package review. Your selections are preserved.
+                </StatusBanner>
               ) : null}
               <ReviewView state={state} dispatch={dispatch} onOpenDependencyReview={onOpenDependencyReview} />
             </>

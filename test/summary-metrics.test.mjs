@@ -125,6 +125,11 @@ test('an empty row set is all zeros', () => {
     otherUpdates: 0,
     vulnerable: 0,
     advisoryFindings: 0,
+    criticalAdvisoryFindings: 0,
+    highAdvisoryFindings: 0,
+    moderateAdvisoryFindings: 0,
+    lowAdvisoryFindings: 0,
+    infoAdvisoryFindings: 0,
     criticalVulnerabilities: 0,
     highVulnerabilities: 0,
     moderateVulnerabilities: 0,
@@ -158,6 +163,11 @@ test('counts are tallied across a mixed row set', () => {
     otherUpdates: 1,
     vulnerable: 4,
     advisoryFindings: 0,
+    criticalAdvisoryFindings: 0,
+    highAdvisoryFindings: 0,
+    moderateAdvisoryFindings: 0,
+    lowAdvisoryFindings: 0,
+    infoAdvisoryFindings: 0,
     criticalVulnerabilities: 1,
     highVulnerabilities: 1,
     moderateVulnerabilities: 1,
@@ -255,7 +265,7 @@ test('vulnerabilities subtitle: includes every nonzero severity, highest first',
   ];
   assert.equal(
     vulnerabilitiesCardSubtitle(summaryMetrics(rows)),
-    '1 critical · 2 high · 1 moderate · 1 low · 1 info'
+    'Highest severity: 1 critical · 2 high · 1 moderate · 1 low · 1 info'
   );
 });
 
@@ -264,11 +274,11 @@ test('vulnerabilities subtitle: omits zero tiers without hiding moderate or low'
     row({ name: 'a', worstSeverity: 'moderate' }),
     row({ name: 'b', worstSeverity: 'low' }),
   ];
-  assert.equal(vulnerabilitiesCardSubtitle(summaryMetrics(rows)), '1 moderate · 1 low');
+  assert.equal(vulnerabilitiesCardSubtitle(summaryMetrics(rows)), 'Highest severity: 1 moderate · 1 low');
 });
 
 test('advisory findings are distinct from vulnerable direct dependency rows', () => {
-  const advisory = { id: 42 };
+  const advisory = { id: 42, severity: 'high' };
   const rows = [
     row({
       name: 'root-a',
@@ -287,7 +297,11 @@ test('advisory findings are distinct from vulnerable direct dependency rows', ()
   const metrics = summaryMetrics(rows);
   assert.equal(metrics.vulnerable, 2);
   assert.equal(metrics.advisoryFindings, 2);
-  assert.equal(vulnerabilitiesCardSubtitle(metrics), '2 advisory findings · 2 high');
+  assert.equal(metrics.highAdvisoryFindings, 2);
+  assert.equal(
+    vulnerabilitiesCardSubtitle(metrics),
+    '2 advisory findings\n2 high'
+  );
 });
 
 test('attention subtitle: nothing to report on a clean set', () => {

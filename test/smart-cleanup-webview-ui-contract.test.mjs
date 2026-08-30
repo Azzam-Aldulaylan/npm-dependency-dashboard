@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 const workspace = readFileSync(join(process.cwd(), 'webview/src/components/SmartCleanupWorkspace.tsx'), 'utf8');
+const app = readFileSync(join(process.cwd(), 'webview/src/App.tsx'), 'utf8');
 const category = readFileSync(join(process.cwd(), 'webview/src/components/SmartCleanupCategorySection.tsx'), 'utf8');
 const findingList = readFileSync(join(process.cwd(), 'webview/src/components/SmartCleanupFindingList.tsx'), 'utf8');
 const styles = readFileSync(join(process.cwd(), 'webview/src/styles.css'), 'utf8');
@@ -26,6 +27,19 @@ test('category disclosure and progress announcements expose accessible state', (
   assert.match(category, /aria-labelledby=\{triggerId\}/);
   assert.match(workspace, /role="status" aria-live="polite" aria-atomic="true"/);
   assert.match(workspace, /aria-busy="true"/);
+});
+
+test('progress lists only checks that perform asynchronous analysis', () => {
+  assert.doesNotMatch(app, /Reading dependency inventory/);
+  assert.doesNotMatch(app, /Preparing security impact/);
+  for (const label of [
+    'Checking project usage',
+    'Checking removal safety',
+    'Simulating safe duplicate consolidation',
+    'Checking installed-version deprecations',
+  ]) {
+    assert.match(app, new RegExp(label));
+  }
 });
 
 test('the summary uses explicit units and large evidence lists share bounded searchable disclosure', () => {

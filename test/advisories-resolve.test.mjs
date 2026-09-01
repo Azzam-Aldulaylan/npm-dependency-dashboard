@@ -95,6 +95,49 @@ test('a trusted CVE badge resolves to its NVD vulnerability detail', () => {
   );
 });
 
+test('a public CVE can identify the trusted advisory as well as select its reference', () => {
+  const cveRow = row({
+    advisories: [attributedAdvisory({
+      advisory: {
+        ...attributedAdvisory().advisory,
+        identifiers: [{ type: 'CVE', value: 'CVE-2026-67213' }],
+      },
+    })],
+  });
+  assert.equal(
+    resolveTrustedAdvisoryUrl([cveRow], {
+      package: 'minimatch',
+      advisoryId: 'CVE-2026-67213',
+      path: ['minimatch'],
+      reference: 'CVE-2026-67213',
+    }),
+    'https://nvd.nist.gov/vuln/detail/CVE-2026-67213'
+  );
+});
+
+test('a resolved advisory badge remains openable from the retained result after the refreshed row no longer contains it', () => {
+  const resolvedRow = row({ advisories: [], worstSeverity: null, upgradeTo: null, upgradeReason: 'up-to-date' });
+  assert.equal(
+    resolveTrustedAdvisoryUrl([resolvedRow], {
+      package: 'minimatch',
+      advisoryId: 'CVE-2026-67213',
+      path: ['minimatch', 'nested'],
+      reference: 'CVE-2026-67213',
+    }),
+    'https://nvd.nist.gov/vuln/detail/CVE-2026-67213'
+  );
+  assert.equal(
+    resolveTrustedAdvisoryUrl([resolvedRow], {
+      package: 'minimatch',
+      advisoryId: 'CVE-2026-67213',
+      path: ['minimatch', 'nested'],
+      reference: 'GHSA-AAAA-BBBB-CCCC',
+    }),
+    null,
+    'the post-remediation fallback requires the displayed public id to match the requested advisory id'
+  );
+});
+
 test('a trusted GHSA badge resolves to its GitHub Advisory Database record', () => {
   assert.equal(
     resolveTrustedAdvisoryUrl([row()], {

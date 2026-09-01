@@ -17,6 +17,23 @@ const response = (body, etag) => ({
   wireBytes: 1,
 });
 
+test('exact metadata distinguishes a published main, absent main, and invalid main', async () => {
+  for (const [fields, expected] of [
+    [{ main: './dist/index.js' }, './dist/index.js'],
+    [{}, null],
+    [{ main: null }, undefined],
+    [{ main: { browser: 'index.js' } }, undefined],
+    [{ main: '' }, undefined],
+    [{ main: 'x'.repeat(2049) }, undefined],
+  ]) {
+    const metadata = await fetchPackageVersionMetadata(
+      { async get() { return response({ name: 'pkg', version: '2.0.0', ...fields }); } },
+      new MemoryEtagStore(), 'https://registry.example', 'pkg', '2.0.0'
+    );
+    assert.equal(metadata.main, expected);
+  }
+});
+
 test('exact-version metadata preserves peer ranges and optional peer flags', async () => {
   const calls = [];
   const client = {

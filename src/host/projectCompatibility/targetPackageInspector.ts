@@ -5,16 +5,15 @@
  * package name/version and registry are host-owned inputs.
  */
 
-import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
 import { isSafeNpmPackageName, isSafeSemverVersion } from '../../core/upgrade/plan.js';
-import type { PackageManagerInvocation, ResolverProcessResult } from '../resolverVerifier.js';
+import type { PackageManagerInvocation } from '../resolverVerifier.js';
+import { NodeTargetPackagePackRunner, type TargetPackagePackRunner } from './targetPackagePackRunner.js';
+export { NodeTargetPackagePackRunner, type TargetPackagePackRunner } from './targetPackagePackRunner.js';
 
-const MAX_STDOUT_BYTES = 8 * 1024 * 1024;
-const MAX_STDERR_BYTES = 32 * 1024;
 const MAX_FILE_ENTRIES = 50_000;
 
 export interface TargetPackageSurface {
@@ -24,66 +23,95 @@ export interface TargetPackageSurface {
   files: string[];
 }
 
-/** One-entry exact-identity cache: enough for target re-analysis without retaining packument-sized inventories. */
+export function targetPackageSurfaceCacheKey(input: {
+  registry: string;
+  packageName: string;
+  version: string;
+}): string {
+  if (!isSafeNpmPackageName(input.packageName) || !isSafeSemverVersion(input.version)) {
+    throw new Error('Target package identity is invalid.');
+  }
+  const registry = new URL(input.registry);
+  if (registry.protocol !== 'https:') throw new Error('Target package registry must use HTTPS.');
+  return `${registry.toString()}\0${input.packageName}\0${input.version}`;
+}
+
+interface SurfaceCacheOptions {
+  maxEntries?: number;
+  maxBytes?: number;
+  ttlMs?: number;
+  now?: () => number;
+}
+
+/**
+ * Successful published inventories are independent of project source. Keep a
+ * few exact targets so switching versions/packages does not repeat downloads,
+ * but bound retained memory and age even for unusually large packages.
+ */
 export class TargetPackageSurfaceCache {
-  private entry: { key: string; surface: TargetPackageSurface } | undefined;
+  private readonly entries = new Map<string, { surface: TargetPackageSurface; bytes: number; expiresAt: number }>();
+  private retainedBytes = 0;
+  private readonly maxEntries: number;
+  private readonly maxBytes: number;
+  private readonly ttlMs: number;
+  private readonly now: () => number;
+
+  constructor(options: SurfaceCacheOptions = {}) {
+    this.maxEntries = options.maxEntries ?? 4;
+    this.maxBytes = options.maxBytes ?? 16 * 1024 * 1024;
+    this.ttlMs = options.ttlMs ?? 30 * 60 * 1000;
+    this.now = options.now ?? Date.now;
+    for (const limit of [this.maxEntries, this.maxBytes, this.ttlMs]) {
+      if (!Number.isSafeInteger(limit) || limit < 0) throw new Error('Target inventory cache limits must be non-negative integers.');
+    }
+  }
+
+  private delete(key: string): void {
+    const entry = this.entries.get(key);
+    if (entry !== undefined) this.retainedBytes -= entry.bytes;
+    this.entries.delete(key);
+  }
+
+  private expire(): void {
+    const now = this.now();
+    for (const [key, entry] of this.entries) {
+      if (entry.expiresAt <= now) this.delete(key);
+    }
+  }
 
   get(key: string): TargetPackageSurface | undefined {
-    return this.entry?.key === key ? this.entry.surface : undefined;
+    this.expire();
+    const entry = this.entries.get(key);
+    if (entry === undefined) return undefined;
+    this.entries.delete(key);
+    this.entries.set(key, entry);
+    return { ...entry.surface, files: [...entry.surface.files] };
   }
 
   set(key: string, surface: TargetPackageSurface): void {
-    this.entry = { key, surface };
-  }
-}
-
-export interface TargetPackagePackRunner {
-  run(
-    invocation: PackageManagerInvocation,
-    args: readonly string[],
-    cwd: string,
-    signal?: AbortSignal
-  ): Promise<ResolverProcessResult>;
-}
-
-export class NodeTargetPackagePackRunner implements TargetPackagePackRunner {
-  run(
-    invocation: PackageManagerInvocation,
-    args: readonly string[],
-    cwd: string,
-    signal?: AbortSignal
-  ): Promise<ResolverProcessResult> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(invocation.executable, [...invocation.prefixArgs, ...args], {
-        cwd,
-        shell: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        ...(signal === undefined ? {} : { signal }),
-      });
-      let stdout = '';
-      let stderr = '';
-      let stdoutBytes = 0;
-      child.stdout.on('data', (chunk: Buffer) => {
-        stdoutBytes += chunk.length;
-        if (stdoutBytes > MAX_STDOUT_BYTES) {
-          child.kill();
-          return;
-        }
-        stdout += chunk.toString('utf8');
-      });
-      child.stderr.on('data', (chunk: Buffer) => {
-        stderr = (stderr + chunk.toString('utf8')).slice(-MAX_STDERR_BYTES);
-      });
-      child.on('error', reject);
-      child.on('close', (exitCode) => {
-        resolve({
-          exitCode: stdoutBytes > MAX_STDOUT_BYTES ? null : exitCode,
-          stdout: stdoutBytes > MAX_STDOUT_BYTES ? '' : stdout,
-          stderr: stdoutBytes > MAX_STDOUT_BYTES ? 'Target package inventory exceeded the response limit.' : stderr,
-        });
-      });
+    const [registry, packageName, version, extra] = key.split('\0');
+    if (registry === undefined || packageName !== surface.packageName || version !== surface.version || extra !== undefined ||
+      targetPackageSurfaceCacheKey({ registry, packageName, version }) !== key) {
+      throw new Error('Target inventory cache identity did not match the published surface.');
+    }
+    if (surface.files.length > MAX_FILE_ENTRIES || surface.files.some((file) => safePackageFilePath(file) !== file)) return;
+    this.expire();
+    this.delete(key);
+    // Conservative UTF-16/string/list overhead estimate, not just path bytes.
+    const bytes = 256 + 2 * (key.length + surface.packageName.length + surface.version.length) +
+      surface.files.reduce((total, file) => total + 64 + 2 * file.length, 0);
+    if (this.maxEntries === 0 || this.ttlMs === 0 || bytes > this.maxBytes) return;
+    while (this.entries.size >= this.maxEntries || this.retainedBytes + bytes > this.maxBytes) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.delete(oldest);
+    }
+    this.entries.set(key, {
+      surface: { ...surface, files: [...surface.files] },
+      bytes,
+      expiresAt: this.now() + this.ttlMs,
     });
+    this.retainedBytes += bytes;
   }
 }
 
@@ -158,14 +186,17 @@ export class TargetPackageInspector {
   }
 
   async inspect(packageName: string, version: string, signal?: AbortSignal): Promise<TargetPackageSurface> {
+    signal?.throwIfAborted();
     const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'dependency-dashboard-target-package-'));
     try {
+      signal?.throwIfAborted();
       const result = await this.runner.run(
         this.invocation,
         buildTargetPackagePackArgs({ packageName, version, registry: this.registry, destination: temporaryRoot }),
         temporaryRoot,
         signal
       );
+      signal?.throwIfAborted();
       if (result.exitCode !== 0) throw new Error('Target package inventory could not be materialized.');
       return parseTargetPackagePackOutput(result.stdout, { packageName, version });
     } finally {

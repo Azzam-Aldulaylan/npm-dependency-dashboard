@@ -39,9 +39,16 @@ import { buildDependencyGraph } from '../core/lockfile/build.js';
 import { cleanupGraphSignature } from '../core/cleanup/graphSignature.js';
 import { computeSourceFingerprint } from '../core/cache/sourceFingerprint.js';
 import { runSequentialBatch } from '../core/async/sequentialBatch.js';
-import { SharedPromise } from '../core/async/sharedPromise.js';
 import { directNodes } from '../core/lockfile/parse.js';
 import { parseManifest } from '../core/manifest/parse.js';
+import { buildBulkRequestBody, fetchBulkAdvisories } from '../core/advisories/bulk.js';
+import { enrichAdvisoriesWithGitHubIdentifiers } from '../core/advisories/githubIdentifiers.js';
+import {
+  createTransitiveRemediationPlan,
+  type RemediationGraphSnapshot,
+  type TransitiveRemediationPlan,
+} from '../core/advisories/transitiveRemediationPlan.js';
+import type { AttributedAdvisory } from '../core/types.js';
 import { analyzeCompatibility, CompatibilityCancelledError } from '../core/compatibility/preflight.js';
 import type { CompatibilityStatus, UpgradeProposal } from '../core/compatibility/types.js';
 import { RegistryPackageMetadataProvider, registryForPackage } from '../core/compatibility/registryMetadataProvider.js';
@@ -49,12 +56,9 @@ import { FetchError } from '../core/registry/http.js';
 import type { HttpClient } from '../core/registry/http.js';
 import { fetchPackument } from '../core/registry/versions.js';
 import type { EtagStore } from '../core/registry/versions.js';
-import type { PackageVersionMetadata } from '../core/registry/versions.js';
 import type { DependencyReference } from '../core/usage/types.js';
 import type {
   ProjectCompatibilityAnalysis,
-  ProjectCompatibilityIdentity,
-  ToolingPackageEvidence,
 } from '../core/projectCompatibility/index.js';
 import type { PerformanceRecorder } from '../core/performance/measurement.js';
 import { createPerformanceSession } from '../core/performance/measurement.js';
@@ -73,7 +77,6 @@ import { resolveRemediationRequest } from '../core/advisories/remediationRequest
 import type { RemediationRequestRejection } from '../core/advisories/remediationRequest.js';
 import { evaluateSecurityOutcome } from '../core/advisories/securityOutcome.js';
 import { buildVulnerabilityContexts } from '../core/advisories/vulnerabilityContext.js';
-import type { SecurityOutcomeStatus } from '../core/advisories/securityOutcome.js';
 import type { DashboardController, MessageSink } from './dashboardController.js';
 import { createNodeNpmResolverDeps, resolveNpmInvocation } from './npmResolver.js';
 import { createNodeUpgradeTransactionFileAdapter } from './nodeUpgradeTransactionFiles.js';
@@ -82,15 +85,9 @@ import { combineSecurityOutcomes } from './securityOutcomeBatch.js';
 import { materializeUpgradeSecurityGraph } from './upgradeSecurityGraph.js';
 import type { DiscoveredProject, ResolvedProject } from './projectResolution.js';
 import { loadProject } from './projectResolution.js';
-import { IsolatedResolverVerifier } from './resolverVerifier.js';
+import { IsolatedResolverVerifier, NodeResolverProcessRunner } from './resolverVerifier.js';
 import { collectProjectCompatibilityEvidence, parseProjectManifestCompatibilityEvidence } from './projectCompatibility/projectEvidenceCollector.js';
-import {
-  analyzeProjectCompatibilityMedium,
-  appendProjectCompatibilityImportAnalysis,
-  targetExportsEvidence,
-  targetPrivateSubpathPrefixes,
-  removedTargetPackageCommands,
-} from './projectCompatibility/projectCompatibilityAnalysis.js';
+import { runProjectCompatibilityWorkflow } from './projectCompatibility/projectCompatibilityWorkflow.js';
 import { TargetPackageInspector } from './projectCompatibility/targetPackageInspector.js';
 import { TargetPackageSurfaceCache } from './projectCompatibility/targetPackageInspector.js';
 import {
@@ -99,7 +96,7 @@ import {
 } from './projectCompatibility/projectCompatibilityFreshness.js';
 import { resolveAnalysisForExecution } from './upgradeAnalysisLookup.js';
 import type { AnalysisLookupRejection } from './upgradeAnalysisLookup.js';
-import { UPGRADE_ANALYSIS_RETENTION_MS } from './upgradeFreshness.js';
+import { UPGRADE_ANALYSIS_RETENTION_MS, UPGRADE_ANALYSIS_SOFT_STALE_MS } from './upgradeFreshness.js';
 import {
   buildUpgradeAnalysisChanges,
   buildUpgradeAnalysisFiles,
@@ -131,12 +128,14 @@ import type {
 } from './smartCleanupCompletionReport.js';
 import type {
   ProtocolError,
-  RemediationOutcomeStatus,
   SecurityOutcome,
   SmartCleanupCompletionPresentation,
+  TransitiveRemediationApplyResult,
+  TransitiveRemediationPlanSummary,
   UpgradeAnalysisSmartPlan,
   UpgradeResultPresentation,
 } from './webviewProtocol.js';
+import { buildTransitiveRemediationPresentation } from './transitiveRemediationPresentation.js';
 
 export interface UpgradeChangeRequest {
   package: string;
@@ -186,6 +185,10 @@ export interface RemediationMessage {
 
 export interface RemediationBatchMessage {
   packages: string[];
+}
+
+export interface RemediationAnalysisMessage {
+  analysisId: string;
 }
 
 export interface AnalysisMessage {
@@ -260,6 +263,7 @@ export interface UpgradeAssistantCoordinatorOptions {
 
 /** Removal review retention is unchanged; Upgrade Review has its own longer, soft-stale-aware retention. */
 const REMOVAL_ANALYSIS_TTL_MS = 10 * 60_000;
+const MAX_REMEDIATION_PRESENTED_ADVISORIES = 400;
 
 /** Production default for `UpgradeAssistantCoordinatorOptions.withCompatibilityProgress` — the exact `vscode.window.withProgress`/`AbortController` wiring `handleAnalyzeUpgradeRequests`'s compatibility preflight used inline before this seam existed. */
 async function defaultWithCompatibilityProgress<T>(title: string, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -301,17 +305,10 @@ const ANALYSIS_LOOKUP_ERRORS: Record<AnalysisLookupRejection, ProtocolError> = {
 const REMEDIATION_REQUEST_ERRORS: Record<RemediationRequestRejection, ProtocolError> = {
   UNKNOWN_PACKAGE: { code: 'UNKNOWN_PACKAGE', message: 'This package is not part of the current scan.' },
   NOT_TRANSITIVE_VULNERABILITY: {
-    code: 'NOT_ELIGIBLE',
+    code: 'NO_REMEDIATION_NEEDED',
     message: 'This dependency has no transitive vulnerability that remediation analysis applies to.',
   },
 };
-
-/** `not-applicable` never reaches here — resolveRemediationRequest only ever accepts a row with real advisories. */
-function toRemediationOutcomeStatus(status: SecurityOutcomeStatus): RemediationOutcomeStatus {
-  if (status === 'resolved' || status === 'not-applicable') return 'resolved';
-  if (status === 'unknown') return 'unknown';
-  return 'remains';
-}
 
 function projectCompatibilityFingerprint(project: ResolvedProject, evidenceFingerprint: string): string {
   const fingerprint = computeSourceFingerprint({
@@ -342,52 +339,6 @@ function resolvedProjectSourceMatches(left: ResolvedProject, right: ResolvedProj
     left.importerId === right.importerId &&
     JSON.stringify(left.peerPolicy) === JSON.stringify(right.peerPolicy) &&
     JSON.stringify(left.resolvedRegistry) === JSON.stringify(right.resolvedRegistry);
-}
-
-function waitForAnalysisWork<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(new DOMException('Upgrade analysis cancelled.', 'AbortError'));
-  return new Promise<T>((resolve, reject) => {
-    const abort = (): void => reject(new DOMException('Upgrade analysis cancelled.', 'AbortError'));
-    signal.addEventListener('abort', abort, { once: true });
-    void work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
-  });
-}
-
-async function loadToolingPackageEvidence(input: {
-  graph: ReturnType<typeof buildDependencyGraph>;
-  declarations: Readonly<Record<string, string>>;
-  metadataProvider: RegistryPackageMetadataProvider;
-}): Promise<{ packages: ToolingPackageEvidence[]; incomplete: boolean }> {
-  const relevant = ['@typescript-eslint/eslint-plugin', '@typescript-eslint/parser']
-    .filter((name) => input.declarations[name] !== undefined);
-  if (relevant.length === 0) return { packages: [], incomplete: false };
-  const directByName = new Map(directNodes(input.graph).map((node) => [node.name, node]));
-  const packages: ToolingPackageEvidence[] = [];
-  let incomplete = false;
-  for (const name of relevant) {
-    const node = directByName.get(name);
-    if (node?.version === null || node?.version === undefined) {
-      packages.push({ name, resolvedVersion: null, declaredRange: input.declarations[name] ?? null, peerDependencies: {} });
-      incomplete = true;
-      continue;
-    }
-    try {
-      const metadata = await input.metadataProvider.getPackageVersionMetadata(name, node.version);
-      packages.push({
-        name,
-        resolvedVersion: node.version,
-        declaredRange: input.declarations[name] ?? null,
-        peerDependencies: metadata.peerDependencies,
-        optionalPeers: Object.entries(metadata.peerDependenciesMeta)
-          .filter(([, value]) => value.optional)
-          .map(([peer]) => peer),
-      });
-    } catch {
-      packages.push({ name, resolvedVersion: node.version, declaredRange: input.declarations[name] ?? null, peerDependencies: {} });
-      incomplete = true;
-    }
-  }
-  return { packages, incomplete };
 }
 
 function attachTrustedProjectCompatibilityNavigation(input: {
@@ -503,10 +454,30 @@ interface PendingRemovalAnalysis {
 
 interface SharedRemediationWork {
   performance?: PerformanceRecorder;
-  prepared: SharedPromise<{
-    materialized: Awaited<ReturnType<IsolatedResolverVerifier['materializeResolvedGraph']>>;
-    advisoriesByName: ReturnType<typeof advisoriesByNameFromRows>;
-  }>;
+}
+
+interface StoredRemediationPlan {
+  id: string;
+  packageName: string;
+  snapshot: ResolvedProject;
+  before: RemediationGraphSnapshot;
+  targetAdvisories: AttributedAdvisory[];
+  proposedLockfileText: string;
+  packageManagerVersion: string | null;
+  ignoreScripts: boolean;
+  verificationScripts: VerificationScript[];
+  plan: TransitiveRemediationPlan;
+  presentation: TransitiveRemediationPlanSummary;
+  expiresAt: number;
+  stale: boolean;
+}
+
+interface PreparedRemediationWork {
+  project: ResolvedProject;
+  materialized: Extract<Awaited<ReturnType<IsolatedResolverVerifier['materializeTransitiveRemediation']>>, { ok: true }>;
+  before: RemediationGraphSnapshot;
+  after: RemediationGraphSnapshot;
+  packageManagerVersion: string | null;
 }
 
 function duplicateExcessVersionCount(snapshot: SmartCleanupBeforeSnapshot['snapshot']): number | null {
@@ -622,6 +593,11 @@ export class UpgradeAssistantCoordinator {
    */
   private sourceInvalidatedAnalyzePackage: string | null = null;
   private activeRemediationAbort: AbortController | undefined;
+  private activeRemediationAnalysisId: string | undefined;
+  private activeRemediationPackage: string | undefined;
+  /** Opaque, host-owned lockfile plans. Bounded to one current plan per direct dependency. */
+  private readonly remediationPlans = new Map<string, StoredRemediationPlan>();
+  private readonly remediationPlanByPackage = new Map<string, string>();
   private activeUpgradeAnalysisAbort: AbortController | undefined;
   /** Bounded final dedupe recheck that runs after the review is confirmed. */
   private activeSmartCleanupFinalCheckAbort: AbortController | undefined;
@@ -664,6 +640,8 @@ export class UpgradeAssistantCoordinator {
     if (this.reservation.isMutationBusy) return;
     this.analysis = undefined;
     this.removal = undefined;
+    this.remediationPlans.clear();
+    this.remediationPlanByPackage.clear();
     void this.reservation
       .releaseCurrent()
       .then((released) => {
@@ -688,8 +666,10 @@ export class UpgradeAssistantCoordinator {
 
   /**
    * Called synchronously for watched source/dependency changes and genuine
-   * HEAD changes. Read-only reviews are revoked immediately; a transaction
-   * already inside its mutation boundary remains the sole deferral owner.
+   * HEAD changes. Advance the execution race guard immediately, but a completed
+   * upgrade review is revoked only after its consumed contents differ. Watchers
+   * can report identical saves, dev-tool writes, or changes outside that evidence.
+   * A transaction inside its mutation boundary remains the sole deferral owner.
    */
   handleProjectSourceChanged(): void {
     this.sourceGeneration.advance();
@@ -716,12 +696,9 @@ export class UpgradeAssistantCoordinator {
       }
       this.activeUpgradeAnalysisAbort?.abort();
     }
-    if (this.analysis !== undefined) {
-      const stored = this.analysis;
-      this.analysis = undefined;
-      this.options.sink.postMessage({ status: 'upgrade-analysis-stale', analysisId: stored.id });
-      void this.releaseReservation(stored.eligibility.packageName);
-    }
+    // Keep completed upgrade evidence for the debounced content comparison in
+    // checkOpenAnalysisFreshness. Confirm still re-reads it and checks the
+    // generation before mutation, including during this debounce window.
     if (this.removal !== undefined) {
       const stored = this.removal;
       this.removal = undefined;
@@ -734,6 +711,37 @@ export class UpgradeAssistantCoordinator {
         },
       });
       void this.releaseReservation(stored.reservationKey);
+    }
+  }
+
+  /**
+   * Dependency topology/configuration changed. Unlike ordinary source edits,
+   * this invalidates exact generated lockfile plans immediately. The stored
+   * package/id correlation is retained only so Retry can start a fresh check;
+   * stale plans can never reach the mutation boundary.
+   */
+  handleDependencySourceChanged(): void {
+    this.handleProjectSourceChanged();
+    if (this.reservation.isMutationBusy) return;
+    if (this.activeRemediationAnalysisId === undefined && this.activeRemediationPackage !== undefined) {
+      const packageName = this.activeRemediationPackage;
+      this.activeRemediationPackage = undefined;
+      this.activeRemediationAbort?.abort();
+      this.options.sink.postMessage({
+        status: 'remediation-error',
+        package: packageName,
+        error: { code: 'STALE_SOURCE', message: 'Project dependency files changed while this fix was being checked. Check again.' },
+      });
+    }
+    for (const stored of this.remediationPlans.values()) {
+      if (stored.stale) continue;
+      stored.stale = true;
+      this.options.sink.postMessage({
+        status: 'remediation-stale',
+        package: stored.packageName,
+        analysisId: stored.id,
+        message: 'Project dependency files changed. Re-check the transitive fix before applying it.',
+      });
     }
   }
 
@@ -951,6 +959,7 @@ export class UpgradeAssistantCoordinator {
     this.pendingAnalyzePackage = eligibility.packageName;
     const analysisAbort = new AbortController();
     this.activeUpgradeAnalysisAbort = analysisAbort;
+    const pendingAnalysisWork: Promise<unknown>[] = [];
 
     // Set true only on the success path, right before the final return —
     // `finally` below releases the lock on every other exit (an early
@@ -1030,8 +1039,6 @@ export class UpgradeAssistantCoordinator {
       // neither blocks the other's first useful result. A scan failure is
       // represented as partial evidence later; it never fails Upgrade Review.
       const manifestProjectEvidence = parseProjectManifestCompatibilityEvidence(preflightProject.manifestText);
-      const endProjectFirstResult = performance.start('project compatibility time to first result');
-      const endProjectTotal = performance.start('project compatibility total analysis');
       const projectEvidencePromise = collectProjectCompatibilityEvidence({
         folder: selected.folder,
         dir: selected.dir,
@@ -1115,6 +1122,9 @@ export class UpgradeAssistantCoordinator {
       endToolchain({ available: packageManagerInvocation !== null });
       const resolverVerifier = packageManagerInvocation !== null
         ? new IsolatedResolverVerifier({
+            // Bound each isolated Upgrade Review resolver step, not the user's
+            // confirmed installation. A timeout remains unverified evidence.
+            runner: new NodeResolverProcessRunner({ timeoutMs: 120_000 }),
             packageManager: preflightProject.packageManager,
             packageManagerVersion: packageManagerInvocation.version ?? null,
             invocation: packageManagerInvocation,
@@ -1164,9 +1174,22 @@ export class UpgradeAssistantCoordinator {
         }
       }
       ).then(
-        (analysis) => ({ ok: true as const, analysis }),
-        (cause: unknown) => ({ ok: false as const, cause })
+        (analysis) => {
+          endCompatibility({ status: analysis.status });
+          if (!analysisAbort.signal.aborted && !this.droppedByCancellation(eligibility.packageName)) {
+            this.options.sink.postMessage({
+              status: 'upgrade-analysis-partial', requestId, package: eligibility.packageName,
+              section: { kind: 'compatibility', compatibility: {
+                status: analysis.status, completeness: analysis.completeness, findings: analysis.findings,
+                ...(analysis.resolverVerification === undefined ? {} : { resolverVerification: analysis.resolverVerification }),
+              } },
+            });
+          }
+          return { ok: true as const, analysis };
+        },
+        (cause: unknown) => { endCompatibility({ completed: false }); return { ok: false as const, cause }; }
       );
+      pendingAnalysisWork.push(compatibilityResultPromise);
 
       // Chain directly from compatibility completion: its resolver verify
       // and temp-dir cleanup have settled before this callback runs, while
@@ -1189,241 +1212,74 @@ export class UpgradeAssistantCoordinator {
         return proposedGraph;
       });
 
-      // --- project compatibility, fast then enriched medium then deep ---
-      // The source scan above is local and bounded. Exact metadata normally
-      // reuses the compatibility provider's in-flight/cache entry.
-      const projectEvidence = await projectEvidencePromise;
-      const readMetadata = async (version: string): Promise<PackageVersionMetadata | undefined> => {
-        try {
-          return await metadataProvider.getPackageVersionMetadata(eligibility.packageName, version);
-        } catch {
-          return undefined;
-        }
-      };
-      const hasScripts = Object.keys(projectEvidence.scripts).length > 0;
-      const hasToolingDeclarations = ['@typescript-eslint/eslint-plugin', '@typescript-eslint/parser']
-        .some((name) => projectEvidence.declaredDependencies[name] !== undefined);
-      const targetMetadataPromise = readMetadata(eligibility.target);
-      const currentMetadataPromise = hasScripts
-        ? readMetadata(eligibility.currentVersion)
-        : Promise.resolve(undefined);
-      const toolingPromise = hasToolingDeclarations
-        ? loadToolingPackageEvidence({
-          graph,
-          declarations: projectEvidence.declaredDependencies,
-          metadataProvider,
-        })
-        : Promise.resolve({ packages: [], incomplete: false });
-      const targetMetadata = await waitForAnalysisWork(targetMetadataPromise, analysisAbort.signal);
-      const projectIdentity: ProjectCompatibilityIdentity = {
-        packageName: eligibility.packageName,
-        currentVersion: eligibility.currentVersion,
-        targetVersion: eligibility.target,
-        requestId,
-        sourceFingerprint: projectCompatibilityFingerprint(preflightProject, projectEvidence.evidenceFingerprint),
-      };
-      const endProjectFast = performance.start('project compatibility fast analysis');
-      let projectCompatibility = await analyzeProjectCompatibilityMedium({
-        identity: projectIdentity,
-        project: projectEvidence,
-        ...(targetMetadata === undefined ? {} : { targetMetadata }),
-        toolingPackages: [],
-        toolingMetadataIncomplete: hasToolingDeclarations,
-        ...(hasScripts ? {} : { targetCommands: [] }),
-      });
-      endProjectFast({ findings: projectCompatibility.findings.length });
-      endProjectFirstResult({ findings: projectCompatibility.findings.length });
-      attachTrustedProjectCompatibilityNavigation({
-        analysis: projectCompatibility,
-        packageName: eligibility.packageName,
-        folder: selected.folder,
-        store: this.options.storeProjectCompatibilityReferences,
-      });
-      if (this.droppedByCancellation(eligibility.packageName)) return;
-      this.options.sink.postMessage({
-        status: 'upgrade-analysis-partial',
-        requestId,
-        package: eligibility.packageName,
-        section: { kind: 'project-compatibility', projectCompatibility },
-      });
+      pendingAnalysisWork.push(securityGraphPromise);
+      // Security is published when its graph is ready, not after package inventory.
+      const securityResultPromise = securityGraphPromise.then((proposedSecurityGraph): SecurityOutcome | null => {
+        if (securityPosted || analysisAbort.signal.aborted || this.droppedByCancellation(eligibility.packageName)) return null;
+        const after: Parameters<typeof evaluateSecurityOutcome>[0]['after'] = proposedSecurityGraph === undefined
+          ? 'no-resolver-evidence'
+          : { graph: proposedSecurityGraph, advisoriesByName: advisoriesByNameFromRows(rows) };
+        const combined = combineSecurityOutcomes(securityInputs.map(({ item, before }) =>
+          evaluateSecurityOutcome({ before, targetVersion: item.target, rootPackageName: item.packageName, after })
+        ));
+        const security = combined === null ? null : {
+          ...combined,
+          contexts: buildVulnerabilityContexts({
+            graph, attributedAdvisories: securityInputs.flatMap(({ before }) => before),
+            ...(proposedSecurityGraph === undefined ? {} : { proposed: { graph: proposedSecurityGraph, proposal } }),
+          }),
+        };
+        this.options.sink.postMessage({
+          status: 'upgrade-analysis-partial', requestId, package: eligibility.packageName,
+          section: { kind: 'security', security },
+        });
+        return security;
+      }).then(
+        (security) => ({ ok: true as const, security }),
+        (cause: unknown) => ({ ok: false as const, cause })
+      );
+      pendingAnalysisWork.push(securityResultPromise);
 
-      // Dependency-tree resolution remains independent: fast local/metadata
-      // project findings above can render while its resolver work is still
-      // running, then the ordinary compatibility section settles normally.
+      // The workflow owns local/metadata stages. Only an uncached npm pack waits
+      // for the resolver lane; cached evidence never waits on a subprocess.
+      const packageRegistry = registryForPackage(preflightProject.resolvedRegistry, eligibility.packageName);
+      const projectResultPromise = runProjectCompatibilityWorkflow({
+        identity: { packageName: eligibility.packageName, currentVersion: eligibility.currentVersion,
+          targetVersion: eligibility.target, requestId },
+        sourceFingerprint: (fingerprint) => projectCompatibilityFingerprint(preflightProject, fingerprint),
+        manifest: manifestProjectEvidence, evidence: projectEvidencePromise, graph, metadataProvider,
+        registry: packageRegistry, surfaceCache: this.targetPackageSurfaceCache,
+        ...(npmResolution.ok ? { inspect: (packageName: string, version: string, signal: AbortSignal) => new TargetPackageInspector({
+          executable: npmResolution.invocation.node, prefixArgs: [npmResolution.invocation.npmCliJs],
+          version: npmResolution.invocation.version,
+        }, packageRegistry).inspect(packageName, version, signal) } : {}),
+        packageManagerIdle: securityGraphPromise, performance, signal: analysisAbort.signal,
+        onResult: (projectCompatibility) => {
+          if (analysisAbort.signal.aborted || this.droppedByCancellation(eligibility.packageName)) return;
+          attachTrustedProjectCompatibilityNavigation({
+            analysis: projectCompatibility, packageName: eligibility.packageName, folder: selected.folder,
+            store: this.options.storeProjectCompatibilityReferences,
+          });
+          this.options.sink.postMessage({
+            status: 'upgrade-analysis-partial', requestId, package: eligibility.packageName,
+            section: { kind: 'project-compatibility', projectCompatibility },
+          });
+        },
+      }).then(
+        (result) => ({ ok: true as const, result }),
+        (cause: unknown) => ({ ok: false as const, cause })
+      );
+      pendingAnalysisWork.push(projectResultPromise);
       const compatibilityResult = await compatibilityResultPromise;
       if (!compatibilityResult.ok) throw compatibilityResult.cause;
       const analysis = compatibilityResult.analysis;
-      endCompatibility({ status: analysis.status });
+      const projectResult = await projectResultPromise;
+      if (!projectResult.ok) throw projectResult.cause;
+      const { analysis: projectCompatibility, evidence: projectEvidence } = projectResult.result;
+      const securityResult = await securityResultPromise;
+      if (!securityResult.ok) throw securityResult.cause;
+      const security = securityResult.security;
       if (this.droppedByCancellation(eligibility.packageName)) return;
-      this.options.sink.postMessage({
-        status: 'upgrade-analysis-partial',
-        requestId,
-        package: eligibility.packageName,
-        section: {
-          kind: 'compatibility',
-          compatibility: {
-            status: analysis.status,
-            completeness: analysis.completeness,
-            findings: analysis.findings,
-            ...(analysis.resolverVerification === undefined ? {} : { resolverVerification: analysis.resolverVerification }),
-          },
-        },
-      });
-
-      if (hasScripts || hasToolingDeclarations) {
-        const [currentMetadata, tooling] = await waitForAnalysisWork(
-          Promise.all([currentMetadataPromise, toolingPromise]),
-          analysisAbort.signal
-        );
-        const targetCommands = hasScripts
-          ? removedTargetPackageCommands({
-              packageName: eligibility.packageName,
-              ...(currentMetadata === undefined ? {} : { currentMetadata }),
-              ...(targetMetadata === undefined ? {} : { targetMetadata }),
-            })
-          : [];
-        const endProjectMedium = performance.start('project compatibility medium analysis');
-        projectCompatibility = await analyzeProjectCompatibilityMedium({
-          identity: projectIdentity,
-          project: projectEvidence,
-          ...(targetMetadata === undefined ? {} : { targetMetadata }),
-          toolingPackages: tooling.packages,
-          toolingMetadataIncomplete: tooling.incomplete,
-          ...(targetCommands === undefined ? {} : { targetCommands }),
-        });
-        endProjectMedium({ findings: projectCompatibility.findings.length });
-        attachTrustedProjectCompatibilityNavigation({
-          analysis: projectCompatibility,
-          packageName: eligibility.packageName,
-          folder: selected.folder,
-          store: this.options.storeProjectCompatibilityReferences,
-        });
-        if (this.droppedByCancellation(eligibility.packageName)) return;
-        this.options.sink.postMessage({
-          status: 'upgrade-analysis-partial',
-          requestId,
-          package: eligibility.packageName,
-          section: { kind: 'project-compatibility', projectCompatibility },
-        });
-      }
-
-      let targetSurface: Parameters<typeof appendProjectCompatibilityImportAnalysis>[0]['targetSurface'];
-      let importUnavailableReason: string | undefined;
-      if (targetMetadata === undefined) {
-        importUnavailableReason = 'target-metadata-unavailable';
-      } else {
-        const exports = targetExportsEvidence(targetMetadata.exports, targetMetadata.exportsTruncated !== true);
-        const needsCompleteFiles =
-          exports.status !== 'known' &&
-          projectEvidence.imports.some((reference) => reference.specifier !== eligibility.packageName);
-        if (!needsCompleteFiles) {
-          targetSurface = {
-            packageName: eligibility.packageName,
-            version: eligibility.target,
-            exports,
-            privateSubpathPrefixes: targetPrivateSubpathPrefixes(eligibility.packageName),
-          };
-        } else if (!npmResolution.ok) {
-          importUnavailableReason = 'target-package-inspector-unavailable';
-        } else {
-          try {
-            const endTargetInventory = performance.start('project compatibility target package inventory');
-            const packageRegistry = registryForPackage(preflightProject.resolvedRegistry, eligibility.packageName);
-            const cacheKey = `${packageRegistry}\0${eligibility.packageName}\0${eligibility.target}`;
-            const cachedSurface = this.targetPackageSurfaceCache.get(cacheKey);
-            // Both operations use package-manager child processes. The
-            // security graph began earlier to overlap metadata/local work,
-            // but must settle before an uncached package inventory starts.
-            if (cachedSurface === undefined) await securityGraphPromise;
-            const surface = cachedSurface ?? await new TargetPackageInspector(
-                {
-                  executable: npmResolution.invocation.node,
-                  prefixArgs: [npmResolution.invocation.npmCliJs],
-                  version: npmResolution.invocation.version,
-                },
-                packageRegistry
-              ).inspect(eligibility.packageName, eligibility.target, analysisAbort.signal);
-            if (cachedSurface === undefined) this.targetPackageSurfaceCache.set(cacheKey, surface);
-            endTargetInventory({ files: surface.files.length, cached: cachedSurface !== undefined });
-            targetSurface = {
-              packageName: surface.packageName,
-              version: surface.version,
-              exports,
-              files: { completeness: 'complete', paths: surface.files },
-              privateSubpathPrefixes: targetPrivateSubpathPrefixes(eligibility.packageName),
-            };
-          } catch {
-            importUnavailableReason = 'target-package-inventory-unavailable';
-          }
-        }
-      }
-      const endProjectDeep = performance.start('project compatibility import analysis');
-      projectCompatibility = await appendProjectCompatibilityImportAnalysis({
-        analysis: projectCompatibility,
-        project: projectEvidence,
-        ...(targetSurface === undefined ? {} : { targetSurface }),
-        ...(importUnavailableReason === undefined ? {} : { unavailableReason: importUnavailableReason }),
-        signal: analysisAbort.signal,
-      });
-      endProjectDeep({ findings: projectCompatibility.findings.length });
-      endProjectTotal({ findings: projectCompatibility.findings.length });
-      attachTrustedProjectCompatibilityNavigation({
-        analysis: projectCompatibility,
-        packageName: eligibility.packageName,
-        folder: selected.folder,
-        store: this.options.storeProjectCompatibilityReferences,
-      });
-      if (this.droppedByCancellation(eligibility.packageName)) return;
-      this.options.sink.postMessage({
-        status: 'upgrade-analysis-partial',
-        requestId,
-        package: eligibility.packageName,
-        section: { kind: 'project-compatibility', projectCompatibility },
-      });
-
-      // --- security outcome (best-effort; never blocks the rest of the
-      // analysis) — relocated here, right after compatibility, since its
-      // only real data dependency is `analysis.status`, not the smart-plan
-      // search below. Skipped when the Stage-0 early-post above already
-      // answered this (no advisories to evaluate at all). ---
-      let security: SecurityOutcome | null = null;
-      if (!securityPosted) {
-        let after: Parameters<typeof evaluateSecurityOutcome>[0]['after'] = 'no-resolver-evidence';
-        const proposedSecurityGraph = await securityGraphPromise;
-        if (proposedSecurityGraph !== undefined) {
-          after = { graph: proposedSecurityGraph, advisoriesByName: advisoriesByNameFromRows(rows) };
-        }
-        const combinedSecurity = combineSecurityOutcomes(
-          securityInputs.map(({ item, before }) =>
-            evaluateSecurityOutcome({
-              before,
-              targetVersion: item.target,
-              rootPackageName: item.packageName,
-              after,
-            })
-          )
-        );
-        security = combinedSecurity === null
-          ? null
-          : {
-              ...combinedSecurity,
-              contexts: buildVulnerabilityContexts({
-                graph,
-                attributedAdvisories: securityInputs.flatMap(({ before }) => before),
-                ...(proposedSecurityGraph === undefined
-                  ? {}
-                  : { proposed: { graph: proposedSecurityGraph, proposal } }),
-              }),
-            };
-
-        if (this.droppedByCancellation(eligibility.packageName)) return;
-        this.options.sink.postMessage({
-          status: 'upgrade-analysis-partial',
-          requestId,
-          package: eligibility.packageName,
-          section: { kind: 'security', security },
-        });
-      }
 
       let smartPlan: UpgradeAnalysisSmartPlan | null = null;
       let smartPlanProposal: UpgradeProposal | null = null;
@@ -1510,6 +1366,9 @@ export class UpgradeAssistantCoordinator {
         }).catch(() => null),
         this.projectLoader(selected).catch(() => null),
       ]);
+      // Cancellation during this last read is not a source change and cannot
+      // retain a new review after the user has closed it.
+      if (analysisAbort.signal.aborted || this.droppedByCancellation(eligibility.packageName)) return;
       if (
         !projectCompatibilityFinalReadIsCurrent({
           generationBeforeRead: finalReadGeneration,
@@ -1604,6 +1463,10 @@ export class UpgradeAssistantCoordinator {
       }
       return;
     } finally {
+      // Retain reservation until every launched stage (including child cleanup)
+      // settles. Failed/cancelled stages cannot post into the next review.
+      if (!succeeded) analysisAbort.abort();
+      await Promise.allSettled(pendingAnalysisWork);
       if (!succeeded) await this.releaseReservation(eligibility.packageName);
       if (this.pendingAnalyzePackage === eligibility.packageName) this.pendingAnalyzePackage = null;
       if (this.cancelRequestedFor === eligibility.packageName) this.cancelRequestedFor = null;
@@ -1646,27 +1509,25 @@ export class UpgradeAssistantCoordinator {
    * is currently open, re-reads disk with the same projectLoader used by the
    * authoritative STALE_SOURCE recheck and compares against the exact same
    * fields executeStoredAnalysis compares below — never a second, looser
-   * definition of "changed." A mismatch posts a lightweight,
-   * non-authoritative `upgrade-analysis-stale` hint; it never touches
-   * `this.analysis` or the lock, and never substitutes for the real
-   * STALE_SOURCE recheck confirm/use-smart-plan still run unconditionally.
-   *
-   * FileChangeCoordinator's own reload is deferred for exactly as long as
-   * `this.isBusy()` is true, which is true for the entire duration an
-   * analysis is open (the panel-wide lock is reserved across preflight and
-   * however long the review panel stays open) — so this is the one place
-   * that still checks disk during that window; detecting staleness of an
-   * *open* analysis is exactly the case the deferred reload cannot cover.
+   * definition of "changed." Only a stable content mismatch revokes the stored
+   * action and emits the stale hint; the webview keeps the results readable.
+   * Raw watcher events and an already-dirty working tree are not evidence of a
+   * change since analysis. This never replaces the confirm-time source checks.
    */
   async checkOpenAnalysisFreshness(): Promise<void> {
     const stored = this.analysis;
     if (stored === undefined || this.options.isDisposed()) return;
     const selected = this.options.getSelectedProject();
     if (selected === undefined) return;
-    const disk = await this.projectLoader(selected);
+    const generation = this.sourceGeneration.capture();
+    const isCurrent = (): boolean => this.analysis === stored && !this.options.isDisposed() &&
+      this.options.getSelectedProject() === selected && this.sourceGeneration.isCurrent(generation);
+    const disk = await this.projectLoader(selected).catch(() => null);
     // Re-check after the await: a confirm/cancel/TTL-reclaim may have
     // superseded this exact stored analysis while disk was being re-read.
-    if (this.analysis !== stored || this.options.isDisposed()) return;
+    // Failed reads do not prove changed files. Execution still fails closed on
+    // its mandatory reread; a later watcher event can retry this advisory check.
+    if (!isCurrent() || disk === null) return;
     let matches = resolvedProjectSourceMatches(disk, stored.snapshot);
     if (matches && stored.projectCompatibilityEvidenceFingerprint !== null) {
       const evidence = await collectProjectCompatibilityEvidence({
@@ -1677,14 +1538,16 @@ export class UpgradeAssistantCoordinator {
       }).catch(() => null);
       // A confirm/cancel/new analysis may supersede this one during the
       // bounded source scan; never stale a newer retained review.
-      if (this.analysis !== stored || this.options.isDisposed()) return;
+      if (!isCurrent() || evidence === null) return;
       matches = projectCompatibilityEvidenceIsCurrent(
         stored.projectCompatibilityEvidenceFingerprint,
-        evidence?.evidenceFingerprint ?? null
+        evidence.evidenceFingerprint
       );
     }
     if (!matches) {
+      this.analysis = undefined;
       this.options.sink.postMessage({ status: 'upgrade-analysis-stale', analysisId: stored.id });
+      await this.releaseReservation(stored.eligibility.packageName);
     }
   }
 
@@ -2116,22 +1979,13 @@ export class UpgradeAssistantCoordinator {
    * and upgradeAction.ts's `transitive-remediation` state for where this is
    * triggered from.
    *
-   * Read-only start to finish: no manifest/lockfile write, no package-manager
-   * lock reserved (`dashboardPanel.ts` still refuses this while an upgrade
-   * holds the panel-wide lock, the same way it already refuses refresh/
-   * change-project, since a concurrent disk read could otherwise race an
-   * in-flight upgrade's file writes). The one real question this can answer
-   * is: does the isolated resolver, run *without* the existing lockfile,
-   * settle on a tree where the row's known advisories no longer appear? A
-   * `changes: []` proposal is IsolatedResolverVerifier's dedicated no-op
-   * shape for exactly this (see its own doc) — the manifest is staged
-   * unchanged, and omitting `lockfile` below is what forces a fully fresh
-   * resolution from declared ranges rather than reusing pinned transitive
-   * versions. This never searches for a coordinated direct-dependency
-   * upgrade (that would need a second, vulnerability-aware planner distinct
-   * from planSmartUpgrade's peer-conflict-driven search) — a vulnerability
-   * that a fresh resolve does not clear is honestly reported as
-   * `no-direct-fix`, never guessed at further.
+   * Analysis is read-only in the real project. An isolated copy starts from
+   * the active lockfile and runs a targeted, script-free lockfile update for
+   * the vulnerable transitive packages. The resulting tree is offered only
+   * when the manifest and all direct dependency versions remain unchanged,
+   * at least one targeted advisory is removed, and no advisory is introduced
+   * or worsened. Applying the opaque reviewed plan is a separate transaction
+   * with a final advisory reread and compare-and-swap rollback.
    */
   async handleAnalyzeRemediation(message: RemediationMessage): Promise<void> {
     if (this.activeRemediationAbort !== undefined) {
@@ -2144,14 +1998,16 @@ export class UpgradeAssistantCoordinator {
     }
     const abort = new AbortController();
     this.activeRemediationAbort = abort;
+    this.activeRemediationPackage = message.package;
     const performance = createPerformanceSession(
       'Dependency Dashboard remediation analysis',
       this.options.performanceEnabled?.() ?? false
     );
     try {
-      await this.analyzeRemediation(message, abort.signal, { performance, prepared: new SharedPromise() });
+      await this.analyzeRemediation(message, abort.signal, { performance });
     } finally {
       if (this.activeRemediationAbort === abort) this.activeRemediationAbort = undefined;
+      if (this.activeRemediationPackage === message.package) this.activeRemediationPackage = undefined;
       performance.finish({ packages: 1 });
     }
   }
@@ -2171,12 +2027,7 @@ export class UpgradeAssistantCoordinator {
       'Dependency Dashboard bulk remediation analysis',
       this.options.performanceEnabled?.() ?? false
     );
-    // A lockfile-free remediation resolve depends on the project's declared
-    // ranges, not on which vulnerable row will later be evaluated against the
-    // resulting graph. Share that immutable fresh resolve across this one
-    // logical batch instead of reloading the project, probing npm/pnpm, and
-    // running an identical package-manager subprocess once per row.
-    const sharedWork: SharedRemediationWork = { performance, prepared: new SharedPromise() };
+    const sharedWork: SharedRemediationWork = { performance };
     try {
       const result = await runSequentialBatch({
         items: message.packages,
@@ -2203,12 +2054,38 @@ export class UpgradeAssistantCoordinator {
       });
     } finally {
       if (this.activeRemediationAbort === abort) this.activeRemediationAbort = undefined;
+      this.activeRemediationPackage = undefined;
       performance.finish({ packages: total });
     }
   }
 
   handleCancelRemediation(): void {
     this.activeRemediationAbort?.abort();
+  }
+
+  handleCancelRemediationPlan(message: RemediationAnalysisMessage): void {
+    if (this.activeRemediationAnalysisId === message.analysisId) {
+      this.activeRemediationAbort?.abort();
+      return;
+    }
+    const stored = this.remediationPlans.get(message.analysisId);
+    if (stored === undefined) return;
+    this.remediationPlans.delete(stored.id);
+    if (this.remediationPlanByPackage.get(stored.packageName) === stored.id) {
+      this.remediationPlanByPackage.delete(stored.packageName);
+    }
+  }
+
+  async handleRetryRemediation(message: RemediationAnalysisMessage): Promise<void> {
+    const stored = this.remediationPlans.get(message.analysisId);
+    if (stored === undefined) return;
+    const packageName = stored.packageName;
+    this.handleCancelRemediationPlan(message);
+    await this.handleAnalyzeRemediation({ package: packageName });
+  }
+
+  async handleConfirmRemediation(message: RemediationAnalysisMessage): Promise<void> {
+    await this.executeStoredRemediation(message.analysisId);
   }
 
   private async analyzeRemediation(
@@ -2233,62 +2110,72 @@ export class UpgradeAssistantCoordinator {
     // type checker without weakening the check itself.
     if (row.current === null) return;
     const currentVersion = row.current;
+    this.activeRemediationPackage = row.name;
 
     this.options.sink.postMessage({ status: 'remediation-analyzing', package: row.name });
 
     try {
-      const noOpProposal: UpgradeProposal = {
-        requested: {
-          packageName: row.name,
-          currentVersion,
-          targetVersion: currentVersion,
-          classification: row.dev ? 'dev' : 'prod',
-        },
-        changes: [],
-      };
-      const prepared = await sharedWork.prepared.get(() =>
-        this.prepareRemediationWork(controller, noOpProposal, row.name, signal, sharedWork.performance)
+      const prepared = await this.prepareRemediationWork(
+        controller,
+        eligibility.transitiveAdvisories,
+        row.name,
+        signal,
+        sharedWork.performance
       );
       if (signal.aborted) return;
-      const { materialized } = prepared;
-
       if (this.options.isDisposed()) return;
-
-      if (!materialized.ok) {
-        this.options.sink.postMessage({
-          status: 'remediation-result',
-          package: row.name,
-          result: {
-            status: 'unknown',
-            security: {
-              status: 'unknown',
-              resolvedAdvisories: [],
-              remaining: row.advisories.map((entry) => ({
-                advisory: entry.advisory,
-                flaggedPackage: entry.flaggedPackage,
-                path: entry.path,
-                status: 'unknown',
-                resolvedVersion: null,
-                patchedVersion: entry.patchedVersion,
-              })),
-            },
-          },
-        });
-        return;
-      }
-
-      const security = evaluateSecurityOutcome({
-        before: row.advisories,
-        targetVersion: currentVersion,
+      const plan = createTransitiveRemediationPlan({
         rootPackageName: row.name,
-        after: { graph: materialized.graph, advisoriesByName: prepared.advisoriesByName },
+        targetAdvisories: eligibility.transitiveAdvisories,
+        before: prepared.before,
+        after: prepared.after,
+        manifestUnchanged: true,
       });
-
-      this.options.sink.postMessage({
-        status: 'remediation-result',
-        package: row.name,
-        result: { status: toRemediationOutcomeStatus(security.status), security },
+      const analysisId = randomBytes(16).toString('hex');
+      const generatedAt = Date.now();
+      const expiresAt = generatedAt + UPGRADE_ANALYSIS_SOFT_STALE_MS;
+      const configuration = this.getUpgradeConfiguration();
+      const verificationScripts = selectVerificationScripts(
+        prepared.project.manifestText,
+        configuration.verificationScripts
+      );
+      const presentation = buildTransitiveRemediationPresentation({
+        analysisId,
+        generatedAt: new Date(generatedAt).toISOString(),
+        expiresAt: new Date(expiresAt).toISOString(),
+        rootPackage: row.name,
+        currentVersion,
+        packageManager: prepared.project.packageManager,
+        packageManagerVersion: prepared.packageManagerVersion,
+        lifecycleScriptsEnabled: !configuration.ignoreScripts,
+        manifestPath: 'package.json',
+        lockfilePath: path.relative(prepared.project.root, prepared.project.lockfilePath!).split(path.sep).join('/'),
+        plan,
+        targetedPackages: new Set(eligibility.transitiveAdvisories.map((entry) => entry.flaggedPackage)),
+        verification: verificationScripts.length === 0
+          ? { configured: false }
+          : { configured: true, scriptNames: verificationScripts.map((entry) => entry.scriptName) },
       });
+      const previousId = this.remediationPlanByPackage.get(row.name);
+      if (previousId !== undefined) this.remediationPlans.delete(previousId);
+      const stored: StoredRemediationPlan = {
+        id: analysisId,
+        packageName: row.name,
+        snapshot: prepared.project,
+        before: prepared.before,
+        targetAdvisories: [...eligibility.transitiveAdvisories],
+        proposedLockfileText: prepared.materialized.lockfileText,
+        packageManagerVersion: prepared.packageManagerVersion,
+        ignoreScripts: configuration.ignoreScripts,
+        verificationScripts,
+        plan,
+        presentation,
+        expiresAt,
+        stale: false,
+      };
+      this.remediationPlans.set(analysisId, stored);
+      this.remediationPlanByPackage.set(row.name, analysisId);
+      this.options.sink.postMessage({ status: 'remediation-plan', package: row.name, plan: presentation });
     } catch (cause) {
       if (!this.options.isDisposed() && !signal.aborted) {
         this.options.sink.postMessage({ status: 'remediation-error', package: row.name, error: toProtocolError(cause) });
@@ -2298,14 +2185,11 @@ export class UpgradeAssistantCoordinator {
 
   private async prepareRemediationWork(
     controller: DashboardController,
-    noOpProposal: UpgradeProposal,
+    targetAdvisories: readonly AttributedAdvisory[],
     packageName: string,
     signal: AbortSignal,
     performance?: PerformanceRecorder
-  ): Promise<{
-    materialized: Awaited<ReturnType<IsolatedResolverVerifier['materializeResolvedGraph']>>;
-    advisoriesByName: ReturnType<typeof advisoriesByNameFromRows>;
-  }> {
+  ): Promise<PreparedRemediationWork> {
     const selected = this.options.getSelectedProject();
     if (selected === undefined) throw Object.assign(new Error('No project is selected.'), { name: 'NO_PROJECT' });
     const endProjectLoad = performance?.start('remediation project reload') ?? (() => 0);
@@ -2319,10 +2203,22 @@ export class UpgradeAssistantCoordinator {
       preflightProject.lockfilePath !== source.lockfilePath ||
       preflightProject.registry !== source.registry ||
       preflightProject.packageManager !== source.packageManager ||
-      preflightProject.importerId !== source.importerId
+      preflightProject.importerId !== source.importerId ||
+      JSON.stringify(preflightProject.peerPolicy) !== JSON.stringify(source.peerPolicy) ||
+      JSON.stringify(preflightProject.resolvedRegistry) !== JSON.stringify(source.resolvedRegistry)
     ) {
       throw Object.assign(new Error('Project dependency files changed. Refresh and try again.'), {
         name: 'STALE_SOURCE',
+      });
+    }
+    if (preflightProject.lockfileText === null || preflightProject.lockfilePath === null || preflightProject.lockfileName === null) {
+      throw Object.assign(new Error('A current npm or pnpm lockfile is required to prepare a transitive fix.'), {
+        name: 'NO_LOCKFILE',
+      });
+    }
+    if (preflightProject.importerId !== '.') {
+      throw Object.assign(new Error('Automatic transitive fixes for workspace importers are not supported yet.'), {
+        name: 'UNSUPPORTED_WORKSPACE',
       });
     }
 
@@ -2350,11 +2246,11 @@ export class UpgradeAssistantCoordinator {
       packageManagerVersion: packageManagerInvocation.version ?? null,
       invocation: packageManagerInvocation,
       manifestText: preflightProject.manifestText,
-      // No lockfile: this intentionally computes one fresh graph from the
-      // unchanged declared ranges for every row in this logical batch.
+      lockfile: { name: preflightProject.lockfileName, text: preflightProject.lockfileText },
       registry: preflightProject.registry,
       policy: preflightProject.peerPolicy,
     });
+    const targetNames = [...new Set(targetAdvisories.map((entry) => entry.flaggedPackage))].sort();
     const endMaterialization = performance?.start('remediation graph materialization') ?? (() => 0);
     const materialized = await vscode.window.withProgress(
       {
@@ -2369,7 +2265,7 @@ export class UpgradeAssistantCoordinator {
         signal.addEventListener('abort', externalCancellation, { once: true });
         if (signal.aborted) abort.abort();
         try {
-          return await resolverVerifier.materializeResolvedGraph(noOpProposal, abort.signal);
+          return await resolverVerifier.materializeTransitiveRemediation(targetNames, abort.signal);
         } finally {
           cancellation.dispose();
           signal.removeEventListener('abort', externalCancellation);
@@ -2377,10 +2273,490 @@ export class UpgradeAssistantCoordinator {
       }
     );
     endMaterialization({ resolved: materialized.ok });
+    if (!materialized.ok) {
+      throw Object.assign(new Error(materialized.reason), { name: 'RESOLVER_UNAVAILABLE' });
+    }
+    const endAdvisories = performance?.start('remediation advisory verification') ?? (() => 0);
+    let proposedAdvisories: Map<string, import('../core/types.js').Advisory[]>;
+    try {
+      const npmAdvisories = await fetchBulkAdvisories(
+        this.options.httpClient,
+        buildBulkRequestBody(materialized.graph),
+        signal
+      );
+      proposedAdvisories = await enrichAdvisoriesWithGitHubIdentifiers(
+        this.options.httpClient,
+        this.options.etagStore,
+        npmAdvisories,
+        signal
+      );
+    } catch (cause) {
+      endAdvisories({ available: false });
+      throw Object.assign(
+        new Error(`The proposed dependency tree could not be checked for vulnerabilities: ${cause instanceof Error ? cause.message : String(cause)}`),
+        { name: 'SECURITY_EVIDENCE_UNAVAILABLE' }
+      );
+    }
+    endAdvisories({ available: true });
     return {
+      project: preflightProject,
       materialized,
-      advisoriesByName: advisoriesByNameFromRows(controller.lastResultRows()),
+      before: {
+        graph: materialized.beforeGraph,
+        advisoriesByName: advisoriesByNameFromRows(controller.lastResultRows()),
+        advisories: 'complete',
+      },
+      after: { graph: materialized.graph, advisoriesByName: proposedAdvisories, advisories: 'complete' },
+      packageManagerVersion: packageManagerInvocation.version ?? null,
     };
+  }
+
+  private async executeStoredRemediation(analysisId: string): Promise<void> {
+    const stored = this.remediationPlans.get(analysisId);
+    if (stored === undefined) return;
+    if (stored.stale || Date.now() >= stored.expiresAt) {
+      stored.stale = true;
+      this.options.sink.postMessage({
+        status: 'remediation-stale',
+        package: stored.packageName,
+        analysisId: stored.id,
+        message: 'This transitive fix is no longer current. Check it again before applying.',
+      });
+      return;
+    }
+    if (!stored.plan.automaticApplyAllowed) {
+      this.options.sink.postMessage({
+        status: 'remediation-error',
+        package: stored.packageName,
+        error: { code: 'NO_SAFE_FIX', message: 'The reviewed candidate is not safe to apply automatically.' },
+      });
+      return;
+    }
+    if (this.activeRemediationAbort !== undefined) {
+      this.options.sink.postMessage({
+        status: 'remediation-error',
+        package: stored.packageName,
+        error: { code: 'ANALYSIS_IN_PROGRESS', message: 'Wait for the current transitive-fix operation to finish.' },
+      });
+      return;
+    }
+    if (!this.reserve(stored.packageName)) {
+      this.options.sink.postMessage({
+        status: 'remediation-error',
+        package: stored.packageName,
+        error: { code: 'OPERATION_IN_PROGRESS', message: 'Another dependency change is already in progress.' },
+      });
+      return;
+    }
+
+    const abort = new AbortController();
+    this.activeRemediationAbort = abort;
+    this.activeRemediationAnalysisId = stored.id;
+    const selected = this.options.getSelectedProject();
+    let finalPlan: TransitiveRemediationPlan | undefined;
+    let finalPresentation: TransitiveRemediationPlanSummary | undefined;
+    try {
+      if (selected === undefined) {
+        throw Object.assign(new Error('No project is selected.'), { name: 'NO_PROJECT' });
+      }
+      const disk = await this.projectLoader(selected);
+      if (
+        stored.stale ||
+        !resolvedProjectSourceMatches(disk, stored.snapshot) ||
+        disk.lockfilePath === null ||
+        disk.lockfileText === null
+      ) {
+        stored.stale = true;
+        this.options.sink.postMessage({
+          status: 'remediation-stale',
+          package: stored.packageName,
+          analysisId: stored.id,
+          message: 'Project dependency files changed after this fix was checked. Check it again before applying.',
+        });
+        return;
+      }
+      const currentNpm = resolveNpmInvocation(createNodeNpmResolverDeps(disk.root));
+      const currentInvocation = !currentNpm.ok
+        ? null
+        : disk.packageManager === 'npm'
+          ? { version: currentNpm.invocation.version }
+          : resolveInstalledPnpmInvocation(currentNpm.invocation, disk.root);
+      if (
+        currentInvocation === null ||
+        (stored.packageManagerVersion !== null && currentInvocation.version !== stored.packageManagerVersion)
+      ) {
+        stored.stale = true;
+        this.options.sink.postMessage({
+          status: 'remediation-stale',
+          package: stored.packageName,
+          analysisId: stored.id,
+          message: 'The package-manager version changed after this fix was checked. Check the fix again.',
+        });
+        return;
+      }
+
+      const prepared = this.session.prepareLockfileReconciliation({
+        cwd: disk.root,
+        ignoreScripts: stored.ignoreScripts,
+        packageManager: disk.packageManager,
+      });
+      if (!prepared.ok) {
+        this.options.sink.postMessage({
+          status: 'remediation-error',
+          package: stored.packageName,
+          error: { code: prepared.code, message: prepared.message },
+        });
+        return;
+      }
+
+      const manifestPath = path.join(disk.root, 'package.json');
+      const lockfilePath = disk.lockfilePath;
+      const files = await createNodeUpgradeTransactionFileAdapter({
+        workspaceRoot: selected.folder.uri.fsPath,
+        allowlistedPaths: [manifestPath, lockfilePath],
+      });
+      if (stored.stale) {
+        this.options.sink.postMessage({
+          status: 'remediation-stale',
+          package: stored.packageName,
+          analysisId: stored.id,
+          message: 'Project dependency files changed before the reviewed fix could start. Check it again.',
+        });
+        return;
+      }
+      if (abort.signal.aborted) {
+        this.options.sink.postMessage({
+          status: 'remediation-apply-result',
+          package: stored.packageName,
+          analysisId: stored.id,
+          result: {
+            outcome: 'cancelled',
+            message: 'The transitive fix was cancelled before any dependency changes were applied.',
+            verification: 'not-run',
+            rollback: 'not-needed',
+            resolvedAdvisories: [],
+            remainingAdvisories: [...stored.presentation.resolvedAdvisories, ...stored.presentation.remainingAdvisories]
+              .slice(0, MAX_REMEDIATION_PRESENTED_ADVISORIES),
+            introducedAdvisories: [],
+          },
+        });
+        return;
+      }
+      if (!this.reservation.beginMutation(stored.packageName)) {
+        this.options.sink.postMessage({
+          status: 'remediation-error',
+          package: stored.packageName,
+          error: { code: 'OPERATION_IN_PROGRESS', message: 'The transitive fix could not acquire the dependency mutation lock.' },
+        });
+        return;
+      }
+      this.options.sink.postMessage({
+        status: 'remediation-applying',
+        package: stored.packageName,
+        analysisId: stored.id,
+        phase: 'preparing',
+      });
+
+      let securityVerificationFailed = false;
+      const transaction = await runUpgradeTransaction({
+        allowlistedPaths: [manifestPath, lockfilePath],
+        files,
+        fileStages: [{
+          path: lockfilePath,
+          expectedContents: Buffer.from(disk.lockfileText, 'utf8'),
+          contents: Buffer.from(stored.proposedLockfileText, 'utf8'),
+        }],
+        install: {
+          execute: async () => {
+            this.options.sink.postMessage({
+              status: 'remediation-applying',
+              package: stored.packageName,
+              analysisId: stored.id,
+              phase: 'installing',
+            });
+            const outcome = await prepared.execute();
+            return outcome.ok
+              ? { status: 'succeeded' as const }
+              : { status: 'failed' as const, code: outcome.code, message: outcome.message };
+          },
+        },
+        verifier: {
+          verify: async () => {
+            this.options.sink.postMessage({
+              status: 'remediation-applying',
+              package: stored.packageName,
+              analysisId: stored.id,
+              phase: 'verifying-security',
+            });
+            const checks: Array<{ id: string; status: 'passed' | 'failed' | 'cancelled'; message?: string }> = [];
+            try {
+              const applied = await this.projectLoader(selected);
+              if (
+                applied.manifestText !== stored.snapshot.manifestText ||
+                applied.lockfileText === null ||
+                applied.lockfileText !== stored.proposedLockfileText ||
+                applied.lockfilePath !== stored.snapshot.lockfilePath ||
+                applied.packageManager !== stored.snapshot.packageManager ||
+                applied.importerId !== stored.snapshot.importerId
+              ) {
+                throw new Error('The installed project no longer matches the reviewed manifest and lockfile plan.');
+              }
+              const graph = buildDependencyGraph({
+                root: applied.root,
+                manifest: parseManifest(applied.manifestText),
+                lockfileText: applied.lockfileText,
+                packageManager: applied.packageManager,
+                importerId: applied.importerId,
+              });
+              const npmAdvisories = await fetchBulkAdvisories(
+                this.options.httpClient,
+                buildBulkRequestBody(graph),
+                abort.signal
+              );
+              const advisoriesByName = await enrichAdvisoriesWithGitHubIdentifiers(
+                this.options.httpClient,
+                this.options.etagStore,
+                npmAdvisories,
+                abort.signal
+              );
+              finalPlan = createTransitiveRemediationPlan({
+                rootPackageName: stored.packageName,
+                targetAdvisories: stored.targetAdvisories,
+                before: stored.before,
+                after: { graph, advisoriesByName, advisories: 'complete' },
+                manifestUnchanged: true,
+              });
+              finalPresentation = buildTransitiveRemediationPresentation({
+                analysisId: stored.id,
+                generatedAt: stored.presentation.generatedAt,
+                expiresAt: stored.presentation.expiresAt,
+                rootPackage: stored.packageName,
+                currentVersion: stored.presentation.currentVersion,
+                packageManager: applied.packageManager,
+                packageManagerVersion: stored.packageManagerVersion,
+                lifecycleScriptsEnabled: !stored.ignoreScripts,
+                manifestPath: 'package.json',
+                lockfilePath: path.relative(applied.root, lockfilePath).split(path.sep).join('/'),
+                plan: finalPlan,
+                targetedPackages: new Set(stored.targetAdvisories.map((entry) => entry.flaggedPackage)),
+                verification: stored.presentation.verification,
+              });
+              const promisedResolved = new Set(stored.plan.target.resolved.map((entry) => entry.identity));
+              const finallyResolved = new Set(finalPlan.target.resolved.map((entry) => entry.identity));
+              const preservedReviewedOutcome = [...promisedResolved].every((identity) => finallyResolved.has(identity));
+              securityVerificationFailed = !finalPlan.automaticApplyAllowed || !preservedReviewedOutcome;
+              checks.push({
+                id: 'transitive-security',
+                status: securityVerificationFailed ? 'failed' : 'passed',
+                ...(securityVerificationFailed
+                  ? { message: 'The installed dependency tree did not preserve the reviewed security outcome.' }
+                  : {}),
+              });
+            } catch (cause) {
+              securityVerificationFailed = true;
+              checks.push({
+                id: 'transitive-security',
+                status: abort.signal.aborted ? 'cancelled' : 'failed',
+                message: cause instanceof Error ? cause.message : String(cause),
+              });
+            }
+
+            if (!securityVerificationFailed && stored.verificationScripts.length > 0) {
+              this.options.sink.postMessage({
+                status: 'remediation-applying',
+                package: stored.packageName,
+                analysisId: stored.id,
+                phase: 'verifying-project',
+              });
+              const projectVerification = await this.session.verify({
+                packageName: stored.packageName,
+                cwd: disk.root,
+                packageManager: disk.packageManager,
+                scripts: stored.verificationScripts,
+                signal: abort.signal,
+              });
+              checks.push(...projectVerification.checks);
+              if (projectVerification.status === 'cancelled') return { status: 'cancelled', checks };
+              if (projectVerification.status === 'failed') {
+                return { status: 'failed', checks, ...(projectVerification.message === undefined ? {} : { message: projectVerification.message }) };
+              }
+            }
+            if (checks.some((check) => check.status === 'cancelled')) return { status: 'cancelled', checks };
+            if (checks.some((check) => check.status === 'failed')) return { status: 'failed', checks };
+            return { status: 'passed', checks };
+          },
+        },
+        verificationFailureDecider: {
+          decide: async () => {
+            this.options.sink.postMessage({
+              status: 'remediation-applying',
+              package: stored.packageName,
+              analysisId: stored.id,
+              phase: 'rolling-back',
+            });
+            if (securityVerificationFailed || this.options.isDisposed()) return 'rollback';
+            const choice = await vscode.window.showWarningMessage(
+              'The transitive fix installed, but project verification failed.',
+              { modal: true, detail: 'Rollback restores package.json and the active lockfile. Keep changes only if you have reviewed the failed checks.' },
+              'Rollback',
+              'Keep Changes'
+            );
+            return choice === 'Keep Changes' ? 'keep' : 'rollback';
+          },
+        },
+        signal: abort.signal,
+      });
+
+      if (transaction.completion === 'not-started' && transaction.reason !== 'cancelled') {
+        const lockfileConflict = transaction.fileStages?.some(
+          (stage) => stage.status === 'failed' && stage.code === 'CONFLICT'
+        ) === true;
+        if (lockfileConflict) {
+          stored.stale = true;
+          this.options.sink.postMessage({
+            status: 'remediation-stale',
+            package: stored.packageName,
+            analysisId: stored.id,
+            message: 'The lockfile changed before the reviewed fix could be applied. Check the fix again.',
+          });
+        } else {
+          this.options.sink.postMessage({
+            status: 'remediation-error',
+            package: stored.packageName,
+            error: {
+              code: transaction.reason.toUpperCase().replaceAll('-', '_'),
+              message: 'The transitive fix could not start, so no dependency changes were applied.',
+            },
+          });
+        }
+        return;
+      }
+
+      // Restoring package.json/lockfile bytes is not enough after a package
+      // manager has touched node_modules. Reconcile the installed tree back
+      // to the restored lockfile before claiming rollback completed.
+      let rollbackReconciliationFailed = false;
+      if (
+        transaction.completion === 'rolled-back' &&
+        transaction.rollback.status === 'succeeded' &&
+        transaction.install.status !== 'not-run'
+      ) {
+        this.options.sink.postMessage({
+          status: 'remediation-applying',
+          package: stored.packageName,
+          analysisId: stored.id,
+          phase: 'rolling-back',
+        });
+        const restore = this.session.prepareLockfileReconciliation({
+          cwd: disk.root,
+          ignoreScripts: stored.ignoreScripts,
+          packageManager: disk.packageManager,
+        });
+        if (!restore.ok) {
+          rollbackReconciliationFailed = true;
+        } else {
+          const restored = await restore.execute();
+          rollbackReconciliationFailed = !restored.ok;
+        }
+      }
+
+      const rollback: TransitiveRemediationApplyResult['rollback'] =
+        rollbackReconciliationFailed
+          ? 'failed'
+          : transaction.rollback.status === 'not-needed'
+          ? 'not-needed'
+          : transaction.rollback.status === 'succeeded'
+            ? 'succeeded'
+            : transaction.rollback.status;
+      const verification: TransitiveRemediationApplyResult['verification'] =
+        transaction.verification.status === 'passed'
+          ? 'passed'
+          : transaction.verification.status === 'failed'
+            ? 'failed'
+            : transaction.verification.status === 'not-run' && transaction.verification.reason === 'not-configured'
+              ? 'not-configured'
+              : 'not-run';
+      const outcome: TransitiveRemediationApplyResult['outcome'] =
+        rollbackReconciliationFailed
+          ? 'recovery-required'
+          : transaction.completion === 'rolled-back'
+          ? transaction.reason === 'cancelled' ? 'cancelled' : 'rolled-back'
+          : transaction.completion === 'incomplete'
+            ? 'recovery-required'
+            : transaction.completion === 'kept' && transaction.verification.status === 'passed' && finalPlan?.classification === 'full'
+              ? 'verified'
+              : transaction.completion === 'kept' && transaction.verification.status === 'passed' && finalPlan?.classification === 'partial'
+                ? 'partial'
+                : transaction.reason === 'cancelled'
+                  ? 'cancelled'
+                  : 'unverified';
+      const resultEvidence = transaction.completion === 'kept' && finalPresentation !== undefined
+        ? finalPresentation
+        : stored.presentation;
+      const result: TransitiveRemediationApplyResult = {
+        outcome,
+        message:
+          outcome === 'verified'
+            ? 'The transitive vulnerabilities were resolved without changing the direct dependency.'
+            : outcome === 'partial'
+              ? 'The safe transitive update was applied, but some selected vulnerabilities remain.'
+              : outcome === 'rolled-back'
+                ? 'The fix could not be verified, so the dependency files were restored.'
+                : outcome === 'cancelled'
+                  ? 'The transitive fix was cancelled and any staged dependency-file changes were restored.'
+                  : outcome === 'recovery-required'
+                    ? 'The operation could not restore every dependency file automatically. Review the project before continuing.'
+                    : finalPlan?.automaticApplyAllowed === true && transaction.verification.status === 'failed'
+                      ? 'The security outcome was verified, but project verification failed and the changes were kept.'
+                      : 'The dependency change finished, but the reviewed security outcome could not be verified.',
+        verification,
+        rollback,
+        resolvedAdvisories: outcome === 'recovery-required'
+          ? []
+          : transaction.completion === 'kept' ? resultEvidence.resolvedAdvisories : [],
+        remainingAdvisories: outcome === 'recovery-required'
+          ? []
+          : transaction.completion === 'kept'
+          ? resultEvidence.remainingAdvisories
+          : [...stored.presentation.resolvedAdvisories, ...stored.presentation.remainingAdvisories]
+              .slice(0, MAX_REMEDIATION_PRESENTED_ADVISORIES),
+        introducedAdvisories: outcome === 'recovery-required'
+          ? []
+          : transaction.completion === 'kept' ? resultEvidence.introducedAdvisories : [],
+      };
+      this.options.sink.postMessage({
+        status: 'remediation-apply-result',
+        package: stored.packageName,
+        analysisId: stored.id,
+        result,
+      });
+
+      if (this.options.readAndApplyMutationLocalState !== undefined) {
+        const local = await this.options.readAndApplyMutationLocalState();
+        if (local !== undefined && this.options.refreshMutationEnrichmentInBackground !== undefined) {
+          this.options.refreshMutationEnrichmentInBackground(
+            randomBytes(16).toString('hex'),
+            stored.packageName,
+            local.structurallyCurrent
+          );
+        }
+      } else if (!this.options.isDisposed()) {
+        await this.options.reloadFinalState();
+      }
+    } catch (cause) {
+      if (!this.options.isDisposed() && !abort.signal.aborted) {
+        this.options.sink.postMessage({
+          status: 'remediation-error',
+          package: stored.packageName,
+          error: toProtocolError(cause),
+        });
+      }
+    } finally {
+      if (this.activeRemediationAbort === abort) this.activeRemediationAbort = undefined;
+      if (this.activeRemediationAnalysisId === stored.id) this.activeRemediationAnalysisId = undefined;
+      this.handleCancelRemediationPlan({ analysisId: stored.id });
+      await this.releaseReservation(stored.packageName);
+    }
   }
 
   /**

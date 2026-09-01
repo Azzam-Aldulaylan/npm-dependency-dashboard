@@ -8,6 +8,7 @@ import type {
   ProjectCompatibilityFinding,
 } from '../../../src/host/webviewProtocol.js';
 import { groupProjectCompatibilityFindings, summarizeProjectCompatibility } from '../../../src/host/projectCompatibilityUiState.js';
+import { projectCompatibilityAnalyzerLabel, projectCompatibilityLimitations } from '../../../src/host/projectCompatibilityCoverage.js';
 import { IconAlertTriangle, IconCheck, IconExternalLink, IconHelpCircle, IconRoute } from '../icons.js';
 
 interface ConfidencePresentation {
@@ -45,14 +46,6 @@ const CATEGORY_LABEL: Record<ProjectCompatibilityCategory, string> = {
   tooling: 'Tooling',
   compiler: 'Compiler',
   'framework-migration': 'Framework migration',
-};
-
-const ANALYZER_LABEL: Record<string, string> = {
-  'import-compatibility': 'Import compatibility',
-  'runtime-compatibility': 'Runtime requirements',
-  'package-script-compatibility': 'Package scripts',
-  'tooling-peer-alignment': 'Related tooling',
-  'next-migration-rules': 'Next.js migration rules',
 };
 
 function confidenceIcon(confidence: ProjectCompatibilityConfidence): ReactElement {
@@ -142,10 +135,6 @@ function FindingItem({
   );
 }
 
-function analyzerLabel(analyzerId: string): string {
-  return ANALYZER_LABEL[analyzerId] ?? analyzerId.replaceAll('-', ' ');
-}
-
 /**
  * A confidence-first evidence ledger for host-owned project compatibility
  * findings. The webview groups and presents facts, but never derives new
@@ -168,12 +157,13 @@ export function ProjectCompatibilitySection({
   return (
     <section className="analysis-card analysis-card--full project-compat" aria-labelledby="project-compat-heading">
       <div className="project-compat__heading-row">
-        <h3 className="analysis-card__title" id="project-compat-heading">
+        <h3 className="analysis-card__title" id="project-compat-heading" tabIndex={-1}>
           <IconRoute className="analysis-card__title-icon" />
-          Project compatibility
+          Project compatibility details
         </h3>
         <span className="project-compat__target">Target <code>{analysis.identity.targetVersion}</code></span>
       </div>
+      <p className="usage-card__subtitle">Evidence from the checks above, grouped by confidence. These counts are findings, not completed checks.</p>
 
       <div className="project-compat__confidence-rail" aria-label="Project compatibility finding counts">
         {CONFIDENCE_ORDER.map((confidence) => {
@@ -181,7 +171,7 @@ export function ProjectCompatibilitySection({
           const count = grouped.get(confidence)?.length ?? 0;
           return (
             <div className={`project-compat__confidence ${presentation.className}`} key={confidence}>
-              <span className="project-compat__confidence-icon" aria-hidden="true">{count === 0 ? <IconCheck /> : confidenceIcon(confidence)}</span>
+              <span className="project-compat__confidence-icon" aria-hidden="true">{count === 0 ? allCompleted ? <IconCheck /> : <IconHelpCircle /> : confidenceIcon(confidence)}</span>
               <span className="project-compat__confidence-count">{count}</span>
               <span className="project-compat__confidence-label">{presentation.emptyLabel}</span>
             </div>
@@ -193,7 +183,7 @@ export function ProjectCompatibilitySection({
         <p className={`project-compat__empty${allCompleted ? ' project-compat__empty--complete' : ''}`}>
           {allCompleted
             ? 'Completed checks found no project compatibility issues for this target.'
-            : 'No issues were found by the checks that completed. Some compatibility checks are unavailable.'}
+            : 'No issues were found by the checks that completed. See the coverage limits below before relying on this result.'}
         </p>
       ) : (
         <div className="project-compat__groups">
@@ -223,11 +213,17 @@ export function ProjectCompatibilitySection({
         <div className="project-compat__unavailable" role="status">
           <IconHelpCircle aria-hidden="true" />
           <div>
-            <strong>Some checks could not be completed</strong>
+            <strong>{incomplete.every((entry) => entry.reason === 'deprecated-api-rules-unavailable') ? 'Coverage limits' : 'Some checks could not be completed'}</strong>
             <ul>
               {incomplete.map((analyzer) => (
                 <li key={analyzer.analyzerId}>
-                  {analyzerLabel(analyzer.analyzerId)}: {analyzer.status === 'cancelled' ? 'cancelled' : analyzer.status === 'partial' ? 'partially checked' : 'could not verify'}
+                  <strong>{projectCompatibilityAnalyzerLabel(analyzer.analyzerId)}</strong>: {analyzer.reason === 'deprecated-api-rules-unavailable' ? 'not covered' : analyzer.status === 'cancelled' ? 'cancelled' : analyzer.status === 'partial' ? 'partially checked' : 'could not verify'}
+                  {projectCompatibilityLimitations(analyzer.reason, analyzer.status).map((limitation, index) => (
+                    <div className="project-compat__limitation" key={index}>
+                      <p>{limitation.reason}</p>
+                      <p><span>Next step:</span> {limitation.nextStep}</p>
+                    </div>
+                  ))}
                 </li>
               ))}
             </ul>

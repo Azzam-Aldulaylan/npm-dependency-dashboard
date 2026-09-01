@@ -354,12 +354,15 @@ async function runResolverVerification(
     return result;
   } catch (cause) {
     if (cancellationCause(cause, options.signal)) throw new CompatibilityCancelledError();
+    const timedOut = cause instanceof Error && cause.name === 'TimeoutError';
     return {
       status: 'unknown',
       packageManager: graphPackageManager(options.graph),
       packageManagerVersion: null,
-      code: 'RESOLVER_UNAVAILABLE',
-      explanation: 'Package-manager resolution verification was unavailable.',
+      code: timedOut ? 'RESOLVER_TIMEOUT' : 'RESOLVER_UNAVAILABLE',
+      explanation: timedOut
+        ? 'Package-manager resolution exceeded the analysis time limit. Check registry access and retry; dependency compatibility is not verified.'
+        : 'Package-manager resolution verification was unavailable.',
     };
   }
 }

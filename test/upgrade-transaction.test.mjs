@@ -135,6 +135,150 @@ test('host-generated manifest bytes are staged by CAS after snapshot and before 
   );
 });
 
+test('host-generated lockfile bytes are staged exactly without changing package.json', async () => {
+  const manifestBefore = '{"dependencies":{"sockjs-client":"^1.6.1"}}\n';
+  const lockBefore = '{"lockfileVersion":3,"packages":{"node_modules/websocket-driver":{"version":"0.7.3"}}}\n';
+  const lockStaged = '{"lockfileVersion":3,"packages":{"node_modules/websocket-driver":{"version":"0.7.5"}}}\n';
+  const files = new MemoryFiles({
+    [manifestPath]: present(manifestBefore),
+    [lockfilePath]: present(lockBefore),
+  });
+  let installCalls = 0;
+
+  const result = await runUpgradeTransaction({
+    allowlistedPaths: [manifestPath, lockfilePath],
+    files,
+    fileStages: [{
+      path: lockfilePath,
+      expectedContents: encoder.encode(lockBefore),
+      contents: encoder.encode(lockStaged),
+    }],
+    install: successfulInstall(() => {
+      installCalls += 1;
+      assert.equal(files.text(manifestPath), manifestBefore, 'the exact-lock reconciler sees an unchanged manifest');
+      assert.equal(files.text(lockfilePath), lockStaged, 'the exact staged lockfile is visible before reconciliation');
+    }),
+    verifier: passedVerification(),
+  });
+
+  assert.equal(installCalls, 1);
+  assert.equal(result.completion, 'kept');
+  assert.deepEqual(result.manifestStage, { status: 'not-run' });
+  assert.deepEqual(result.fileStages, [{ status: 'succeeded', path: lockfilePath }]);
+  assert.equal(files.text(manifestPath), manifestBefore);
+  assert.equal(files.text(lockfilePath), lockStaged);
+  assert.deepEqual(files.casCalls.map(({ path }) => path), [lockfilePath]);
+});
+
+test('stale exact lockfile bytes fail before mutation or reconciliation', async () => {
+  const files = new MemoryFiles({
+    [manifestPath]: present('manifest-before'),
+    [lockfilePath]: present('developer-lock-edit'),
+  });
+  let installCalls = 0;
+
+  const result = await runUpgradeTransaction({
+    allowlistedPaths: [manifestPath, lockfilePath],
+    files,
+    fileStages: [{
+      path: lockfilePath,
+      expectedContents: encoder.encode('lock-used-by-analysis'),
+      contents: encoder.encode('reviewed-lock'),
+    }],
+    install: successfulInstall(() => {
+      installCalls += 1;
+    }),
+  });
+
+  assert.equal(result.completion, 'not-started');
+  assert.equal(result.reason, 'file-stage-failed');
+  assert.deepEqual(result.fileStages, [{
+    status: 'failed',
+    path: lockfilePath,
+    code: 'CONFLICT',
+    message: 'The file changed after the exact staged contents were prepared.',
+  }]);
+  assert.deepEqual(result.verification, { status: 'not-run', reason: 'file-stage-failed' });
+  assert.deepEqual(result.rollback, { status: 'not-needed' });
+  assert.equal(files.text(lockfilePath), 'developer-lock-edit');
+  assert.equal(files.casCalls.length, 0);
+  assert.equal(installCalls, 0);
+});
+
+test('a later exact-file stage conflict rolls back earlier staged files and preserves the concurrent edit', async () => {
+  const secondaryPath = '/workspace/secondary-lock.yaml';
+  const files = new MemoryFiles({
+    [lockfilePath]: present('lock-before'),
+    [secondaryPath]: present('secondary-before'),
+  });
+  files.onCompareAndSwap = (path) => {
+    if (path !== secondaryPath) return;
+    files.onCompareAndSwap = undefined;
+    files.set(secondaryPath, present('developer concurrent edit'));
+  };
+
+  const result = await runUpgradeTransaction({
+    allowlistedPaths: [lockfilePath, secondaryPath],
+    files,
+    fileStages: [
+      {
+        path: lockfilePath,
+        expectedContents: encoder.encode('lock-before'),
+        contents: encoder.encode('lock-staged'),
+      },
+      {
+        path: secondaryPath,
+        expectedContents: encoder.encode('secondary-before'),
+        contents: encoder.encode('secondary-staged'),
+      },
+    ],
+    install: successfulInstall(() => assert.fail('install must not run after a staging conflict')),
+  });
+
+  assert.equal(result.completion, 'rolled-back');
+  assert.equal(result.reason, 'file-stage-failed');
+  assert.deepEqual(result.fileStages.map(({ path, status }) => ({ path, status })), [
+    { path: lockfilePath, status: 'succeeded' },
+    { path: secondaryPath, status: 'failed' },
+  ]);
+  assert.equal(result.rollback.status, 'succeeded');
+  assert.equal(files.text(lockfilePath), 'lock-before');
+  assert.equal(files.text(secondaryPath), 'developer concurrent edit');
+});
+
+test('exact-lockfile reconciliation failure restores the lockfile and any allowlisted manifest mutation', async () => {
+  const files = new MemoryFiles({
+    [manifestPath]: present('manifest-before'),
+    [lockfilePath]: present('lock-before'),
+  });
+
+  const result = await runUpgradeTransaction({
+    allowlistedPaths: [manifestPath, lockfilePath],
+    files,
+    fileStages: [{
+      path: lockfilePath,
+      expectedContents: encoder.encode('lock-before'),
+      contents: encoder.encode('lock-staged'),
+    }],
+    install: {
+      execute: async () => {
+        files.set(manifestPath, present('unexpected manifest mutation'));
+        files.set(lockfilePath, present('partial lock write'));
+        return { status: 'failed', code: 'TASK_FAILED', message: 'npm ci failed', exitCode: 1 };
+      },
+    },
+  });
+
+  assert.equal(result.completion, 'rolled-back');
+  assert.equal(result.reason, 'install-failed');
+  assert.equal(files.text(manifestPath), 'manifest-before');
+  assert.equal(files.text(lockfilePath), 'lock-before');
+  assert.deepEqual(result.rollback.files.map(({ path, status }) => ({ path, status })), [
+    { path: manifestPath, status: 'restored' },
+    { path: lockfilePath, status: 'restored' },
+  ]);
+});
+
 test('manifest staging rejects a path outside the transaction allowlist before install', async () => {
   const files = new MemoryFiles({ [manifestPath]: present('before') });
   let installCalls = 0;

@@ -1249,6 +1249,15 @@ test('batch remediation accepts a bounded unique package list and a payload-free
   assert.equal(isWebviewToHostMessage({ type: 'cancel-remediation-analysis', package: 'alpha' }), false);
 });
 
+test('confirm, cancel, and retry remediation accept only an opaque host-issued analysis id', () => {
+  for (const type of ['confirm-remediation', 'cancel-remediation', 'retry-remediation']) {
+    assert.equal(isWebviewToHostMessage({ type, analysisId: 'remediation-plan-1' }), true, `${type} rejected`);
+    assert.equal(isWebviewToHostMessage({ type, analysisId: '' }), false);
+    assert.equal(isWebviewToHostMessage({ type, analysisId: 'remediation-plan-1', package: 'sockjs-client' }), false);
+    assert.equal(isWebviewToHostMessage({ type, analysisId: 'remediation-plan-1', target: '0.7.5' }), false);
+  }
+});
+
 // --------------------------------------- host -> webview: remediation-analyzing/result/error
 
 test('remediation-analyzing is accepted with just a package name, and rejects a missing/empty one', () => {
@@ -1353,6 +1362,169 @@ test('remediation-result rejects an invalid outcome status or a malformed securi
     isHostToWebviewMessage({ status: 'remediation-result', package: 'sockjs-client' }),
     false
   );
+});
+
+const REMEDIATION_ADVISORY_SUMMARY = {
+  advisoryId: 'GHSA-example',
+  identifiers: ['GHSA-example', 'CVE-2026-1000'],
+  title: 'Example websocket vulnerability',
+  severity: 'high',
+  flaggedPackage: 'websocket-driver',
+  affectedPaths: [['sockjs-client', 'faye-websocket', 'websocket-driver']],
+};
+
+const REMEDIATION_PLAN = {
+  analysisId: 'remediation-plan-1',
+  rootPackage: 'sockjs-client',
+  currentVersion: '1.6.1',
+  outcome: 'full',
+  explanation: 'The current dependency ranges allow a non-vulnerable websocket-driver.',
+  generatedAt: '2026-08-30T10:00:00.000Z',
+  expiresAt: '2026-08-30T11:00:00.000Z',
+  packageManager: 'npm',
+  packageManagerVersion: '11.5.2',
+  lifecycleScriptsEnabled: false,
+  directRootUnchanged: true,
+  files: {
+    manifestPath: 'package.json',
+    lockfilePath: 'package-lock.json',
+    manifestChanged: false,
+    lockfileChanged: true,
+  },
+  changes: [{
+    packageName: 'websocket-driver',
+    fromVersions: ['0.7.3'],
+    toVersions: ['0.7.5'],
+    affectedPaths: [['sockjs-client', 'faye-websocket', 'websocket-driver']],
+    targeted: true,
+  }],
+  resolvedAdvisories: [REMEDIATION_ADVISORY_SUMMARY],
+  remainingAdvisories: [],
+  introducedAdvisories: [],
+  blockingReasons: [],
+  verification: { configured: true, scriptNames: ['test'] },
+};
+
+test('remediation-plan accepts a complete host-owned actionable plan', () => {
+  assert.equal(isHostToWebviewMessage({ status: 'remediation-plan', package: 'sockjs-client', plan: REMEDIATION_PLAN }), true);
+});
+
+test('remediation-plan rejects forged roots and unsafe claims presented as actionable', () => {
+  assert.equal(
+    isHostToWebviewMessage({ status: 'remediation-plan', package: 'different-root', plan: REMEDIATION_PLAN }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'remediation-plan',
+      package: 'sockjs-client',
+      plan: { ...REMEDIATION_PLAN, files: { ...REMEDIATION_PLAN.files, manifestChanged: true } },
+    }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'remediation-plan',
+      package: 'sockjs-client',
+      plan: { ...REMEDIATION_PLAN, introducedAdvisories: [REMEDIATION_ADVISORY_SUMMARY] },
+    }),
+    false
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'remediation-plan',
+      package: 'sockjs-client',
+      plan: { ...REMEDIATION_PLAN, expiresAt: REMEDIATION_PLAN.generatedAt },
+    }),
+    false
+  );
+});
+
+test('partial remediation plans require both a resolved and a remaining advisory', () => {
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'remediation-plan',
+      package: 'sockjs-client',
+      plan: { ...REMEDIATION_PLAN, outcome: 'partial', remainingAdvisories: [REMEDIATION_ADVISORY_SUMMARY] },
+    }),
+    true
+  );
+  assert.equal(
+    isHostToWebviewMessage({
+      status: 'remediation-plan',
+      package: 'sockjs-client',
+      plan: { ...REMEDIATION_PLAN, outcome: 'partial' },
+    }),
+    false
+  );
+});
+
+test('remediation execution messages require the plan id and a known real phase/outcome', () => {
+  assert.equal(isHostToWebviewMessage({
+    status: 'remediation-applying',
+    package: 'sockjs-client',
+    analysisId: 'remediation-plan-1',
+    phase: 'verifying-security',
+  }), true);
+  assert.equal(isHostToWebviewMessage({
+    status: 'remediation-applying',
+    package: 'sockjs-client',
+    analysisId: 'remediation-plan-1',
+    phase: 'pretending-to-install',
+  }), false);
+  assert.equal(isHostToWebviewMessage({
+    status: 'remediation-stale',
+    package: 'sockjs-client',
+    analysisId: 'remediation-plan-1',
+    message: 'Dependency files changed after this plan was created.',
+  }), true);
+
+  const result = {
+    outcome: 'verified',
+    message: 'The transitive fix was applied and the advisory is gone.',
+    verification: 'passed',
+    rollback: 'not-needed',
+    resolvedAdvisories: [REMEDIATION_ADVISORY_SUMMARY],
+    remainingAdvisories: [],
+    introducedAdvisories: [],
+  };
+  assert.equal(isHostToWebviewMessage({
+    status: 'remediation-apply-result',
+    package: 'sockjs-client',
+    analysisId: 'remediation-plan-1',
+    result,
+  }), true);
+  assert.equal(isHostToWebviewMessage({
+    status: 'remediation-apply-result',
+    package: 'sockjs-client',
+    analysisId: 'remediation-plan-1',
+    result: { ...result, outcome: 'silently-kept' },
+  }), false);
+  assert.equal(isHostToWebviewMessage({
+    status: 'remediation-apply-result',
+    package: 'sockjs-client',
+    analysisId: 'remediation-plan-1',
+    result: { ...result, remainingAdvisories: [REMEDIATION_ADVISORY_SUMMARY] },
+  }), false);
+  assert.equal(isHostToWebviewMessage({
+    status: 'remediation-apply-result',
+    package: 'sockjs-client',
+    analysisId: 'remediation-plan-1',
+    result: {
+      ...result,
+      outcome: 'recovery-required',
+      verification: 'not-run',
+      rollback: 'failed',
+      resolvedAdvisories: [],
+      remainingAdvisories: [],
+    },
+  }), true);
+  assert.equal(isHostToWebviewMessage({
+    status: 'remediation-apply-result',
+    package: 'sockjs-client',
+    analysisId: 'remediation-plan-1',
+    result: { ...result, outcome: 'recovery-required', resolvedAdvisories: [], remainingAdvisories: [] },
+  }), false);
 });
 
 // ---------------------------------------------- webview -> host: usage analysis

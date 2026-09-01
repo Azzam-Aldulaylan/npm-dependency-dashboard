@@ -3,8 +3,10 @@ import type { ReactElement } from 'react';
 import type { AttributedAdvisory, PackageRow, Severity } from '../../../src/core/types.js';
 import { sortAdvisoriesBySeverity } from '../../../src/host/severityDisplay.js';
 import { classifyRowUpdate } from '../../../src/host/updateClassification.js';
-import type { TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
+import type { TransitiveRemediationUiState as LegacyTransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
 import { hasEligibleTransitiveFix, resolveActionState } from '../../../src/host/upgradeAction.js';
+import { remediationPlanFromState } from '../transitiveRemediationState.js';
+import type { TransitiveFixUiState } from '../transitiveRemediationState.js';
 import { CLASSIFICATION_LABEL, classificationOf } from '../dependencyClassification.js';
 import {
   IconAlertTriangle,
@@ -22,8 +24,10 @@ import type { RemovalImpactState } from '../removalImpactState.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { DirectionalButton } from './DirectionalButton.js';
 import { SeverityBadge } from './SeverityBadge.js';
+import { TransitiveFixReview } from './TransitiveFixReview.js';
 import { CurrentVersionCell } from './VersionCell.js';
 import { patchedVersionText } from './VulnerabilityCard.js';
+import type { OpenAdvisoryHandler } from './VulnerabilityCard.js';
 import type { UsageRequestState } from './UsageReferencesPanel.js';
 
 const UPDATE_KIND_LABEL: Record<'major' | 'minor' | 'patch', string> = {
@@ -86,6 +90,19 @@ function ActionCard({
   );
 }
 
+/** Keeps the legacy action-label helper compatible while the richer review state lives entirely in the webview. */
+function legacyRemediationState(state: TransitiveFixUiState | undefined): LegacyTransitiveRemediationUiState | undefined {
+  if (state === undefined || state.phase === 'error' || state.phase === 'stale') return undefined;
+  if (state.phase === 'analyzing' || state.phase === 'applying') return { phase: 'analyzing' };
+  if (state.phase === 'legacy-result') return { phase: 'done', status: state.status };
+  if (state.phase === 'not-needed') return { phase: 'done', status: 'resolved' };
+  const outcome = state.plan.outcome;
+  return {
+    phase: 'done',
+    status: outcome === 'full' || outcome === 'partial' ? 'resolved' : outcome === 'unavailable' ? 'unknown' : 'remains',
+  };
+}
+
 /**
  * The Upgrade action card — a thin presentational wrapper around
  * resolveActionState (src/host/upgradeAction.ts), the same host-derived
@@ -102,11 +119,11 @@ function UpgradeCard({
   onStartUpgradeReview,
 }: {
   row: PackageRow;
-  remediation: TransitiveRemediationUiState | undefined;
+  remediation: TransitiveFixUiState | undefined;
   actionsDisabled: boolean;
   onStartUpgradeReview: (target: string) => void;
 }): ReactElement {
-  const state = resolveActionState(row, remediation);
+  const state = resolveActionState(row, legacyRemediationState(remediation));
 
   if (state.kind === 'up-to-date') {
     return (
@@ -279,15 +296,27 @@ function TransitiveFixCard({
   remediation,
   actionsDisabled,
   onAnalyzeRemediation,
+  onReviewRemediation,
+  onApplyRemediation,
+  onCancelRemediation,
+  onRetryRemediation,
+  onOpenAdvisory,
 }: {
   row: PackageRow;
-  remediation: TransitiveRemediationUiState | undefined;
+  remediation: TransitiveFixUiState | undefined;
   actionsDisabled: boolean;
   onAnalyzeRemediation: () => void;
+  onReviewRemediation: (analysisId: string) => void;
+  onApplyRemediation: (analysisId: string) => void;
+  onCancelRemediation: (analysisId: string) => void;
+  onRetryRemediation: (analysisId: string) => void;
+  onOpenAdvisory: OpenAdvisoryHandler;
 }): ReactElement {
   const first = row.advisories.find((entry) => entry.path.length > 1);
-  const subject = first?.flaggedPackage ?? 'a transitive dependency';
-  const introducedThrough = first !== undefined ? first.path.join(' → ') : row.name;
+  const plan = remediationPlanFromState(remediation);
+  const targetedChange = plan?.changes.find((change) => change.targeted);
+  const subject = first?.flaggedPackage ?? targetedChange?.packageName ?? 'a transitive dependency';
+  const dependencyPath = first?.path ?? targetedChange?.affectedPaths[0] ?? [row.name];
 
   return (
     <ActionCard
@@ -296,34 +325,19 @@ function TransitiveFixCard({
       title="Check transitive fixes"
       description="Check whether a vulnerable transitive package can be resolved to a fixed version without an unsafe direct change."
     >
-      <p className="manage-action-card__status">
-        <code>{subject}</code> is introduced through <code>{introducedThrough}</code>.
-      </p>
-      {remediation === undefined ? (
-        <DirectionalButton direction="forward" className="button button--primary manage-action-card__cta" disabled={actionsDisabled} onClick={onAnalyzeRemediation}>
-          Check transitive fixes
-        </DirectionalButton>
-      ) : remediation.phase === 'analyzing' ? (
-        <p className="manage-action-card__status">
-          <IconRefresh className="manage-action-card__status-icon manage-action-card__status-icon--spin" />
-          Analyzing…
-        </p>
-      ) : remediation.status === 'resolved' ? (
-        <p className="manage-action-card__status">
-          <IconCheck className="manage-action-card__status-icon manage-action-card__status-icon--ok" />
-          The dependency tree can resolve {subject} to a non-vulnerable version without changing {row.name}'s own version.
-        </p>
-      ) : remediation.status === 'unknown' ? (
-        <p className="manage-action-card__status manage-action-card__status--muted">
-          <IconHelpCircle className="manage-action-card__status-icon" />
-          Remediation could not be determined — the resolver check did not complete.
-        </p>
-      ) : (
-        <p className="manage-action-card__status manage-action-card__status--muted">
-          <IconAlertTriangle className="manage-action-card__status-icon" />
-          No validated dependency change is currently known to remove the vulnerable version.
-        </p>
-      )}
+      <TransitiveFixReview
+        rootPackage={row.name}
+        subject={subject}
+        dependencyPath={dependencyPath}
+        state={remediation}
+        disabled={actionsDisabled}
+        onAnalyze={onAnalyzeRemediation}
+        onReview={onReviewRemediation}
+        onApply={onApplyRemediation}
+        onCancel={onCancelRemediation}
+        onRetry={onRetryRemediation}
+        onOpenAdvisory={onOpenAdvisory}
+      />
     </ActionCard>
   );
 }
@@ -441,10 +455,15 @@ export function OverviewPanel({
   onStartUpgradeReview,
   onStartRemovalReview,
   onAnalyzeRemediation,
+  onReviewRemediation,
+  onApplyRemediation,
+  onCancelRemediation,
+  onRetryRemediation,
+  onOpenAdvisory,
   onChangeTab,
 }: {
   row: PackageRow;
-  remediation: TransitiveRemediationUiState | undefined;
+  remediation: TransitiveFixUiState | undefined;
   removalImpact: RemovalImpactState;
   usage: UsageRequestState | undefined;
   actionsDisabled: boolean;
@@ -454,10 +473,15 @@ export function OverviewPanel({
   onStartUpgradeReview: (packageName: string, target: string) => void;
   onStartRemovalReview: (packageName: string) => void;
   onAnalyzeRemediation: (packageName: string) => void;
+  onReviewRemediation: (packageName: string, analysisId: string) => void;
+  onApplyRemediation: (analysisId: string) => void;
+  onCancelRemediation: (analysisId: string) => void;
+  onRetryRemediation: (analysisId: string) => void;
+  onOpenAdvisory: OpenAdvisoryHandler;
   onChangeTab: (tab: ManageTabId) => void;
 }): ReactElement {
   const updateKind = classifyRowUpdate(row);
-  const showTransitiveCard = hasEligibleTransitiveFix(row);
+  const showTransitiveCard = hasEligibleTransitiveFix(row) || remediation !== undefined;
   const usageChecking = usage === undefined || usage.phase === 'analyzing';
 
   return (
@@ -520,6 +544,11 @@ export function OverviewPanel({
               remediation={remediation}
               actionsDisabled={upgradeDisabled}
               onAnalyzeRemediation={() => onAnalyzeRemediation(row.name)}
+              onReviewRemediation={(analysisId) => onReviewRemediation(row.name, analysisId)}
+              onApplyRemediation={onApplyRemediation}
+              onCancelRemediation={onCancelRemediation}
+              onRetryRemediation={onRetryRemediation}
+              onOpenAdvisory={onOpenAdvisory}
             />
           ) : null}
         </div>

@@ -469,6 +469,18 @@ export class DashboardPanel {
       this.upgradeCoordinator.handleCancelRemediation();
       return;
     }
+    if (message.type === 'confirm-remediation') {
+      await this.upgradeCoordinator.handleConfirmRemediation(message);
+      return;
+    }
+    if (message.type === 'cancel-remediation') {
+      this.upgradeCoordinator.handleCancelRemediationPlan(message);
+      return;
+    }
+    if (message.type === 'retry-remediation') {
+      await this.upgradeCoordinator.handleRetryRemediation(message);
+      return;
+    }
     if (message.type === 'where-used') {
       // Same rule as analyze-remediation: read-only, but a concurrent read
       // could still race an in-flight upgrade's file writes.
@@ -1213,7 +1225,7 @@ export class DashboardPanel {
     this.projectCompatibilitySourceGeneration += 1;
     this.smartCleanupSourceGeneration += 1;
     this.usageCoordinator.invalidateProjectSource(this.selectedProject?.id);
-    this.upgradeCoordinator.handleProjectSourceChanged();
+    this.upgradeCoordinator.handleDependencySourceChanged();
     this.fileChangeCoordinator.discardPending();
     if (this.invalidationTimer !== undefined) {
       clearTimeout(this.invalidationTimer);
@@ -1317,6 +1329,10 @@ export class DashboardPanel {
     }
 
     await this.reloadAndScan(decision.candidate, { clearOnLoadFailure: true });
+    // HEAD events cancel the ordinary file debounce. Revalidate retained
+    // upgrade evidence against the reconciled project as well, even when only
+    // source/config contents (not dependency versions) changed on this branch.
+    void this.upgradeCoordinator.checkOpenAnalysisFreshness();
   }
 
   /**
@@ -1427,20 +1443,16 @@ export class DashboardPanel {
     this.controller?.announceRevalidating(this.sink);
     this.smartCleanupSourceGeneration += 1;
     this.usageCoordinator.invalidateProjectSource(this.selectedProject?.id);
-    this.upgradeCoordinator.handleProjectSourceChanged();
+    this.upgradeCoordinator.handleDependencySourceChanged();
     if (this.branchChangeCoordinator.hasPending) return;
     this.fileChangeCoordinator.notify(kind);
     if (this.invalidationTimer !== undefined) clearTimeout(this.invalidationTimer);
     this.invalidationTimer = setTimeout(() => {
       this.invalidationTimer = undefined;
       void this.fileChangeCoordinator.flush();
-      // FileChangeCoordinator's own flush() above is deferred while an
-      // upgrade analysis is open (isBusy() stays true for the whole review
-      // lifetime) — checkOpenAnalysisFreshness is the one place that still
-      // re-reads disk during that window, so an open Upgrade review panel
-      // learns its analysis is structurally stale instead of only finding
-      // out at confirm time. See its own doc for why this reuses the same
-      // debounce rather than a new timer.
+      // A watcher event only requests revalidation. Compare the retained
+      // review's exact dependency and consumed source evidence before showing
+      // a stale warning; no-op saves must not revoke completed results.
       void this.upgradeCoordinator.checkOpenAnalysisFreshness();
     }, FILE_EVENT_DEBOUNCE_MS);
   }

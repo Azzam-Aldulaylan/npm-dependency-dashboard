@@ -3,17 +3,20 @@ import type { ReactElement } from 'react';
 
 import type { PackageRow, Severity } from '../../../src/core/types.js';
 import { classifyRowUpdate } from '../../../src/host/updateClassification.js';
-import type { ActionState, TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
-import { resolveActionState } from '../../../src/host/upgradeAction.js';
+import type { ActionState, TransitiveRemediationUiState as LegacyTransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
+import { hasEligibleTransitiveFix, resolveActionState } from '../../../src/host/upgradeAction.js';
 import {
   buildManageVulnerabilityContexts,
   vulnerabilityIdentifiers,
 } from '../../../src/host/vulnerabilityUiState.js';
 import type { ManageVulnerabilityContext } from '../../../src/host/vulnerabilityUiState.js';
 import { directUpgradeRecommendation } from '../../../src/host/vulnerabilityRecommendation.js';
+import { remediationPlanFromState } from '../transitiveRemediationState.js';
+import type { TransitiveFixUiState } from '../transitiveRemediationState.js';
 import { IconCheck, IconExternalLink, IconInfo, IconRefresh, IconShield } from '../icons.js';
 import { DirectionalButton } from './DirectionalButton.js';
 import { SeverityBadge } from './SeverityBadge.js';
+import { TransitiveFixReview } from './TransitiveFixReview.js';
 import { patchedVersionText, VulnerabilityIdentifierLinks } from './VulnerabilityCard.js';
 import type { OpenAdvisoryHandler } from './VulnerabilityCard.js';
 
@@ -32,6 +35,18 @@ const UPDATE_KIND_LABEL: Record<'major' | 'minor' | 'patch', string> = {
 };
 
 type SeverityFilter = 'all' | Severity;
+
+function legacyRemediationState(state: TransitiveFixUiState | undefined): LegacyTransitiveRemediationUiState | undefined {
+  if (state === undefined || state.phase === 'error' || state.phase === 'stale') return undefined;
+  if (state.phase === 'analyzing' || state.phase === 'applying') return { phase: 'analyzing' };
+  if (state.phase === 'legacy-result') return { phase: 'done', status: state.status };
+  if (state.phase === 'not-needed') return { phase: 'done', status: 'resolved' };
+  const outcome = state.plan.outcome;
+  return {
+    phase: 'done',
+    status: outcome === 'full' || outcome === 'partial' ? 'resolved' : outcome === 'unavailable' ? 'unknown' : 'remains',
+  };
+}
 
 /** A compact "label / value" row — same shape as OverviewPanel's own GlanceRow, kept local since it's a 4-line pure helper duplicated per-panel throughout this workspace rather than shared. */
 function GlanceRow({ label, children }: { label: string; children: ReactElement | string }): ReactElement {
@@ -79,14 +94,16 @@ function VulnerabilityDetailCard({
           className="vuln-card__identifiers"
           onOpen={(identifier) => onOpenAdvisory(rootPackageName, context.advisory.id, [...context.primaryPath], identifier)}
         />
-        <button
-          type="button"
-          className="vuln-card__source"
-          onClick={() => onOpenAdvisory(rootPackageName, context.advisory.id, [...context.primaryPath])}
-        >
-          View advisory source
-          <IconExternalLink />
-        </button>
+        {identifiers.length === 0 ? (
+          <button
+            type="button"
+            className="vuln-card__source"
+            onClick={() => onOpenAdvisory(rootPackageName, context.advisory.id, [...context.primaryPath])}
+          >
+            View advisory source
+            <IconExternalLink />
+          </button>
+        ) : null}
       </div>
       <dl className="vuln-card__meta">
         <div className="vuln-card__meta-col">
@@ -165,18 +182,54 @@ function VulnerabilityDetailCard({
 function RecommendedActionCard({
   row,
   state,
+  remediation,
   totalCount,
   actionsDisabled,
   onStartUpgradeReview,
-  onStartTransitiveCheck,
+  onAnalyzeRemediation,
+  onReviewRemediation,
+  onApplyRemediation,
+  onCancelRemediation,
+  onRetryRemediation,
+  onOpenAdvisory,
 }: {
   row: PackageRow;
   state: ActionState;
+  remediation: TransitiveFixUiState | undefined;
   totalCount: number;
   actionsDisabled: boolean;
   onStartUpgradeReview: (target: string) => void;
-  onStartTransitiveCheck: () => void;
+  onAnalyzeRemediation: () => void;
+  onReviewRemediation: (analysisId: string) => void;
+  onApplyRemediation: (analysisId: string) => void;
+  onCancelRemediation: (analysisId: string) => void;
+  onRetryRemediation: (analysisId: string) => void;
+  onOpenAdvisory: OpenAdvisoryHandler;
 }): ReactElement {
+  if (hasEligibleTransitiveFix(row) || remediation !== undefined) {
+    const first = row.advisories.find((entry) => entry.path.length > 1);
+    const plan = remediationPlanFromState(remediation);
+    const targetedChange = plan?.changes.find((change) => change.targeted);
+    return (
+      <section className="vuln-recommended" aria-labelledby="vuln-recommended-heading">
+        <h3 className="manage-section-heading" id="vuln-recommended-heading">Recommended action</h3>
+        <TransitiveFixReview
+          rootPackage={row.name}
+          subject={first?.flaggedPackage ?? targetedChange?.packageName ?? 'a transitive dependency'}
+          dependencyPath={first?.path ?? targetedChange?.affectedPaths[0] ?? [row.name]}
+          state={remediation}
+          disabled={actionsDisabled}
+          onAnalyze={onAnalyzeRemediation}
+          onReview={onReviewRemediation}
+          onApply={onApplyRemediation}
+          onCancel={onCancelRemediation}
+          onRetry={onRetryRemediation}
+          onOpenAdvisory={onOpenAdvisory}
+        />
+      </section>
+    );
+  }
+
   let message: string;
   let cta: { label: string; onClick: () => void } | null = null;
   let busy = false;
@@ -184,12 +237,6 @@ function RecommendedActionCard({
   if (state.kind === 'security-fix' || state.kind === 'update') {
     message = directUpgradeRecommendation(state.kind, row.name, state.target, totalCount);
     cta = { label: 'Review upgrade', onClick: () => onStartUpgradeReview(state.target) };
-  } else if (state.kind === 'transitive-remediation') {
-    message = state.tooltip;
-    cta = { label: 'Check transitive fixes', onClick: onStartTransitiveCheck };
-  } else if (state.kind === 'remediation-analyzing') {
-    message = state.tooltip;
-    busy = true;
   } else {
     message = state.tooltip;
   }
@@ -229,17 +276,25 @@ export function VulnerabilitiesPanel({
   advisoriesAvailable,
   onOpenAdvisory,
   onStartUpgradeReview,
-  onStartTransitiveCheck,
+  onAnalyzeRemediation,
+  onReviewRemediation,
+  onApplyRemediation,
+  onCancelRemediation,
+  onRetryRemediation,
 }: {
   row: PackageRow;
   allRows: readonly PackageRow[];
-  remediation: TransitiveRemediationUiState | undefined;
+  remediation: TransitiveFixUiState | undefined;
   actionsDisabled: boolean;
   updateResolutionAvailable: boolean;
   advisoriesAvailable: boolean;
   onOpenAdvisory: OpenAdvisoryHandler;
   onStartUpgradeReview: (target: string) => void;
-  onStartTransitiveCheck: () => void;
+  onAnalyzeRemediation: () => void;
+  onReviewRemediation: (analysisId: string) => void;
+  onApplyRemediation: (analysisId: string) => void;
+  onCancelRemediation: (analysisId: string) => void;
+  onRetryRemediation: (analysisId: string) => void;
 }): ReactElement {
   const [filter, setFilter] = useState<SeverityFilter>('all');
 
@@ -252,7 +307,7 @@ export function VulnerabilitiesPanel({
     );
   }
 
-  if (row.advisories.length === 0) {
+  if (row.advisories.length === 0 && remediation === undefined) {
     return (
       <div className="manage-panel-empty">
         <IconCheck className="manage-panel-empty__icon manage-panel-empty__icon--ok" />
@@ -267,11 +322,16 @@ export function VulnerabilitiesPanel({
   const worstPresent = counts[0]?.[0] ?? 'info';
   const filtered = filter === 'all' ? contexts : contexts.filter((context) => context.advisory.severity === filter);
   const updateKind = classifyRowUpdate(row);
-  const actionState = resolveActionState(row, remediation);
+  const actionState = resolveActionState(row, legacyRemediationState(remediation));
   const needsAttention = worstPresent === 'critical' || worstPresent === 'high';
+  const remediationExpanded =
+    remediation?.phase === 'applying' ||
+    remediation?.phase === 'stale' ||
+    remediation?.phase === 'result' ||
+    (remediation?.phase === 'plan' && remediation.reviewed);
 
   return (
-    <div className="vuln-tab">
+    <div className={`vuln-tab${remediationExpanded ? ' vuln-tab--remediation-review' : ''}`}>
       <div className="vuln-tab__summary">
         <section className="vuln-summary-card" aria-labelledby="vuln-security-summary-heading">
           <h3 className="manage-section-heading" id="vuln-security-summary-heading">
@@ -317,10 +377,16 @@ export function VulnerabilitiesPanel({
         <RecommendedActionCard
           row={row}
           state={actionState}
+          remediation={remediation}
           totalCount={total}
           actionsDisabled={actionsDisabled}
           onStartUpgradeReview={onStartUpgradeReview}
-          onStartTransitiveCheck={onStartTransitiveCheck}
+          onAnalyzeRemediation={onAnalyzeRemediation}
+          onReviewRemediation={onReviewRemediation}
+          onApplyRemediation={onApplyRemediation}
+          onCancelRemediation={onCancelRemediation}
+          onRetryRemediation={onRetryRemediation}
+          onOpenAdvisory={onOpenAdvisory}
         />
       </div>
 

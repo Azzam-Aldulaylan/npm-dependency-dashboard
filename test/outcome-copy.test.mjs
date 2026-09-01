@@ -69,6 +69,7 @@ test('a blocked upgrade is phrased as blocked, not a generic conflict label', ()
   assert.match(upgradeSafetyHeadline('conflict').label, /block/i);
 });
 
-test('a compatible upgrade is phrased as safe', () => {
-  assert.match(upgradeSafetyHeadline('compatible').label, /safe/i);
+test('dependency compatibility does not imply complete project or runtime safety', () => {
+  assert.equal(upgradeSafetyHeadline('compatible').label, 'No dependency conflicts found');
+  assert.doesNotMatch(upgradeSafetyHeadline('compatible').label, /safe|all checks passed/i);
 });

@@ -73,18 +73,29 @@ test('security graph failures degrade to missing evidence instead of failing Upg
 
 test('the coordinator overlaps security with project checks but serializes package-manager subprocesses', () => {
   const source = readFileSync(join(process.cwd(), 'src/host/upgradeAssistantCoordinator.ts'), 'utf8');
+  const workflow = readFileSync(join(process.cwd(), 'src/host/projectCompatibility/projectCompatibilityWorkflow.ts'), 'utf8');
   const compatibilityStarted = source.indexOf('const compatibilityResultPromise =');
   const securityStarted = source.indexOf('const securityGraphPromise = compatibilityResultPromise.then');
   const compatibilitySettled = source.indexOf('const compatibilityResult = await compatibilityResultPromise');
-  const mediumStarts = source.indexOf('if (hasScripts || hasToolingDeclarations)', securityStarted);
-  const deepStarts = source.indexOf("performance.start('project compatibility import analysis')", mediumStarts);
-  const securityConsumed = source.indexOf('const proposedSecurityGraph = await securityGraphPromise', deepStarts);
-  const inventoryWait = source.indexOf('if (cachedSurface === undefined) await securityGraphPromise', securityStarted);
-  const inventoryStarts = source.indexOf('new TargetPackageInspector(', inventoryWait);
+  const projectStarted = source.indexOf('const projectResultPromise = runProjectCompatibilityWorkflow(');
+  const securityPublished = source.indexOf('const securityResultPromise = securityGraphPromise.then');
+  const inventoryWait = workflow.indexOf('await waitForWork(input.packageManagerIdle, input.signal)');
+  const inventoryStarts = workflow.indexOf('await input.inspect(');
 
   assert.ok(compatibilityStarted >= 0 && compatibilityStarted < securityStarted, 'security is chained from compatibility work');
   assert.ok(securityStarted < compatibilitySettled, 'security can begin as soon as compatibility settles, before the main flow consumes it');
-  assert.ok(securityStarted < mediumStarts && securityStarted < deepStarts, 'security starts before medium/deep project work');
-  assert.ok(deepStarts < securityConsumed, 'final security evaluation consumes the overlapped graph after deep analysis');
-  assert.ok(inventoryWait < inventoryStarts, 'an uncached target inventory cannot overlap the security resolver subprocess');
+  assert.ok(projectStarted > securityStarted && projectStarted < compatibilitySettled, 'project checks launch without waiting for resolution');
+  assert.ok(securityPublished > securityStarted && securityPublished < projectStarted, 'security publication is independent of inventory completion');
+  assert.match(source, /packageManagerIdle: securityGraphPromise/);
+  assert.ok(inventoryWait >= 0 && inventoryWait < inventoryStarts, 'uncached inventory waits for the resolver subprocess');
+  assert.match(source, /if \(!succeeded\) analysisAbort\.abort\(\);\s+await Promise\.allSettled\(pendingAnalysisWork\)/);
+});
+
+test('final evidence reread rechecks cancellation before stale errors or review retention', () => {
+  const source = readFileSync(join(process.cwd(), 'src/host/upgradeAssistantCoordinator.ts'), 'utf8');
+  const read = source.indexOf('const [finalProjectEvidence, finalDiskSnapshot] = await Promise.all(');
+  const staleCheck = source.indexOf('!projectCompatibilityFinalReadIsCurrent(', read);
+  const guard = source.indexOf('if (analysisAbort.signal.aborted || this.droppedByCancellation(eligibility.packageName)) return;', read);
+  const retain = source.indexOf('this.analysis = {', read);
+  assert.ok(read >= 0 && guard > read && guard < staleCheck && staleCheck < retain);
 });

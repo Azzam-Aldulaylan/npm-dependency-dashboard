@@ -6,7 +6,7 @@ import { semanticButtonClassName, upgradeConfirmationAction } from '../../../src
 import type { UpgradeAnalysisPresentation } from '../../../src/host/webviewProtocol.js';
 import type { UpgradeAnalysisSections as UpgradeAnalysisSectionsState } from '../../../src/host/upgradeAnalysisSections.js';
 import { hasPlannerAddedCoordination, upgradeAnalysisFreshness } from '../../../src/host/upgradeReviewUiState.js';
-import { compatibilityOutcomeDisplay, upgradeSafetyHeadline } from '../../../src/host/outcomeCopy.js';
+import { deriveUpgradeReviewDecision } from '../../../src/host/upgradeReviewDecision.js';
 import { classifyUpdate } from '../../../src/host/updateClassification.js';
 import { severityDisplay } from '../../../src/host/severityDisplay.js';
 import { summarizeUpgradeSecurity } from '../../../src/host/upgradeSecuritySummary.js';
@@ -26,6 +26,7 @@ import { UpgradeAnalysisSections } from './UpgradeAnalysisSections.js';
 import { ProjectCompatibilitySection } from './ProjectCompatibilitySection.js';
 import { StatusBanner } from './StatusBanner.js';
 import { UpgradeTargetSelector } from './UpgradeTargetSelector.js';
+import { UpgradeRecommendationCard } from './UpgradeRecommendationCard.js';
 import type { UpgradeTargetLoadState } from './UpgradeTargetSelector.js';
 import type { UsageRequestState } from './UsageReferencesPanel.js';
 
@@ -63,13 +64,11 @@ function usageAnalysisLabel(usage: UsageRequestState | undefined): string {
 }
 
 /**
- * Upgrade Summary — the one headline card: is this safe, what changes, and
- * what it does to this row's own known vulnerabilities. `upgradeSafetyHeadline`
- * is the exact same `compatibility.status` every other card reads; never a
- * second, independently-computed safety judgment.
+ * One scoped headline derived from dependency and project evidence, shared
+ * with the recommendation and confirmation action.
  */
 function UpgradeSummaryCard({ analysis }: { analysis: UpgradeAnalysisPresentation }): ReactElement {
-  const headline = upgradeSafetyHeadline(analysis.compatibility.status);
+  const { headline } = deriveUpgradeReviewDecision(analysis);
   const updateKind = classifyUpdate(analysis.currentVersion, analysis.targetVersion);
   const security = analysis.security;
   const securitySummary = security === null ? null : summarizeUpgradeSecurity(security);
@@ -90,7 +89,7 @@ function UpgradeSummaryCard({ analysis }: { analysis: UpgradeAnalysisPresentatio
       <OutcomeStatus label={headline.label} className={headline.className} />
       <dl className="manage-glance">
         <GlanceRow label="Current version">{analysis.currentVersion}</GlanceRow>
-        <GlanceRow label="Latest version">{analysis.targetVersion}</GlanceRow>
+        <GlanceRow label="Target version">{analysis.targetVersion}</GlanceRow>
         <GlanceRow label="Update type">
           <span className="status-badge status-badge--neutral">{updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Unknown'}</span>
         </GlanceRow>
@@ -145,76 +144,6 @@ function AtAGlanceCard({
           </span>
         </GlanceRow>
       </dl>
-    </section>
-  );
-}
-
-/**
- * Recommended action — one sentence composed from the exact same
- * compatibility/security detail every other card already derives (see
- * overallStatusDetail/overallDetail), never a new independent judgment.
- */
-function RecommendedActionCard({
-  analysis,
-  coordinated,
-  executionBlocked,
-  busy,
-  onConfirm,
-  onUseSmartPlan,
-}: {
-  analysis: UpgradeAnalysisPresentation;
-  coordinated: boolean;
-  executionBlocked: boolean;
-  busy: boolean;
-  onConfirm: () => void;
-  onUseSmartPlan: () => void;
-}): ReactElement {
-  const action = upgradeConfirmationAction(coordinated ? analysis : { ...analysis, smartPlan: null });
-  const compatDetail = compatibilityOutcomeDisplay(analysis.compatibility.status).label;
-  const security = analysis.security;
-  const resolvedCount = security?.resolvedAdvisories.length ?? 0;
-  const remainingCount = security?.remaining.filter((entry) => entry.status === 'remains').length ?? 0;
-  const resolvedWorst = security !== null ? worstOf(security.resolvedAdvisories.map((entry) => entry.advisory.severity)) : null;
-
-  let message: string;
-  if (analysis.compatibility.status === 'conflict') {
-    message =
-      coordinated
-        ? `${compatDetail} — a coordinated upgrade resolves it.`
-        : `${compatDetail}. A coordinated resolution could not be confirmed by this analysis.`;
-  } else {
-    const safe = analysis.compatibility.status === 'compatible' ? 'safe' : 'compatible';
-    if (security === null) {
-      message = `This is a ${safe} update.`;
-    } else if (security.status === 'resolved') {
-      const severityPrefix = resolvedWorst !== null ? `${severityDisplay(resolvedWorst).label.toLowerCase()} severity ` : '';
-      message = `This is a ${safe} update that fixes ${resolvedCount} ${severityPrefix}vulnerabilit${resolvedCount === 1 ? 'y' : 'ies'}.`;
-    } else if (security.status === 'remains') {
-      message =
-        resolvedCount > 0
-          ? `This update fixes ${resolvedCount} vulnerabilit${resolvedCount === 1 ? 'y' : 'ies'}, but ${remainingCount} remain${remainingCount === 1 ? 's' : ''}. Review Security outcome before proceeding.`
-          : `This update does not resolve the ${remainingCount} known vulnerabilit${remainingCount === 1 ? 'y' : 'ies'} — review Security outcome before proceeding.`;
-    } else {
-      message = `This is a ${safe} update. Some vulnerabilities could not be confirmed as fixed or remaining.`;
-    }
-  }
-
-  return (
-    <section className="vuln-recommended" aria-labelledby="upgrade-recommended-heading">
-      <h3 className="manage-section-heading" id="upgrade-recommended-heading">
-        Recommended action
-      </h3>
-      <p className="vuln-recommended__message">{message}</p>
-      {action !== null ? (
-        <DirectionalButton
-          direction="forward"
-          className={semanticButtonClassName(action.variant, 'vuln-recommended__cta upgrade-recommended__cta')}
-          disabled={busy || executionBlocked}
-          onClick={action.onClick === 'confirm' ? onConfirm : onUseSmartPlan}
-        >
-          {action.label}
-        </DirectionalButton>
-      ) : null}
     </section>
   );
 }
@@ -537,7 +466,7 @@ export function UpgradeReviewPanel({
         <div className="upgrade-tab__summary">
           <UpgradeSummaryCard analysis={analysis} />
           <AtAGlanceCard row={row} analysis={analysis} usage={usage} advisoriesAvailable={advisoriesAvailable} />
-          <RecommendedActionCard
+          <UpgradeRecommendationCard
             analysis={analysis}
             coordinated={coordinated}
             executionBlocked={executionBlocked}

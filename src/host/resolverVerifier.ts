@@ -7,7 +7,6 @@
  * lifecycle scripts are disabled, and the real project is never the cwd.
  */
 
-import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -21,8 +20,10 @@ import type {
 import type { PeerResolutionPolicy } from '../core/compatibility/types.js';
 import { buildDependencyGraph } from '../core/lockfile/build.js';
 import { parseManifest } from '../core/manifest/parse.js';
+import { buildTransitiveRemediationArgs } from '../core/upgrade/plan.js';
 import { buildStagedManifest } from '../core/upgrade/stagedManifest.js';
 import type { DependencyGraph } from '../core/types.js';
+import { NodePackageManagerProcessRunner } from './packageManagerProcessRunner.js';
 
 export interface PackageManagerInvocation {
   executable: string;
@@ -47,33 +48,21 @@ export interface ResolverProcessRunner {
 }
 
 export class NodeResolverProcessRunner implements ResolverProcessRunner {
+  private readonly runner: NodePackageManagerProcessRunner;
+
+  constructor(options: { timeoutMs?: number; terminationGraceMs?: number } = {}) {
+    // Only opt-in callers impose a deadline. Mutation/cleanup policies stay
+    // unchanged; Upgrade Review can select its own bounded analysis budget.
+    this.runner = new NodePackageManagerProcessRunner({ description: 'Package-manager analysis', ...options });
+  }
+
   run(
     invocation: PackageManagerInvocation,
     args: readonly string[],
     cwd: string,
     signal?: AbortSignal
   ): Promise<ResolverProcessResult> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(invocation.executable, [...invocation.prefixArgs, ...args], {
-        cwd,
-        shell: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        ...(signal === undefined ? {} : { signal }),
-      });
-      let stdout = '';
-      let stderr = '';
-      const append = (current: string, chunk: Buffer): string =>
-        (current + chunk.toString('utf8')).slice(-32_768);
-      child.stdout.on('data', (chunk: Buffer) => {
-        stdout = append(stdout, chunk);
-      });
-      child.stderr.on('data', (chunk: Buffer) => {
-        stderr = append(stderr, chunk);
-      });
-      child.on('error', reject);
-      child.on('close', (exitCode) => resolve({ exitCode, stdout, stderr }));
-    });
+    return this.runner.run(invocation, args, cwd, signal);
   }
 }
 
@@ -197,6 +186,28 @@ export function buildDedupeMaterializationArgs(
     `--registry=${registry}`,
     ...policyArgs,
   ];
+}
+
+/**
+ * Literal, script-free argv for a targeted transitive remediation performed
+ * only inside an isolated copy of the current manifest and lockfile.
+ */
+export function buildTransitiveRemediationMaterializationArgs(
+  manager: SupportedPackageManager,
+  packageNames: readonly string[],
+  registry: string,
+  policy: PeerResolutionPolicy
+): string[] {
+  const args = buildTransitiveRemediationArgs(manager, packageNames, { ignoreScripts: true });
+  if (manager === 'npm') {
+    args.push('--audit=false', '--fund=false', '--json', `--registry=${registry}`);
+    if (policy.legacyPeerDeps) args.push('--legacy-peer-deps');
+    else if (policy.strictPeerDeps) args.push('--strict-peer-deps');
+  } else {
+    args.push('--reporter=silent', `--registry=${registry}`);
+    if (policy.strictPeerDeps) args.push('--strict-peer-dependencies');
+  }
+  return args;
 }
 
 function diagnostic(result: ResolverProcessResult, tempRoot: string): string {
@@ -333,6 +344,71 @@ export class IsolatedResolverVerifier implements ResolverVerifier {
       return { ok: true, graph };
     } catch {
       return { ok: false };
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Produces an applyable remediation candidate from the existing lockfile,
+   * unlike `materializeResolvedGraph`'s intentionally broad lockfile-free
+   * proof. The real package manager performs a targeted, lockfile-only update
+   * in a temporary project; package.json must remain byte-for-byte unchanged.
+   */
+  async materializeTransitiveRemediation(
+    packageNames: readonly string[],
+    signal?: AbortSignal
+  ): Promise<
+    | { ok: true; graph: DependencyGraph; beforeGraph: DependencyGraph; lockfileText: string }
+    | { ok: false; reason: string }
+  > {
+    if (this.options.lockfile === undefined) {
+      return { ok: false, reason: 'A supported active lockfile is required for an automatic transitive fix.' };
+    }
+    const tempRoot = await mkdtemp(path.join(tmpdir(), 'dependency-dashboard-transitive-remediation-'));
+    try {
+      await writeFile(path.join(tempRoot, 'package.json'), this.options.manifestText, 'utf8');
+      await writeFile(path.join(tempRoot, this.options.lockfile.name), this.options.lockfile.text, 'utf8');
+      const manifest = parseManifest(this.options.manifestText);
+      const beforeGraph = buildDependencyGraph({
+        root: tempRoot,
+        manifest,
+        lockfileText: this.options.lockfile.text,
+        packageManager: this.options.packageManager,
+      });
+      const result = await this.runner.run(
+        this.options.invocation,
+        buildTransitiveRemediationMaterializationArgs(
+          this.options.packageManager,
+          packageNames,
+          this.options.registry,
+          this.options.policy
+        ),
+        tempRoot,
+        signal
+      );
+      if (result.exitCode !== 0) {
+        return { ok: false, reason: `Targeted transitive resolution failed: ${diagnostic(result, tempRoot)}` };
+      }
+      const writtenManifest = await readFile(path.join(tempRoot, 'package.json'), 'utf8');
+      if (writtenManifest !== this.options.manifestText) {
+        return { ok: false, reason: 'The package manager unexpectedly changed package.json while resolving a transitive fix.' };
+      }
+      const lockfileText = await readFile(path.join(tempRoot, this.options.lockfile.name), 'utf8');
+      const graph = buildDependencyGraph({
+        root: tempRoot,
+        manifest,
+        lockfileText,
+        packageManager: this.options.packageManager,
+      });
+      return { ok: true, graph, beforeGraph, lockfileText };
+    } catch (cause) {
+      return {
+        ok: false,
+        reason: signal?.aborted === true
+          ? 'Transitive remediation analysis was cancelled.'
+          : cause instanceof Error ? cause.message : String(cause),
+      };
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

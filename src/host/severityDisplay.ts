@@ -44,7 +44,7 @@ const SEVERITY_RANK: Record<Severity, number> = { critical: 4, high: 3, moderate
  * flagged package name and then the advisory title so equal-severity
  * entries never visibly reshuffle between renders.
  */
-export function sortAdvisoriesBySeverity(advisories: readonly AttributedAdvisory[]): AttributedAdvisory[] {
+export function sortAdvisoriesBySeverity<T extends Pick<AttributedAdvisory, 'advisory' | 'flaggedPackage'>>(advisories: readonly T[]): T[] {
   return [...advisories].sort(
     (a, b) =>
       SEVERITY_RANK[b.advisory.severity] - SEVERITY_RANK[a.advisory.severity] ||

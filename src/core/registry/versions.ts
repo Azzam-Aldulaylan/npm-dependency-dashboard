@@ -197,6 +197,8 @@ export interface PackageVersionMetadata {
   exports?: unknown;
   /** True when the registry export map exceeded safety bounds; absence can no longer be proven from it. */
   exportsTruncated?: boolean;
+  /** Classic Node root entry. Null means absent (index.js fallback); undefined means unverified. */
+  main?: string | null;
 }
 
 function readStringMap(value: unknown): Record<string, string> {
@@ -312,6 +314,10 @@ export async function fetchPackageVersionMetadata(
   if (Object.keys(engines).length > 0) metadata.engines = engines;
   const bin = readBin(json['bin']);
   if (bin !== undefined) metadata.bin = bin;
+  if (json['main'] === undefined) metadata.main = null;
+  else if (typeof json['main'] === 'string' && json['main'].length > 0 && json['main'].length <= 2_048) {
+    metadata.main = json['main'];
+  }
   if (json['exports'] !== undefined) {
     const exportsBudget = { remaining: 5_000, truncated: false };
     metadata.exports = readBoundedPackageMap(json['exports'], 0, exportsBudget);

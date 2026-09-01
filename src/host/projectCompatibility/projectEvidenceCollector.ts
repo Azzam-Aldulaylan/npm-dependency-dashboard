@@ -36,6 +36,8 @@ export interface CollectedProjectCompatibilityEvidence extends ProjectManifestCo
   ruleFiles: NextRuleProjectFile[];
   scannedFileCount: number;
   truncated: boolean;
+  /** Bounded reason codes only; no raw paths or read errors. */
+  scanLimitations?: string[];
   /** Stable digest of only the source/config evidence this analysis consumed. */
   evidenceFingerprint: string;
 }
@@ -66,6 +68,7 @@ export async function collectProjectCompatibilityEvidence(input: {
   const cancellation = new vscode.CancellationTokenSource();
   const abort = (): void => cancellation.cancel();
   input.signal?.addEventListener('abort', abort, { once: true });
+  if (input.signal?.aborted) abort();
   try {
     const maxFiles = input.maxFiles ?? DEFAULT_MAX_FILES;
     const [sourceFiles, configFiles] = await Promise.all([
@@ -76,6 +79,7 @@ export async function collectProjectCompatibilityEvidence(input: {
     const imports: ProjectImportReference[] = [];
     const retainedFiles = new Map<string, NextRuleProjectFile>();
     let evidenceLimitReached = false;
+    const scanLimitations = new Set<string>();
     let failedReadCount = 0;
     let scannedSourceFiles = 0;
     let sourceCancelled = false;
@@ -90,6 +94,7 @@ export async function collectProjectCompatibilityEvidence(input: {
             if (match.packageName !== input.packageName) continue;
             if (imports.length >= MAX_IMPORT_REFERENCES) {
               evidenceLimitReached = true;
+              scanLimitations.add('project-import-reference-limit');
               continue;
             }
             imports.push({
@@ -102,13 +107,16 @@ export async function collectProjectCompatibilityEvidence(input: {
             });
           }
           if (shouldRetainFrameworkRuleFile(input.packageName, file.filePath)) {
-            if (retainedFiles.size >= MAX_FRAMEWORK_RULE_FILES) evidenceLimitReached = true;
-            else retainedFiles.set(file.filePath, { filePath: file.filePath, content });
+            if (retainedFiles.size >= MAX_FRAMEWORK_RULE_FILES) {
+              evidenceLimitReached = true;
+              scanLimitations.add('project-framework-file-limit');
+            } else retainedFiles.set(file.filePath, { filePath: file.filePath, content });
           }
         }
         if (file.config) {
           if (!retainedFiles.has(file.filePath) && retainedFiles.size >= MAX_FRAMEWORK_RULE_FILES) {
             evidenceLimitReached = true;
+            scanLimitations.add('project-framework-file-limit');
           } else {
             retainedFiles.set(file.filePath, { filePath: file.filePath, content });
           }
@@ -147,12 +155,16 @@ export async function collectProjectCompatibilityEvidence(input: {
       failedReadCount,
       evidenceLimitReached,
     });
+    if (sourceFiles.length >= maxFiles) scanLimitations.add('project-source-file-limit');
+    if (sourceCancelled || configCancelled) scanLimitations.add('project-source-scan-cancelled');
+    if (failedReadCount > 0) scanLimitations.add('project-source-file-unreadable');
     return {
       ...manifest,
       imports,
       ruleFiles,
       scannedFileCount: scannedSourceFiles,
       truncated,
+      ...(scanLimitations.size > 0 ? { scanLimitations: [...scanLimitations].sort() } : {}),
       evidenceFingerprint: evidenceFingerprint({ manifest, imports, ruleFiles, truncated }),
     };
   } finally {

@@ -234,6 +234,63 @@ test('unknown project/runtime information remains partial and is not invented as
   assert.deepEqual(result.findings, []);
 });
 
+test('overlapping project Node ranges warn about unsupported allowed versions without claiming a runtime failure', () => {
+  for (const [projectNodeRange, targetNodeRange] of [
+    ['>=18', '>=20.9'],
+    ['^18.18 || >=20.9', '>=20.9'],
+    ['>=20.9', '>=20.9 <22 || >=24'],
+    ['>=20.9.0-rc.1', '>=20.9.0'],
+    ['>=20.9.0', '>20.9.0'],
+    ['>=20.9.0 <=22.0.0', '>=20.9.0 <22.0.0'],
+  ]) {
+    const result = analyzeRuntimeCompatibility({ identity, evidence: {
+      packageName: identity.packageName, targetVersion: identity.targetVersion,
+      projectNodeRange, targetNodeRange, runtimeNodeVersion: null,
+    } });
+    assert.equal(result.status, 'partial', `${projectNodeRange} / ${targetNodeRange}`);
+    assert.equal(result.unavailableReason, 'runtime-node-version-unknown');
+    assert.deepEqual(result.findings.map(finding => [finding.ruleId, finding.confidence]), [
+      ['project-node-engine-partially-compatible', 'review'],
+    ]);
+    assert.match(result.findings[0].explanation, /overlaps.*outside/);
+    assert.match(result.findings[0].migrationHint, /development, CI, and deployment/);
+    assert.deepEqual(result.findings[0].evidence.map(entry => entry.kind), ['target-metadata', 'project-engine']);
+  }
+});
+
+test('an allowed current runtime does not hide unsupported versions in the declared Node range', () => {
+  const result = analyzeRuntimeCompatibility({ identity, evidence: {
+    packageName: identity.packageName, targetVersion: identity.targetVersion,
+    targetNodeRange: '>=20.9', projectNodeRange: '>=18', runtimeNodeVersion: '22.1.0',
+  } });
+  assert.equal(result.status, 'complete');
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0].ruleId, 'project-node-engine-partially-compatible');
+  assert.equal(result.findings[0].confidence, 'review');
+});
+
+test('equivalent, narrower, OR, and prerelease-compatible project Node ranges do not produce false warnings', () => {
+  for (const [projectNodeRange, targetNodeRange] of [
+    ['>=20.9', '>=20.9.0-0'],
+    ['^20.9.0', '>=20.9.0 <21.0.0-0'],
+    ['>=22.0.0', '>=20.9.0'],
+    ['^18.20.0 || >=20.9.0', '^18.18.0 || >=20.0.0'],
+    ['>=20.9.0', '>=20.9.0 <22.0.0 || >=22.0.0'],
+    ['>=20.9.0', '>=22.0.0 || >=20.9.0 <=23.0.0'],
+    ['>=20.9.0-rc.2', '>=20.9.0-rc.1'],
+    ['>=20.9.0-rc.1', '>=20.9.0-rc.1 <20.9.0 || >=20.9.0'],
+    ['>=20.9.0-rc.1', '>=20.9.0-rc.1 <=20.9.0-rc.1 || >20.9.0-rc.1'],
+    ['*', '*'],
+  ]) {
+    const result = analyzeRuntimeCompatibility({ identity, evidence: {
+      packageName: identity.packageName, targetVersion: identity.targetVersion,
+      projectNodeRange, targetNodeRange, runtimeNodeVersion: null,
+    } });
+    assert.deepEqual(result.findings, [], `${projectNodeRange} / ${targetNodeRange}`);
+    assert.equal(result.unavailableReason, 'runtime-node-version-unknown');
+  }
+});
+
 test('a malformed target engine is unavailable rather than compatible', () => {
   const result = analyzeRuntimeCompatibility({
     identity,

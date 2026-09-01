@@ -35,7 +35,20 @@ test('Manage tabs expose complete relationships and keyboard navigation', () => 
   assert.match(component, /id="manage-panel"/);
   assert.match(component, /aria-labelledby=\{`manage-tab-\$\{activeTab\}`\}/);
   for (const key of ['ArrowLeft', 'ArrowRight', 'Home', 'End']) assert.match(component, new RegExp(`'${key}'`));
-  assert.match(component, /scrollIntoView\(\{ block: 'nearest', inline: 'nearest' \}\)/);
+  assert.match(component, /focus\(\{ preventScroll: true \}\)/);
+  assert.doesNotMatch(component, /scrollIntoView/);
+});
+
+test('Manage navigation never shrinks or scrolls with long tab content', () => {
+  const tabs = css.match(/^\.manage-tabs\s*\{([^}]+)\}/m)?.[1] ?? '';
+  assert.match(tabs, /display:\s*grid/);
+  assert.match(tabs, /grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\)/);
+  assert.match(tabs, /grid-auto-rows:\s*1fr/);
+  assert.match(tabs, /flex:\s*0 0 auto/);
+  assert.doesNotMatch(tabs, /overflow/);
+  assert.match(responsiveCss, /grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(responsiveCss, /grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(css, /\.manage-modal__body\s*\{[^}]*scrollbar-gutter:\s*stable/s);
 });
 
 test('initial focus falls back to the selected tab when Close is disabled', () => {

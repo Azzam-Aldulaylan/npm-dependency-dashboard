@@ -140,7 +140,7 @@ button {
 .banner {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: start;
+  align-items: center;
   gap: 0.6rem;
   margin: 0 0 1rem;
   padding: 0.6rem 0.8rem;
@@ -626,7 +626,7 @@ button {
 .info-tooltip__popover {
   position: fixed;
   z-index: 50;
-  min-width: 14rem;
+  min-width: min(14rem, calc(100vw - 1rem));
   max-width: min(22rem, calc(100vw - 1rem));
   padding: 0.6rem 0.75rem;
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
@@ -2012,16 +2012,20 @@ button {
  * announcement of a fact the tab's own content already states in full.
  */
 .manage-tabs {
-  display: flex;
-  flex-wrap: nowrap;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-auto-rows: 1fr;
+  flex: 0 0 auto;
+  min-width: 0;
   gap: 0.1rem;
   padding: 0 1.1rem;
   border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
-  overflow-x: auto;
 }
 
 .manage-tabs__tab {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: 1.35rem minmax(0, 1fr) 0.4rem;
+  min-width: 0;
   align-items: center;
   gap: 0.4rem;
   padding: 0.6rem 0.7rem;
@@ -2032,8 +2036,15 @@ button {
   font-family: inherit;
   font-size: 0.82em;
   font-weight: 500;
-  white-space: nowrap;
+  white-space: normal;
+  text-align: left;
   cursor: pointer;
+}
+
+.manage-tabs__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .manage-tabs__icon {
@@ -2106,6 +2117,7 @@ button {
 .manage-modal__body {
   padding: 0.95rem 1.1rem 1.05rem;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 /*
@@ -2497,6 +2509,283 @@ button {
   align-self: flex-end;
 }
 
+/* Host-proven transitive remediation review. This deliberately reads as one
+   continuous review document inside the existing action surface: dividers
+   separate evidence groups without introducing nested cards. */
+.transitive-review {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.transitive-review .banner {
+  margin: 0;
+}
+
+.transitive-review .banner__text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.transitive-review__context,
+.transitive-review__progress {
+  margin: 0;
+  font-size: 0.85em;
+  line-height: 1.45;
+}
+
+.transitive-review__context code,
+.transitive-review__progress code {
+  overflow-wrap: anywhere;
+}
+
+.transitive-review__progress {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+}
+
+.transitive-review__progress svg {
+  flex-shrink: 0;
+  margin-top: 0.1em;
+}
+
+.transitive-review__primary {
+  align-self: flex-end;
+}
+
+.transitive-review__details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  padding-top: 0.15rem;
+}
+
+.transitive-review__details > section,
+.transitive-review__facts {
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+}
+
+.transitive-review__details h4,
+.transitive-review__advisories h5,
+.transitive-review__facts h5 {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.transitive-review__changes,
+.transitive-review__advisories ul,
+.transitive-review__paths ul,
+.transitive-review__reasons {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.transitive-review__changes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-top: 0.55rem;
+}
+
+.transitive-review__change {
+  min-width: 0;
+}
+
+.transitive-review__change + .transitive-review__change {
+  padding-top: 0.55rem;
+  border-top: 1px solid color-mix(in srgb, var(--vscode-panel-border, rgba(128, 128, 128, 0.25)) 65%, transparent);
+}
+
+.transitive-review__change-line {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
+  font-size: 0.85em;
+}
+
+.transitive-review__version {
+  color: var(--vscode-descriptionForeground);
+  font-variant-numeric: tabular-nums;
+}
+
+.transitive-review__version--target {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.transitive-review__paths {
+  margin-top: 0.35rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+}
+
+.transitive-review__related-change {
+  margin: 0.25rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+}
+
+.transitive-review__result-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.transitive-review__result-facts > div,
+.transitive-review__recovery {
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.transitive-review__result-facts dt {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
+
+.transitive-review__result-facts dd {
+  margin: 4px 0 0;
+  text-transform: capitalize;
+}
+
+.transitive-review__recovery h5,
+.transitive-review__recovery p {
+  margin: 0;
+}
+
+.transitive-review__recovery p {
+  margin-top: 6px;
+}
+
+.transitive-review__paths summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.transitive-review__paths ul {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.35rem;
+  padding-inline-start: 0.9rem;
+}
+
+.transitive-review__paths code {
+  overflow-wrap: anywhere;
+}
+
+.transitive-review__advisory-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  margin-top: 0.55rem;
+}
+
+.transitive-review__advisories h5 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--vscode-descriptionForeground);
+}
+
+.transitive-review__advisories ul {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.4rem;
+}
+
+.transitive-review__advisories li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.5rem;
+}
+
+.transitive-review__advisory-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.1rem;
+  overflow-wrap: anywhere;
+  font-size: 0.8em;
+}
+
+.transitive-review__advisory-copy > span {
+  color: var(--vscode-descriptionForeground);
+}
+
+.transitive-review__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.8rem;
+}
+
+.transitive-review__facts section {
+  min-width: 0;
+}
+
+.transitive-review__facts h5 {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.transitive-review__facts h5 svg {
+  color: var(--manage-card-accent, var(--vscode-foreground));
+}
+
+.transitive-review__facts dl,
+.transitive-review__facts p {
+  margin: 0.4rem 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+}
+
+.transitive-review__facts dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.transitive-review__facts dl > div + div {
+  margin-top: 0.25rem;
+}
+
+.transitive-review__facts dd {
+  margin: 0;
+  text-align: end;
+}
+
+.transitive-review__reasons {
+  padding-inline-start: 1rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.82em;
+  list-style: disc;
+}
+
+.transitive-review__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+@media (max-width: 34rem) {
+  .transitive-review__result-facts {
+    grid-template-columns: 1fr;
+  }
+}
+
 /*
  * The Remove card's three compact status boxes — Usage analysis / Peer
  * requirements / Removal risk — replacing a plain label/value list so the
@@ -2602,6 +2891,10 @@ button {
   .vuln-tab__summary {
     flex: 0 0 18rem;
     min-width: 0;
+  }
+
+  .vuln-tab--remediation-review .vuln-tab__summary {
+    flex-basis: min(30rem, 48%);
   }
 
   .vuln-tab__details {
@@ -3479,7 +3772,7 @@ button {
 }
 
 .upgrade-tab .hygiene-strip {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.4rem;
 }
 
@@ -3497,6 +3790,67 @@ button {
 
 .upgrade-tab .hygiene-strip__value {
   font-size: 0.8em;
+}
+
+.hygiene-strip__detail {
+  grid-column: 1 / -1;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.76em;
+  overflow-wrap: anywhere;
+}
+
+/* Compatibility tiles keep the status icon beside its result, not spanning
+ * both the label and result as the other hygiene-strip variants do. */
+.hygiene-strip__item--compat {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  min-width: 0;
+}
+
+.hygiene-strip__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.hygiene-strip__heading .hygiene-strip__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.hygiene-strip__result {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.hygiene-strip__result .hygiene-strip__icon {
+  flex: none;
+  grid-row: auto;
+}
+
+.hygiene-strip__result .hygiene-strip__value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.project-compat__limitation p {
+  margin: 0.3rem 0 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.project-compat__limitation span {
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+
+#project-compat-heading:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 3px;
 }
 
 .upgrade-tab .upgrade-recommended__cta {
@@ -3844,8 +4198,12 @@ button {
 
 .security-outcome {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.6rem;
+}
+
+.security-outcome > .usage-path__arrow {
+  margin-top: 0.6rem;
 }
 
 .security-outcome__box {
@@ -3909,7 +4267,6 @@ button {
 }
 
 .security-remaining__content,
-.security-remaining__group,
 .security-remaining__list {
   display: flex;
   flex-direction: column;
@@ -3918,25 +4275,6 @@ button {
 .security-remaining__content {
   gap: 0.7rem;
   margin-top: 0.65rem;
-}
-
-.security-remaining__group {
-  gap: 0.25rem;
-}
-
-.security-remaining__group h4,
-.security-remaining__group p {
-  margin: 0;
-}
-
-.security-remaining__group h4 {
-  font-size: 0.8em;
-}
-
-.security-remaining__group > p {
-  color: var(--vscode-descriptionForeground);
-  font-size: 0.76em;
-  line-height: 1.4;
 }
 
 .security-remaining__list {
@@ -3994,6 +4332,41 @@ button {
 
 .security-remaining__meta code {
   white-space: normal;
+}
+
+/* Before/after evidence lives in equal-width columns: stack metadata labels
+   within them so long package names and dependency paths can wrap naturally. */
+.security-outcome__box .security-remaining__meta,
+.security-outcome__box .vulnerability-context__meta {
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: 0.2rem;
+}
+
+.security-outcome__box dt:not(:first-child) {
+  margin-top: 0.3rem;
+}
+
+.security-outcome__box .vulnerability-context__head {
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}
+
+.security-outcome__box .vulnerability-context__head strong {
+  min-width: 0;
+  flex: 1 1 12rem;
+}
+
+.security-outcome__box .vulnerability-context,
+.security-outcome__box .security-remaining__item {
+  padding: 0.55rem 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.security-outcome__box .vulnerability-context + .vulnerability-context,
+.security-outcome__box .security-remaining__item + .security-remaining__item {
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
 }
 
 .upgrade-enrichment-warning {
@@ -4057,6 +4430,10 @@ button {
   .removal-check,
   .removal-impact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .upgrade-tab .hygiene-strip__item--compat:last-child {
+    grid-column: 1 / -1;
   }
 
   .removal-check__item:nth-child(2) {
@@ -4936,7 +5313,7 @@ button {
 }
 
 .project-compat__unavailable li + li {
-  margin-top: 0.15rem;
+  margin-top: 0.8rem;
 }
 
 .finding-list {
@@ -5485,12 +5862,15 @@ button {
 
 /* -------------------------------------- Manage dependency responsive pass */
 
-/* Keep ordinary content inside the workspace fluid. Horizontal scrolling is
-   deliberately reserved for the editor-style tab strip and code snippets. */
+/* Keep ordinary content inside the workspace fluid. Only code snippets may
+   scroll horizontally; navigation stays visible outside the content scroll. */
 .manage-modal__body > *,
 .review-panel,
 .manage-action-card__head > :last-child,
 .manage-action-card__progress > span,
+.transitive-review,
+.transitive-review__change-line,
+.transitive-review__advisory-copy,
 .smart-plan__package,
 .verification-steps__item > :first-child {
   min-width: 0;
@@ -5599,9 +5979,7 @@ button {
 
   .manage-modal .manage-tabs {
     padding-inline: 0.35rem;
-    overscroll-behavior-inline: contain;
-    scroll-padding-inline: 0.35rem;
-    scrollbar-width: thin;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .manage-modal .manage-tabs__tab {
@@ -5633,12 +6011,28 @@ button {
   .manage-modal > .modal__footer > .button,
   .review-panel__footer > .button,
   .manage-action-card__cta,
+  .transitive-review__primary,
+  .transitive-review__actions > .button,
   .vuln-recommended__cta,
   .review-panel__empty-cta,
   .verification__configure,
   .removal-review__footer-action {
     align-self: stretch;
     width: 100%;
+  }
+
+  .transitive-review__actions {
+    flex-direction: column-reverse;
+  }
+
+  .transitive-review__facts dl > div {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+
+  .transitive-review__facts dd {
+    text-align: start;
   }
 
   .manage-modal__footer-note {
@@ -5731,6 +6125,10 @@ button {
 /* Extremely narrow editor groups need label/value pairs and secondary
    controls to become vertical; the information order remains unchanged. */
 @media (max-width: 26rem) {
+  .manage-modal .manage-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .manage-glance__row {
     flex-direction: column;
     align-items: flex-start;

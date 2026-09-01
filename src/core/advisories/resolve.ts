@@ -42,15 +42,18 @@ function findAttributedAdvisory(
   advisories: readonly AttributedAdvisory[],
   request: AdvisoryLookupRequest
 ): AttributedAdvisory | undefined {
-  return advisories.find((entry) => entry.advisory.id === request.advisoryId && pathsEqual(entry.path, request.path));
+  const requestedId = String(request.advisoryId).trim().toUpperCase();
+  return advisories.find((entry) =>
+    pathsEqual(entry.path, request.path) &&
+    (
+      entry.advisory.id === request.advisoryId ||
+      vulnerabilityIdentifiers(entry.advisory).some((identifier) => identifier.toUpperCase() === requestedId)
+    )
+  );
 }
 
-function resolveTrustedReferenceUrl(entry: AttributedAdvisory, reference: string): string | null {
+function deterministicPublicReferenceUrl(reference: string): string | null {
   const normalized = reference.trim().toUpperCase();
-  const belongsToAdvisory = vulnerabilityIdentifiers(entry.advisory)
-    .some((identifier) => identifier.toUpperCase() === normalized);
-  if (!belongsToAdvisory) return null;
-
   if (/^CVE-\d{4}-\d{4,}$/.test(normalized)) {
     return `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(normalized)}`;
   }
@@ -60,12 +63,22 @@ function resolveTrustedReferenceUrl(entry: AttributedAdvisory, reference: string
   return null;
 }
 
+function resolveTrustedReferenceUrl(entry: AttributedAdvisory, reference: string): string | null {
+  const normalized = reference.trim().toUpperCase();
+  const belongsToAdvisory = vulnerabilityIdentifiers(entry.advisory)
+    .some((identifier) => identifier.toUpperCase() === normalized);
+  if (!belongsToAdvisory) return null;
+
+  return deterministicPublicReferenceUrl(normalized);
+}
+
 /**
- * `null` covers every failure alike — package not in the last scan, advisory
- * id/path not present on that row, or a URL that failed the https: check —
- * so callers have exactly one thing to do on `null`: nothing, silently.
- * There is no user-facing difference between "forged" and "stale" here; both
- * are just "this cannot be opened".
+ * `null` covers every failure alike — package not in the last scan, an
+ * unrecognized identifier, or a URL that failed the https: check — so callers
+ * have exactly one thing to do on `null`: nothing, silently. A public CVE/GHSA
+ * badge from a just-completed remediation result is the sole stale-data
+ * exception: when the row remains but the fixed advisory is gone, its fixed
+ * NVD/GitHub destination can still be derived without trusting a webview URL.
  */
 export function resolveTrustedAdvisoryUrl(
   rows: readonly PackageRow[],
@@ -74,7 +87,15 @@ export function resolveTrustedAdvisoryUrl(
   const row = rows.find((r) => r.name === request.package);
   if (row === undefined) return null;
   const entry = findAttributedAdvisory(row.advisories, request);
-  if (entry === undefined) return null;
+  if (entry === undefined) {
+    // A just-remediated advisory is intentionally absent from the refreshed
+    // rows while its host-issued result remains visible. In that one bounded
+    // case, a matching public id/reference can still open only the fixed NVD
+    // or GitHub advisory host; no URL ever crosses from the webview.
+    return request.reference !== undefined && String(request.advisoryId).toUpperCase() === request.reference.toUpperCase()
+      ? deterministicPublicReferenceUrl(request.reference)
+      : null;
+  }
   if (request.reference !== undefined) return resolveTrustedReferenceUrl(entry, request.reference);
   return isSafeAdvisoryUrl(entry.advisory.url) ? entry.advisory.url : null;
 }

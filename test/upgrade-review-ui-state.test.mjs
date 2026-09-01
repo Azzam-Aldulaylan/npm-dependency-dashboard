@@ -13,10 +13,61 @@ import {
   shouldQuarantineUpgradeDerivedData,
   shouldShowUpgradeVulnerabilitySeverity,
   upgradeAnalysisFreshness,
+  upgradeReviewDashboardEffect,
 } from '../out/host/upgradeReviewUiState.js';
 
 const HOUR = 60 * 60_000;
 const NOW = Date.parse('2026-08-26T12:00:00.000Z');
+
+function reviewSnapshot(overrides = {}) {
+  return {
+    project: { label: 'App', manifestPath: 'apps/web/package.json' },
+    generatedAt: new Date(NOW).toISOString(),
+    rows: [{ name: 'next', current: '14.2.35', range: '^14.2.0', dev: false }],
+    ...overrides,
+  };
+}
+
+test('background snapshot updates preserve an open upgrade review and its selected target', () => {
+  const previous = reviewSnapshot();
+  for (const status of ['ready', 'partial-error']) {
+    const data = reviewSnapshot({
+      generatedAt: new Date(NOW + 30 * 60_000).toISOString(),
+      rows: [{ ...previous.rows[0], latest: '16.0.0', worstSeverity: 'high' }],
+    });
+    assert.equal(upgradeReviewDashboardEffect('next', previous, { status, data }), 'preserve');
+  }
+});
+
+test('a revalidation notice with unchanged data does not claim project files changed', () => {
+  const data = reviewSnapshot();
+  assert.equal(upgradeReviewDashboardEffect('next', data, { status: 'stale', data }), 'preserve');
+  assert.equal(upgradeReviewDashboardEffect('next', data, { status: 'ready', data }), 'preserve');
+});
+
+test('changed dependency declarations retain evidence but require a re-check', () => {
+  const data = reviewSnapshot();
+  for (const changed of [{ current: '15.0.0' }, { range: '^15' }, { dev: true }, { optional: true }]) {
+    const next = reviewSnapshot({ rows: [{ ...data.rows[0], ...changed }] });
+    assert.equal(upgradeReviewDashboardEffect('next', data, { status: 'ready', data: next }), 'mark-stale');
+  }
+  const next = reviewSnapshot({ rows: [...data.rows, { name: 'react', current: '19.0.0' }] });
+  assert.equal(upgradeReviewDashboardEffect('next', data, { status: 'ready', data: next }), 'mark-stale');
+});
+
+test('project switches, missing packages and terminal dashboard failures reset the review', () => {
+  const data = reviewSnapshot();
+  for (const incoming of [
+    { status: 'loading' },
+    { status: 'fatal-error', error: { code: 'FAILED', message: 'Project unreadable' } },
+    { status: 'empty', data: reviewSnapshot({ rows: [] }) },
+    { status: 'ready', data: reviewSnapshot({ project: { label: 'Other app', manifestPath: data.project.manifestPath } }) },
+    { status: 'ready', data: reviewSnapshot({ project: { label: 'App', manifestPath: 'other/package.json' } }) },
+  ]) {
+    assert.equal(upgradeReviewDashboardEffect('next', data, incoming), 'reset');
+  }
+  assert.equal(upgradeReviewDashboardEffect(null, data, { status: 'ready', data }), 'reset');
+});
 
 function result(overrides = {}) {
   return {

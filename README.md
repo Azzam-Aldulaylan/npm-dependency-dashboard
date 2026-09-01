@@ -103,11 +103,14 @@ Source and configuration analysis stays local. Package names and versions are st
 To run the extension in a VS Code Extension Development Host against any local npm or pnpm project, follow [Testing the Extension in VS Code](docs/testing-in-vscode-extension-host.md).
 
 ```bash
-npm install
+npm ci
 npm run watch      # esbuild in watch mode
 npm run typecheck  # tsc --noEmit across the extension host, core, and webview
 npm test           # node:test — fast, offline, no network access
 npm run test:live  # optional: hits the real npm advisories endpoint over the network
+npm run test:real-projects   # disposable npm/pnpm mutations and rollback checks
+npm run test:extension-host  # real VS Code host over disposable npm/pnpm workspaces
+npm run test:release         # complete local release gate
 npm run build                    # development bundle
 npm run build -- --production    # minified production bundle, no sourcemaps
 ```
@@ -118,7 +121,7 @@ npm run build -- --production    # minified production bundle, no sourcemaps
 npm run package    # runs vscode:prepublish (a production build) automatically, then vsce package
 ```
 
-`@vscode/vsce` is a pinned devDependency, so packaging doesn't depend on any global tool.
+`@vscode/vsce` and the pnpm fixture CLI are pinned development dependencies, so packaging and release tests do not depend on global tools.
 
 ## Known limitations
 

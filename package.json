@@ -103,6 +103,11 @@
     "test": "node --test",
     "pretest:live": "npm run build:core",
     "test:live": "node --test scripts/live-checks/advisories-bulk-live.mjs",
+    "pretest:extension-host": "npm run build",
+    "test:extension-host": "node scripts/integration/run-extension-host-tests.mjs",
+    "pretest:real-projects": "tsc -p tsconfig.json",
+    "test:real-projects": "node scripts/integration/run-real-project-fixtures.mjs",
+    "test:release": "npm run typecheck && npm test && npm run test:real-projects && npm run test:extension-host",
     "benchmark:performance": "npm run pretest && npm run build:core && node scripts/performance/benchmark.mjs",
     "benchmark:actions": "npm run pretest && npm run build:core && node scripts/performance/action-benchmark.mjs",
     "benchmark:workspace-reads": "npm run pretest && npm run build:core && node scripts/performance/workspace-read-benchmark.mjs",
@@ -116,8 +121,10 @@
     "@types/react-dom": "^19.2.4",
     "@types/semver": "^7.5.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "3.9.2",
     "esbuild": "^0.28.0",
+    "pnpm": "11.19.0",
     "typescript": "^5.4.0"
   },
   "dependencies": {

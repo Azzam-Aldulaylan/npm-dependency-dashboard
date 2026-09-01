@@ -61,7 +61,7 @@ import { SmartCleanupMetadataCoordinator } from './smartCleanupMetadataCoordinat
 import { SmartCleanupDuplicateCoordinator } from './smartCleanupDuplicateCoordinator.js';
 import type { SmartCleanupFinalRefreshEvidence } from './smartCleanupCompletionReport.js';
 import { USAGE_FILE_WATCH_GLOB } from './usage/workspaceFiles.js';
-import type { ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
+import type { HostToWebviewMessage, ProtocolError, SelectedProjectInfo } from './webviewProtocol.js';
 import type { WebviewToHostMessage } from './webviewProtocol.js';
 import { isWebviewToHostMessage } from './webviewProtocol.js';
 
@@ -71,6 +71,22 @@ const TITLE = 'Dependency Dashboard';
 const BACKGROUND_REFRESH_INTERVAL_MS = 30 * 60_000;
 /** Coalesces a burst of filesystem events (e.g. an editor's atomic save, which can fire delete+create in quick succession) into a single invalidation + rescan. */
 const FILE_EVENT_DEBOUNCE_MS = 300;
+const MAX_INTEGRATION_TEST_MESSAGES = 160;
+
+export interface DashboardPanelIntegrationTestEvent {
+  sequence: number;
+  at: number;
+  message: HostToWebviewMessage;
+}
+
+export interface DashboardPanelIntegrationTestSnapshot {
+  open: boolean;
+  disposed: boolean;
+  panelId: string | null;
+  selectedManifestPath: string | null;
+  packageManager: 'npm' | 'pnpm' | null;
+  messages: readonly DashboardPanelIntegrationTestEvent[];
+}
 
 /**
  * `cacheBust` is appended as a query string on both asset URLs so that
@@ -126,6 +142,11 @@ export class DashboardPanel {
 
   private readonly panel: vscode.WebviewPanel;
   private readonly sink: MessageSink;
+  private readonly integrationTestMode: boolean;
+  private readonly integrationTestPanelId = randomBytes(8).toString('hex');
+  private readonly integrationTestMessages: DashboardPanelIntegrationTestEvent[] = [];
+  private integrationTestMessageSequence = 0;
+  private selectedPackageManager: 'npm' | 'pnpm' | null = null;
   private controller: DashboardController | undefined;
   /** In-flight or completed project resolution, dropped on failure so a retry re-runs it. */
   private pending: Promise<DashboardController | undefined> | undefined;
@@ -223,12 +244,25 @@ export class DashboardPanel {
 
   private constructor(panel: vscode.WebviewPanel, context: vscode.ExtensionContext) {
     this.panel = panel;
+    this.integrationTestMode =
+      context.extensionMode === vscode.ExtensionMode.Test ||
+      process.env['DEPENDENCY_DASHBOARD_EXTENSION_TEST'] === '1';
     this.buildInfo = {
       extensionVersion: String(context.extension.packageJSON['version'] ?? 'unknown'),
       builtAt: __BUILD_TIME__,
     };
     this.sink = {
       postMessage: (message) => {
+        if (this.integrationTestMode) {
+          this.integrationTestMessageSequence += 1;
+          this.integrationTestMessages.push({ sequence: this.integrationTestMessageSequence, at: Date.now(), message });
+          if (this.integrationTestMessages.length > MAX_INTEGRATION_TEST_MESSAGES) {
+            this.integrationTestMessages.splice(
+              0,
+              this.integrationTestMessages.length - MAX_INTEGRATION_TEST_MESSAGES
+            );
+          }
+        }
         if (this.performanceEnabled()) {
           const performance = createPerformanceSession('Dependency Dashboard webview message', true);
           const endSerialization = performance.start('webview message serialization');
@@ -339,6 +373,7 @@ export class DashboardPanel {
         this.controller?.dispose();
         this.controller = undefined;
         this.pending = undefined;
+        this.selectedPackageManager = null;
         // A mutating task is deliberately allowed to reach a stable boundary
         // even after its panel closes. The transaction's async owner keeps the
         // session alive until install/verification/rollback completes.
@@ -388,6 +423,48 @@ export class DashboardPanel {
   /** The refresh command only refreshes what is already open; it never opens a panel. */
   static async refresh(): Promise<void> {
     await DashboardPanel.current?.handle({ type: 'refresh' });
+  }
+
+  /**
+   * Narrow Extension Host test seam. It is enabled only for VS Code's test
+   * extension mode (or the explicit child-process flag used by the runner),
+   * and is not registered as a command or exposed to the webview.
+   */
+  static integrationTestSnapshot(): DashboardPanelIntegrationTestSnapshot {
+    const current = DashboardPanel.current;
+    if (current === undefined) {
+      return {
+        open: false,
+        disposed: true,
+        panelId: null,
+        selectedManifestPath: null,
+        packageManager: null,
+        messages: [],
+      };
+    }
+    if (!current.integrationTestMode) {
+      throw new Error('Dependency Dashboard integration state is only available in Extension Host tests.');
+    }
+    return {
+      open: true,
+      disposed: current.disposed,
+      panelId: current.integrationTestPanelId,
+      selectedManifestPath: current.selectedProject?.manifestPath ?? null,
+      packageManager: current.selectedPackageManager,
+      messages: current.integrationTestMessages.map((event) => ({ ...event })),
+    };
+  }
+
+  /** Dispatches through the same validator and handler used by the webview. */
+  static async dispatchIntegrationTestMessage(raw: unknown): Promise<void> {
+    const current = DashboardPanel.current;
+    if (current === undefined || !current.integrationTestMode) {
+      throw new Error('Dependency Dashboard integration dispatch requires an open test panel.');
+    }
+    if (!isWebviewToHostMessage(raw)) {
+      throw new Error('Dependency Dashboard integration dispatch rejected an invalid webview message.');
+    }
+    await current.handle(raw);
   }
 
   private async handle(message: WebviewToHostMessage): Promise<void> {
@@ -1117,6 +1194,7 @@ export class DashboardPanel {
     canChangeProject: boolean,
     cacheKey: string
   ): DashboardController {
+    this.selectedPackageManager = project.packageManager;
     return new DashboardController({
       root: project.root,
       manifestText: project.manifestText,
@@ -1245,6 +1323,7 @@ export class DashboardPanel {
     this.controller = undefined;
     this.pending = undefined;
     this.selectedProject = undefined;
+    this.selectedPackageManager = null;
     this.selectedLockfilePath = null;
     this.disposeWatchers();
     this.sink.postMessage({ status: 'fatal-error', error: { code, message } });

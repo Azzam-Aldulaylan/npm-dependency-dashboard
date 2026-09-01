@@ -42,6 +42,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Disposable npm and pnpm project transactions
+        run: npm run test:real-projects
+
       - name: Build
         run: npm run build
 
@@ -53,3 +56,28 @@ jobs:
       # or committed — it's discarded with the runner.
       - name: Package (smoke check)
         run: npm run package
+
+  extension-host:
+    strategy:
+      fail-fast: false
+      matrix:
+        vscode: [stable, 1.90.0]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # VS Code is an Electron application even though the assertions use its
+      # Extension Host API, so Linux needs a virtual display.
+      - name: Extension Host lifecycle and watcher tests
+        run: xvfb-run -a npm run test:extension-host
+        env:
+          VSCODE_TEST_VERSION: ${{ matrix.vscode }}

@@ -29,6 +29,15 @@ test('category disclosure and progress announcements expose accessible state', (
   assert.match(workspace, /aria-busy="true"/);
 });
 
+test('Smart Cleanup preserves readable hierarchy across low-contrast VS Code themes', () => {
+  assert.match(styles, /--smart-cleanup-muted:[\s\S]*?var\(--vscode-foreground\) 76%/);
+  assert.match(styles, /--smart-cleanup-border:[\s\S]*?--vscode-contrastBorder/);
+  assert.match(styles, /\.smart-cleanup-header[\s\S]*?background: var\(--smart-cleanup-surface-raised\)/);
+  assert.match(styles, /\.smart-cleanup-selection-bar[\s\S]*?border: 1px solid var\(--smart-cleanup-border-subtle\)/);
+  assert.match(category, /data-empty=\{count === 0 \? 'true' : undefined\}/);
+  assert.match(styles, /\.smart-cleanup-category__count\[data-empty='true'\]/);
+});
+
 test('progress lists only checks that perform asynchronous analysis', () => {
   assert.doesNotMatch(app, /Reading dependency inventory/);
   assert.doesNotMatch(app, /Preparing security impact/);

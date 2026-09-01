@@ -37,7 +37,11 @@ export function SmartCleanupCategorySection({
           <IconChevronRight className="smart-cleanup-category__chevron" />
           <span className="smart-cleanup-category__title">{title}</span>
           <span className="smart-cleanup-category__summary">{summary}</span>
-          <span className="smart-cleanup-category__count" aria-label={`${count} ${count === 1 ? 'finding' : 'findings'}`}>
+          <span
+            className="smart-cleanup-category__count"
+            data-empty={count === 0 ? 'true' : undefined}
+            aria-label={`${count} ${count === 1 ? 'finding' : 'findings'}`}
+          >
             {count}
           </span>
         </button>

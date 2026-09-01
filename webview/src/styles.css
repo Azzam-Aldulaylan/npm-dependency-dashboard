@@ -6230,8 +6230,31 @@ button {
 }
 
 .smart-cleanup-workspace {
+  --smart-cleanup-surface: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  --smart-cleanup-surface-raised: color-mix(
+    in srgb,
+    var(--vscode-foreground) 6%,
+    var(--smart-cleanup-surface)
+  );
+  --smart-cleanup-surface-active: color-mix(
+    in srgb,
+    var(--vscode-focusBorder) 10%,
+    var(--smart-cleanup-surface)
+  );
+  --smart-cleanup-border: var(
+    --vscode-contrastBorder,
+    color-mix(in srgb, var(--vscode-foreground) 24%, transparent)
+  );
+  --smart-cleanup-border-subtle: color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+  --smart-cleanup-muted: color-mix(
+    in srgb,
+    var(--vscode-foreground) 76%,
+    var(--smart-cleanup-surface)
+  );
   max-width: 58rem;
   max-height: min(92vh, 54rem);
+  border-color: var(--smart-cleanup-border);
+  background: var(--smart-cleanup-surface);
 }
 
 .smart-cleanup-header {
@@ -6241,7 +6264,8 @@ button {
   gap: 0.7rem;
   flex-shrink: 0;
   padding: 1rem 1.15rem 0.9rem;
-  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-bottom: 1px solid var(--smart-cleanup-border);
+  background: var(--smart-cleanup-surface-raised);
 }
 
 .smart-cleanup-header__icon {
@@ -6275,7 +6299,7 @@ button {
 .smart-cleanup-header__copy p {
   margin: 0.22rem 0 0;
   overflow: hidden;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.82em;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6298,11 +6322,12 @@ button {
   flex-shrink: 0;
   min-height: 3.35rem;
   padding: 0.75rem 1.15rem;
-  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-top: 1px solid var(--smart-cleanup-border);
+  background: var(--smart-cleanup-surface-raised);
 }
 
 .smart-cleanup-footer__status {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.86em;
 }
 
@@ -6333,7 +6358,7 @@ button {
   justify-content: space-between;
   gap: 0.5rem 1.5rem;
   padding-bottom: 0.85rem;
-  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-bottom: 1px solid var(--smart-cleanup-border);
 }
 
 .smart-cleanup-outcome__headline {
@@ -6354,7 +6379,7 @@ button {
 
 .smart-cleanup-outcome > p {
   margin: 0;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.84em;
   text-align: right;
 }
@@ -6364,11 +6389,15 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid var(--smart-cleanup-border-subtle);
+  border-radius: 5px;
+  background: var(--smart-cleanup-surface-raised);
 }
 
 .smart-cleanup-selection-bar p {
   margin: 0;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.85em;
 }
 
@@ -6378,11 +6407,13 @@ button {
 }
 
 .smart-cleanup-categories {
-  border-block: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  overflow: hidden;
+  border: 1px solid var(--smart-cleanup-border);
+  border-radius: 5px;
 }
 
 .smart-cleanup-category + .smart-cleanup-category {
-  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-top: 1px solid var(--smart-cleanup-border-subtle);
 }
 
 .smart-cleanup-category__heading {
@@ -6398,14 +6429,14 @@ button {
   padding: 0.7rem 0.55rem;
   border: 0;
   color: var(--vscode-foreground);
-  background: transparent;
+  background: var(--smart-cleanup-surface-raised);
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
 .smart-cleanup-category__trigger:hover {
-  background: var(--vscode-list-hoverBackground);
+  background: var(--vscode-list-hoverBackground, var(--smart-cleanup-surface-active));
 }
 
 .smart-cleanup-category__trigger:focus-visible {
@@ -6414,7 +6445,7 @@ button {
 }
 
 .smart-cleanup-category__chevron {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   transition: transform 120ms ease-out;
 }
 
@@ -6428,7 +6459,7 @@ button {
 
 .smart-cleanup-category__summary {
   overflow: hidden;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.84em;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6445,14 +6476,22 @@ button {
   text-align: center;
 }
 
+.smart-cleanup-category__count[data-empty='true'] {
+  border: 1px solid var(--smart-cleanup-border-subtle);
+  color: var(--smart-cleanup-muted);
+  background: transparent;
+}
+
 .smart-cleanup-category__panel {
   padding: 0 0.55rem 0.8rem 2rem;
+  border-top: 1px solid var(--smart-cleanup-border-subtle);
+  background: var(--smart-cleanup-surface);
 }
 
 .smart-cleanup-category__empty {
   margin: 0;
   padding: 0.55rem 0;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.86em;
 }
 
@@ -6486,7 +6525,7 @@ button {
 
 .smart-cleanup-dedupe-action span {
   margin-top: 0.2rem;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   line-height: 1.4;
 }
 
@@ -6499,7 +6538,7 @@ button {
 
 .smart-cleanup-action + .smart-cleanup-action,
 .smart-cleanup-information-item + .smart-cleanup-information-item {
-  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.18));
+  border-top: 1px solid var(--smart-cleanup-border-subtle);
 }
 
 .smart-cleanup-action__choice {
@@ -6546,7 +6585,7 @@ button {
   align-items: center;
   gap: 0.25rem;
   width: fit-content;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.72em;
   font-weight: 650;
   text-transform: uppercase;
@@ -6566,7 +6605,7 @@ button {
 }
 
 .smart-cleanup-action__type {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.76em;
 }
 
@@ -6592,7 +6631,7 @@ button {
 
 .smart-cleanup-evidence {
   margin-top: 0.35rem;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.82em;
 }
 
@@ -6620,7 +6659,7 @@ button {
 .smart-cleanup-category__guidance {
   margin: 0.15rem 0 0.55rem;
   max-width: 72ch;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.84em;
   line-height: 1.5;
 }
@@ -6631,7 +6670,7 @@ button {
   align-items: center;
   gap: 0.65rem;
   padding: 0.45rem 0 0.65rem;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.82em;
 }
 
@@ -6665,7 +6704,7 @@ button {
 .smart-cleanup-information-item__meta {
   display: block;
   margin-top: 0.25rem;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.8em;
 }
 
@@ -6686,7 +6725,7 @@ button {
 }
 
 .smart-cleanup-security__paths dt {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.78em;
 }
 
@@ -6705,7 +6744,7 @@ button {
 }
 
 .smart-cleanup-information-item__actions > span {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.8em;
 }
 
@@ -6734,21 +6773,21 @@ button {
 
 .smart-cleanup-duplicate__path-count {
   margin-left: auto;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.76em;
 }
 
 .smart-cleanup-duplicate__versions > li > p {
   margin-top: 0.4rem;
   overflow-wrap: anywhere;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.8em;
 }
 
 .smart-cleanup-duplicate__paths,
 .smart-cleanup-duplicate__roots {
   margin-top: 0.5rem;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.8em;
 }
 
@@ -6787,7 +6826,7 @@ button {
 .smart-cleanup-analysis > p {
   margin: 0;
   max-width: 42ch;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   line-height: 1.55;
 }
 
@@ -6836,7 +6875,7 @@ button {
 
 .smart-cleanup-analysis__steps small {
   margin-top: 0.12rem;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   line-height: 1.4;
 }
 
@@ -6866,7 +6905,7 @@ button {
 
 .smart-cleanup-confirmation__summary p {
   margin: 0.25rem 0 0;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
 }
 
 .smart-cleanup-confirmation__dedupe,
@@ -6888,7 +6927,7 @@ button {
 .smart-cleanup-confirmation__dedupe p,
 .smart-cleanup-preflight__dedupe p {
   margin: 0.2rem 0 0;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   line-height: 1.4;
 }
 
@@ -6916,14 +6955,14 @@ button {
 .smart-cleanup-confirmation__packages p {
   margin: 0.2rem 0 0;
   max-width: 70ch;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   line-height: 1.4;
 }
 
 .smart-cleanup-confirmation__evidence {
   margin: 0.35rem 0 0;
   padding-inline-start: 1.15rem;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.82em;
   line-height: 1.4;
 }
@@ -6943,7 +6982,7 @@ button {
 
 .smart-cleanup-confirmation__packages > li > span {
   flex-shrink: 0;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.8em;
 }
 
@@ -6978,7 +7017,7 @@ button {
 .smart-cleanup-final-check p,
 .smart-cleanup-preflight__heading p {
   margin: 0.2rem 0 0;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   line-height: 1.45;
 }
 
@@ -7023,14 +7062,14 @@ button {
 }
 
 .smart-cleanup-preflight__changes span {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.78em;
   text-transform: uppercase;
 }
 
 .smart-cleanup-preflight__changes p {
   margin: 0.25rem 0 0;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   line-height: 1.4;
 }
 
@@ -7070,7 +7109,7 @@ button {
 }
 
 .smart-cleanup-preflight__facts dt {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.76em;
 }
 
@@ -7091,7 +7130,7 @@ button {
 }
 
 .smart-cleanup-preflight__files strong {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.78em;
   font-weight: 500;
 }
@@ -7133,12 +7172,12 @@ button {
 
 .smart-cleanup-execution span,
 .smart-cleanup-terminal small {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
 }
 
 .smart-cleanup-execution .smart-cleanup-mutation-lock-note {
   max-width: 54ch;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.82em;
 }
 
@@ -7178,7 +7217,7 @@ button {
 }
 
 .smart-cleanup-metrics dt {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.78em;
 }
 
@@ -7193,7 +7232,7 @@ button {
 
 .smart-cleanup-metrics dd em {
   margin-left: auto;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.58em;
   font-style: normal;
   font-weight: 500;
@@ -7234,13 +7273,13 @@ button {
 }
 
 .smart-cleanup-metrics dd span {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
 }
 
 .smart-cleanup-metrics small {
   display: block;
   margin-top: 0.25rem;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   line-height: 1.35;
 }
 
@@ -7303,7 +7342,7 @@ button {
 }
 
 .smart-cleanup-result-advisory > span {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.82em;
 }
 
@@ -7323,7 +7362,7 @@ button {
 }
 
 .smart-cleanup-result-details dt {
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.75em;
 }
 
@@ -7335,7 +7374,7 @@ button {
 
 .smart-cleanup-results__detail {
   margin: 0;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   line-height: 1.45;
 }
 
@@ -7343,7 +7382,7 @@ button {
   display: flex;
   align-items: flex-start;
   gap: 0.5rem;
-  color: var(--vscode-descriptionForeground);
+  color: var(--smart-cleanup-muted);
   font-size: 0.82em;
 }
 

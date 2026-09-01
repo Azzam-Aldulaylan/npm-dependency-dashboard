@@ -1,5 +1,27 @@
 # Dependency Dashboard performance report
 
+## Real Extension Host and disposable-project baseline — 2026-09-01
+
+Release-hardening tests now run the extension inside an isolated VS Code Extension Host against real npm and pnpm projects. The fixture workspace path contains spaces and each project has two direct dependencies plus a real lockfile and installed dependency tree. The host test covers initial scan, forced refresh, manifest-watcher revalidation, close/reopen cache hydration, and a result-retention soak.
+
+Measured locally on macOS arm64 with VS Code 1.135.0:
+
+| Package manager | First scan | Forced refresh | Cached reopen | Final state |
+| --- | ---: | ---: | ---: | --- |
+| npm | 1,955 ms | 1,021 ms | 77 ms | ready |
+| pnpm | 845 ms | 467 ms | 90 ms | ready |
+
+The same disposable projects exercise the production transaction state machine and real filesystem adapter:
+
+| Package manager | Fixture setup | Verified upgrade | Verified removal | Failed-verification rollback |
+| --- | ---: | ---: | ---: | ---: |
+| npm | 1,481 ms | 991 ms | 576 ms | 565 ms |
+| pnpm | 1,194 ms | 831 ms | 402 ms | 425 ms |
+
+These are small-project smoke baselines, not latency promises. Registry location, cache warmth, package-manager cache state, and machine load all affect them. The tests enforce a two-minute operation ceiling to catch hangs rather than a tight performance budget.
+
+This pass found and fixed a real pnpm status bug: npm-audit enrichment is intentionally not applicable to pnpm, but an omitted audit runner was being rendered as a partial failure. pnpm now remains `ready` when version and bulk-advisory evidence are otherwise complete.
+
 ## Upgrade analysis scheduling and inventory cache — 2026-08-31
 
 This stabilization pass extracts project compatibility orchestration into its own workflow. Metadata/source checks run independently of dependency resolution; compatibility and security sections publish as soon as their own evidence settles. An uncached package archive still waits for the resolver subprocess lane, so two package-manager processes are not deliberately started together. Source evidence and final freshness checks are not cached or skipped.
@@ -23,7 +45,7 @@ Five runs per scenario, with injected delays of 10 ms source reading, 20 ms targ
 | Same target cached | 21.5 ms | 42.0 ms | 42.1 ms | 0 |
 | Return to target after checking another | 21.3 ms | 41.3 ms | 41.4 ms | 0 |
 
-The benchmark asserts one active package-manager lane and exact-target reuse. These are synthetic workflow timings, **not total Upgrade Review duration or real-registry latency claims**. Real-project cold/warm benchmarks, packaged Extension Host testing, and performance thresholds remain deferred in `docs/v1-deferred-work.md`.
+The benchmark asserts one active package-manager lane and exact-target reuse. These are synthetic workflow timings, **not total Upgrade Review duration or real-registry latency claims**. Small real-project and Extension Host smoke baselines now appear above; large-project GUI profiling and tighter performance budgets remain future work.
 
 ## Earlier dashboard baseline
 

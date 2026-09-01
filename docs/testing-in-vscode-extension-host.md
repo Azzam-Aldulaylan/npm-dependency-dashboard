@@ -5,7 +5,7 @@ This guide is for contributors and coding agents who need to run Dependency Dash
 ## Requirements
 
 - VS Code Desktop 1.90 or newer
-- Node.js 20 or newer and npm
+- Node.js 22 or newer and npm
 - A trusted target project containing a `package.json`
 - For complete results, the target project should also have a supported lockfile: `package-lock.json`, `npm-shrinkwrap.json`, or `pnpm-lock.yaml`
 
@@ -20,6 +20,8 @@ npm ci
 npm run typecheck
 npm test
 ```
+
+`npm ci` also installs the repository-pinned pnpm CLI used by disposable pnpm fixtures. Contributors do not need a global pnpm installation.
 
 Create `.vscode/launch.json` in the extension repository with the following local configuration:
 
@@ -66,6 +68,35 @@ The repository ignores `.vscode/`, so this machine-specific setup will not be co
 
 The launch task builds the extension before every run. After source changes, stop the current debugging session and press `F5` again to guarantee that both the extension host and webview use the latest bundle.
 
+## Automated real-project tests
+
+The repository also creates disposable npm and pnpm projects under the operating system's temporary directory. These projects use real lockfiles, installations, and package-manager invocations; they never mutate the repository or a contributor's chosen application.
+
+```bash
+npm run test:real-projects
+```
+
+That command exercises a verified upgrade, verified removal, verification-failure rollback, and a concurrent-manifest-edit rejection for both package managers. It prints setup and transaction durations and fails any operation that exceeds the two-minute safety timeout.
+
+The real Extension Host suite downloads an isolated VS Code build on its first run, opens each disposable workspace, and verifies activation, command registration, a real dashboard scan, singleton panel behavior, refresh, manifest watcher revalidation, a source-only edit, close/reopen cache restoration, and a bounded result-retention soak:
+
+```bash
+npm run test:extension-host
+```
+
+Useful focused forms are:
+
+```bash
+npm run test:extension-host -- --manager=npm
+npm run test:extension-host -- --manager=pnpm
+VSCODE_TEST_VERSION=1.90.0 npm run test:extension-host
+DEPENDENCY_DASHBOARD_HOST_SOAK_MS=600000 npm run test:extension-host
+```
+
+The default soak is intentionally short for CI. Set it to `600000` for a ten-minute local reproduction of results unexpectedly disappearing while the dashboard remains open. Set `DEPENDENCY_DASHBOARD_KEEP_FIXTURES=1` only when the generated projects need manual inspection; otherwise all project and VS Code profile directories are removed.
+
+Both automated tiers use the public package registry and therefore require network access. `npm test` remains the fast, deterministic, offline suite.
+
 ## What to verify
 
 Use a disposable branch or a copy of the target project when testing actions that can change dependencies.
@@ -93,6 +124,8 @@ Use a disposable branch or a copy of the target project when testing actions tha
 ```bash
 npm run typecheck
 npm test
+npm run test:real-projects
+npm run test:extension-host
 npm run build
 git diff --check
 ```

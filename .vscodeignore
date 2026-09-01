@@ -9,6 +9,7 @@ docs/**
 scripts/**
 node_modules/**
 out/**
+.vscode-test/**
 **/*.ts
 **/*.tsx
 **/*.map

@@ -9,8 +9,16 @@ import * as vscode from 'vscode';
 
 import { createPerformanceSession } from './core/performance/measurement.js';
 import { DashboardPanel } from './host/dashboardPanel.js';
+import type { DashboardPanelIntegrationTestSnapshot } from './host/dashboardPanel.js';
 
-export function activate(context: vscode.ExtensionContext): void {
+export interface DependencyDashboardIntegrationTestApi {
+  dashboard: {
+    snapshot(): DashboardPanelIntegrationTestSnapshot;
+    dispatch(message: unknown): Promise<void>;
+  };
+}
+
+export function activate(context: vscode.ExtensionContext): void | DependencyDashboardIntegrationTestApi {
   const performanceEnabled = vscode.workspace
     .getConfiguration('dependencyDashboard')
     .get<boolean>('debug.performance', false);
@@ -39,6 +47,18 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   endActivation({ trusted: true });
   performance.finish({ trusted: true });
+
+  if (
+    context.extensionMode === vscode.ExtensionMode.Test ||
+    process.env['DEPENDENCY_DASHBOARD_EXTENSION_TEST'] === '1'
+  ) {
+    return {
+      dashboard: {
+        snapshot: () => DashboardPanel.integrationTestSnapshot(),
+        dispatch: (message) => DashboardPanel.dispatchIntegrationTestMessage(message),
+      },
+    };
+  }
 }
 
 export function deactivate(): void {

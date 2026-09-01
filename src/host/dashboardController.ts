@@ -808,6 +808,7 @@ export class DashboardController {
       ...(this.options.auditRunner === undefined || this.options.packageManager === 'pnpm'
         ? {}
         : { auditRunner: this.options.auditRunner }),
+      ...(this.options.packageManager === 'pnpm' ? { auditUnavailableWhenOmitted: false } : {}),
       ...(this.options.progressEnabled === true
         ? {
             onProgress: (progress) => {

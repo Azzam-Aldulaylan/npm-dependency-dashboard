@@ -1,40 +1,73 @@
 # Changelog
 
-All notable changes to this extension will be documented in this file.
+All notable changes to this extension are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Semantic Versioning](https://semver.org/).
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
-Nothing has been published to the Marketplace yet, so there is a single entry
-for everything built so far rather than a per-version history.
+## [1.0.0] - 2026-09-01
 
-## [Unreleased] - 0.0.1
+### Added
 
-Initial feature set, not yet published:
+- Direct-dependency dashboard for npm and pnpm projects with installed, wanted,
+  and latest versions; update classification; dependency-type and hygiene
+  filters; search by package, vulnerability ID, or dependency path; and
+  monorepo project selection.
+- Vulnerability attribution through the complete dependency graph, including
+  severity, affected package, full introduction path, GHSA and CVE references,
+  NVD links for CVEs, patched ranges, and security outcomes after proposed
+  changes.
+- Compatibility-aware Upgrade Review with peer and engine checks, package
+  exports and published-file inspection, source/config analysis, focused Next.js
+  migration rules, coordinated upgrade plans, and explicit partial/unavailable
+  coverage states.
+- Removal Review with bounded project-usage analysis, dependency requirements,
+  package-script/configuration evidence, security impact, and final project-state
+  revalidation.
+- Project Maintenance bulk review and Smart Cleanup for unused candidates,
+  installed-version deprecations, simulated duplicate consolidation, selection
+  security impact, final preflight, restore points, and visual completion results.
+- Bounded transitive vulnerability remediation plans that can update a child
+  package without unnecessarily changing its direct parent.
+- Transactional npm and pnpm changes with lifecycle scripts disabled by default,
+  optional user-selected verification scripts, compare-and-swap protection,
+  rollback, and visible VS Code Tasks.
+- Persistent project and registry caches, project file and Git branch watchers,
+  one-hour analysis-result retention, manual refresh, and background revalidation.
+- Disposable npm/pnpm transaction fixtures and real VS Code Extension Host tests,
+  including stable and minimum-supported VS Code versions and result-retention
+  soak coverage.
 
-- Safe upgrade-assistant flow with on-demand peer compatibility preflight,
-  isolated package-manager resolver verification, bounded coordinated upgrade
-  plans, transactional snapshots, optional explicit verification scripts, and
-  compare-and-swap rollback.
-- Coordinated plans can span production, development, and optional dependency
-  blocks through host-generated manifest staging and one npm/pnpm reconciliation
-  install.
-- pnpm lockfile v9, workspace importer, advisory graph, watching, preflight,
-  and structured upgrade execution support alongside the existing npm flow.
+### Changed
 
-- Dashboard panel listing every direct npm dependency with Current, Wanted,
-  and Latest versions.
-- Vulnerability detection via npm's bulk advisories endpoint, with optional
-  `npm audit` enrichment for fix availability, severity badges, and
-  expandable per-advisory detail (affected transitive package + dependency
-  path).
-- One-click Upgrade action: modal confirmation, Workspace Trust re-check,
-  and a visible `npm install` task with `--ignore-scripts` on by default.
-- Workspace Trust required to activate at all; re-checked before reading a
-  project's `.npmrc` and again immediately before any upgrade.
-- Monorepo / multi-root support with a project picker and correct npm
-  workspace lockfile resolution.
-- Persisted, TTL-based caching (`dependencyDashboard.cacheTtlMinutes`) with
-  instant warm-cache renders, background revalidation, a fixed 30-minute
-  background refresh timer, and automatic reload on external `package.json`/
-  lockfile changes.
-- No telemetry. See the [README's privacy section](README.md#privacy-and-network-access)
-  for the exact npm endpoints contacted.
+- Analysis work is staged and cached so fast inventory results render before
+  slower network, compatibility, deprecation, or remediation checks finish.
+- Dashboard, package workspace, bulk maintenance, and Smart Cleanup now share
+  reusable status banners, buttons, severity badges, advisory links, and
+  theme-aware visual tokens.
+- Smart Cleanup contrast and information hierarchy now remain readable in dark,
+  light, and high-contrast VS Code themes.
+
+### Fixed
+
+- Prevented analyzers, temporary package inspection, Git activity, and unchanged
+  project files from falsely invalidating Upgrade Review results.
+- Preserved Upgrade Review and Smart Cleanup state across tab switches,
+  close/reopen flows, refreshes, and long reading sessions.
+- Kept package-workspace tabs stable and non-scrolling for long vulnerability and
+  compatibility results.
+- Corrected vulnerability totals versus vulnerable dependency counts, advisory
+  filtering/accordion expansion, severity ordering, CVE enrichment, and removal
+  of duplicate npm advisory IDs from the UI.
+- Kept removal, remediation, and stale-result outcomes inside the active workflow
+  instead of replacing them with unrelated dashboard errors.
+
+### Security
+
+- Requires Workspace Trust before reading project registry configuration or
+  running package-manager commands.
+- Rejects unresolved environment substitutions in project `.npmrc` registry
+  values and never persists authentication keys.
+- Revalidates source fingerprints and transaction ownership immediately before a
+  dependency mutation, and refuses rollback over concurrent user edits.
+
+[1.0.0]: https://github.com/Azzam-Aldulaylan/npm-dependency-dashboard/releases/tag/v1.0.0

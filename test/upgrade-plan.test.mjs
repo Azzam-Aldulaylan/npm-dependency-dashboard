@@ -14,7 +14,9 @@ import {
   buildInstallArgs,
   buildCoordinatedInstallArgs,
   buildDedupeArgs,
+  buildLockfileReconciliationArgs,
   buildManifestReconciliationArgs,
+  buildTransitiveRemediationArgs,
   requiresManifestReconciliation,
   isMajorUpgrade,
   isSafeNpmPackageName,
@@ -136,6 +138,44 @@ test('manifest reconciliation argv never contains package, version, classificati
         : ['install', '--ignore-scripts']
     );
   }
+});
+
+test('targeted transitive remediation is lockfile-only, script-free, and manager-specific', () => {
+  assert.deepEqual(buildTransitiveRemediationArgs('npm', ['websocket-driver'], { ignoreScripts: true }), [
+    'update', 'websocket-driver', '--package-lock-only', '--ignore-scripts',
+  ]);
+  assert.deepEqual(buildTransitiveRemediationArgs('pnpm', ['websocket-driver', '@scope/indirect'], { ignoreScripts: true }), [
+    'update', '@scope/indirect', 'websocket-driver', '--no-save', '--lockfile-only', '--ignore-scripts',
+  ]);
+  assert.deepEqual(buildTransitiveRemediationArgs('npm', ['websocket-driver', 'websocket-driver'], { ignoreScripts: false }), [
+    'update', 'websocket-driver', '--package-lock-only',
+  ]);
+});
+
+test('targeted transitive remediation rejects empty, option-like, and malformed package targets', () => {
+  assert.throws(
+    () => buildTransitiveRemediationArgs('npm', [], { ignoreScripts: true }),
+    /at least one package target/
+  );
+  for (const packageName of ['--latest', 'pkg; touch owned', '@scope', '../package']) {
+    assert.throws(
+      () => buildTransitiveRemediationArgs('npm', ['safe-package', packageName], { ignoreScripts: true }),
+      /valid npm package name/
+    );
+  }
+});
+
+test('exact lockfile reconciliation uses immutable manager-specific install semantics', () => {
+  assert.deepEqual(buildLockfileReconciliationArgs('npm', { ignoreScripts: true }), [
+    'ci', '--ignore-scripts',
+  ]);
+  assert.deepEqual(buildLockfileReconciliationArgs('npm', { ignoreScripts: false }), ['ci']);
+  assert.deepEqual(buildLockfileReconciliationArgs('pnpm', { ignoreScripts: true }), [
+    'install', '--frozen-lockfile', '--ignore-scripts',
+  ]);
+  assert.deepEqual(buildLockfileReconciliationArgs('pnpm', { ignoreScripts: false }), [
+    'install', '--frozen-lockfile',
+  ]);
 });
 
 // ------------------------------------------------------------ ignoreScripts

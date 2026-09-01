@@ -28,6 +28,7 @@ import type {
   RemovalEvidence,
   RemovalEvidenceKind,
   ScanDataAvailability,
+  Severity,
 } from '../core/types.js';
 import type { DependencyFinding } from '../core/hygiene/types.js';
 import type { DependencyReference, DependencyUsageResult } from '../core/usage/types.js';
@@ -165,6 +166,89 @@ export interface RemediationResult {
   status: RemediationOutcomeStatus;
   /** Full before/after detail — reused as-is so the UI never has to construct its own explanation of what changed. */
   security: SecurityOutcome;
+}
+
+/**
+ * A display-only summary of one host-proven transitive lockfile change. A
+ * package can have more than one installed instance, so the wire contract
+ * deliberately carries sets of before/after versions and every affected
+ * dependency path instead of flattening the result into a misleading X → Y
+ * scalar. None of these values ever cross back into an execution request.
+ */
+export interface TransitiveRemediationChange {
+  packageName: string;
+  fromVersions: string[];
+  toVersions: string[];
+  affectedPaths: string[][];
+  targeted: boolean;
+}
+
+/** A bounded advisory fact used by the remediation review and final result. */
+export interface TransitiveRemediationAdvisorySummary {
+  advisoryId: string;
+  identifiers: string[];
+  title: string;
+  severity: Severity;
+  flaggedPackage: string;
+  affectedPaths: string[][];
+}
+
+export type TransitiveRemediationPlanOutcome = 'full' | 'partial' | 'no-fix' | 'unsafe' | 'unavailable';
+
+/**
+ * Host-owned, immutable review material. `analysisId` is the only execution
+ * authority the webview can return. The file and version fields are facts for
+ * presentation only; confirm/cancel/retry never echo them back to the host.
+ */
+export interface TransitiveRemediationPlanSummary {
+  analysisId: string;
+  rootPackage: string;
+  currentVersion: string;
+  outcome: TransitiveRemediationPlanOutcome;
+  explanation: string;
+  generatedAt: string;
+  expiresAt: string;
+  packageManager: SupportedPackageManager | null;
+  packageManagerVersion: string | null;
+  lifecycleScriptsEnabled: boolean;
+  directRootUnchanged: boolean;
+  files: {
+    manifestPath: string;
+    lockfilePath: string;
+    manifestChanged: boolean;
+    lockfileChanged: boolean;
+  };
+  changes: TransitiveRemediationChange[];
+  resolvedAdvisories: TransitiveRemediationAdvisorySummary[];
+  remainingAdvisories: TransitiveRemediationAdvisorySummary[];
+  introducedAdvisories: TransitiveRemediationAdvisorySummary[];
+  blockingReasons: string[];
+  verification: UpgradeAnalysisVerification;
+}
+
+export type TransitiveRemediationProgressPhase =
+  | 'preparing'
+  | 'installing'
+  | 'verifying-security'
+  | 'verifying-project'
+  | 'rolling-back';
+
+export type TransitiveRemediationApplyOutcome =
+  | 'verified'
+  | 'partial'
+  | 'rolled-back'
+  | 'cancelled'
+  | 'unverified'
+  | 'recovery-required';
+
+export interface TransitiveRemediationApplyResult {
+  outcome: TransitiveRemediationApplyOutcome;
+  message: string;
+  verification: 'passed' | 'not-configured' | 'failed' | 'not-run' | 'unavailable';
+  rollback: 'not-needed' | 'succeeded' | 'failed' | 'conflict';
+  resolvedAdvisories: TransitiveRemediationAdvisorySummary[];
+  remainingAdvisories: TransitiveRemediationAdvisorySummary[];
+  introducedAdvisories: TransitiveRemediationAdvisorySummary[];
 }
 
 /**
@@ -618,6 +702,20 @@ export type HostToWebviewMessage =
   | { status: 'remediation-analyzing'; package: string }
   /** The host-owned remediation analysis result for `package`, ready for the Action cell to render. */
   | { status: 'remediation-result'; package: string; result: RemediationResult }
+  /** A host-owned, reviewable lockfile remediation plan. Only its opaque analysisId can authorize execution. */
+  | { status: 'remediation-plan'; package: string; plan: TransitiveRemediationPlanSummary }
+  /** A confirmed remediation is advancing through a real execution phase. */
+  | {
+      status: 'remediation-applying';
+      package: string;
+      analysisId: string;
+      phase: TransitiveRemediationProgressPhase;
+      cancelRequested?: boolean;
+    }
+  /** The dependency files changed after analysis; the plan can no longer authorize execution. */
+  | { status: 'remediation-stale'; package: string; analysisId: string; message: string }
+  /** A remediation transaction reached a stable kept/restored/recovery boundary. */
+  | { status: 'remediation-apply-result'; package: string; analysisId: string; result: TransitiveRemediationApplyResult }
   /** `package` could not be analyzed — an ineligible/forged request, a stale project snapshot, or a resolver failure that still deserves a user-visible reason rather than silently falling back to "unknown". */
   | { status: 'remediation-error'; package: string; error: ProtocolError }
   | { status: 'remediation-batch-progress'; completed: number; total: number; current: string | null }
@@ -746,6 +844,10 @@ export type WebviewToHostMessage =
    * actually shows.
    */
   | { type: 'analyze-remediation'; package: string }
+  /** These three requests carry only a host-issued plan id. Versions, paths, files, and advisories are never execution inputs. */
+  | { type: 'confirm-remediation'; analysisId: string }
+  | { type: 'cancel-remediation'; analysisId: string }
+  | { type: 'retry-remediation'; analysisId: string }
   | { type: 'analyze-remediations'; packages: string[] }
   | { type: 'cancel-remediation-analysis' }
   /** On-demand, single-package usage scan — see src/core/usage/ and src/host/usage/usageAnalyzer.ts. Only ever a package name; the host re-derives everything else (which project, which files) from its own trusted state. */
@@ -955,6 +1057,9 @@ export function isWebviewToHostMessage(value: unknown): value is WebviewToHostMe
   }
   if (type === 'configure-verification') {
     return hasOnlyKeys(value, ['type']);
+  }
+  if (type === 'confirm-remediation' || type === 'cancel-remediation' || type === 'retry-remediation') {
+    return hasOnlyKeys(value, ['type', 'analysisId']) && isNonEmptyString(value['analysisId']);
   }
   if (type === 'analyze-remediations') {
     const packages = value['packages'];
@@ -1579,6 +1684,234 @@ function isRemediationResult(value: unknown): value is RemediationResult {
   return typeof status === 'string' && REMEDIATION_OUTCOME_STATUSES.has(status) && isSecurityOutcome(value['security']);
 }
 
+const TRANSITIVE_REMEDIATION_PLAN_OUTCOMES: ReadonlySet<string> = new Set<TransitiveRemediationPlanOutcome>([
+  'full',
+  'partial',
+  'no-fix',
+  'unsafe',
+  'unavailable',
+]);
+const TRANSITIVE_REMEDIATION_PROGRESS_PHASES: ReadonlySet<string> = new Set<TransitiveRemediationProgressPhase>([
+  'preparing',
+  'installing',
+  'verifying-security',
+  'verifying-project',
+  'rolling-back',
+]);
+const TRANSITIVE_REMEDIATION_APPLY_OUTCOMES: ReadonlySet<string> = new Set<TransitiveRemediationApplyOutcome>([
+  'verified',
+  'partial',
+  'rolled-back',
+  'cancelled',
+  'unverified',
+  'recovery-required',
+]);
+const TRANSITIVE_REMEDIATION_VERIFICATION_OUTCOMES = new Set([
+  'passed',
+  'not-configured',
+  'failed',
+  'not-run',
+  'unavailable',
+]);
+const TRANSITIVE_REMEDIATION_ROLLBACK_OUTCOMES = new Set(['not-needed', 'succeeded', 'failed', 'conflict']);
+const TRANSITIVE_REMEDIATION_SEVERITIES = new Set<Severity>(['critical', 'high', 'moderate', 'low', 'info']);
+const MAX_REMEDIATION_CHANGES = 200;
+const MAX_REMEDIATION_ADVISORIES = 400;
+const MAX_REMEDIATION_PATHS = 32;
+const MAX_REMEDIATION_PATH_SEGMENTS = 64;
+
+function isBoundedNonEmptyStringArray(value: unknown, maximum: number): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= maximum &&
+    value.every(isNonEmptyString) &&
+    new Set(value).size === value.length
+  );
+}
+
+function isBoundedStringArray(value: unknown, maximum: number): value is string[] {
+  return Array.isArray(value) && value.length <= maximum && value.every(isNonEmptyString) && new Set(value).size === value.length;
+}
+
+function isRemediationPaths(value: unknown, allowEmpty = false): value is string[][] {
+  return (
+    Array.isArray(value) &&
+    (allowEmpty || value.length > 0) &&
+    value.length <= MAX_REMEDIATION_PATHS &&
+    value.every(
+      (path) =>
+        Array.isArray(path) &&
+        path.length > 0 &&
+        path.length <= MAX_REMEDIATION_PATH_SEGMENTS &&
+        path.every(isNonEmptyString)
+    )
+  );
+}
+
+function isTransitiveRemediationChange(value: unknown): value is TransitiveRemediationChange {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['packageName', 'fromVersions', 'toVersions', 'affectedPaths', 'targeted']) &&
+    isNonEmptyString(value['packageName']) &&
+    isBoundedStringArray(value['fromVersions'], 32) &&
+    isBoundedStringArray(value['toVersions'], 32) &&
+    (value['fromVersions'].length > 0 || value['toVersions'].length > 0) &&
+    isRemediationPaths(value['affectedPaths'], true) &&
+    typeof value['targeted'] === 'boolean'
+  );
+}
+
+function isTransitiveRemediationAdvisorySummary(value: unknown): value is TransitiveRemediationAdvisorySummary {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ['advisoryId', 'identifiers', 'title', 'severity', 'flaggedPackage', 'affectedPaths']) &&
+    isNonEmptyString(value['advisoryId']) &&
+    isBoundedStringArray(value['identifiers'], 32) &&
+    isNonEmptyString(value['title']) &&
+    typeof value['severity'] === 'string' &&
+    TRANSITIVE_REMEDIATION_SEVERITIES.has(value['severity'] as Severity) &&
+    isNonEmptyString(value['flaggedPackage']) &&
+    isRemediationPaths(value['affectedPaths'])
+  );
+}
+
+function isBoundedArrayOf<T>(
+  value: unknown,
+  maximum: number,
+  predicate: (entry: unknown) => entry is T
+): value is T[] {
+  return Array.isArray(value) && value.length <= maximum && value.every(predicate);
+}
+
+function isCanonicalIsoDate(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+}
+
+function isTransitiveRemediationPlanSummary(value: unknown): value is TransitiveRemediationPlanSummary {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      'analysisId',
+      'rootPackage',
+      'currentVersion',
+      'outcome',
+      'explanation',
+      'generatedAt',
+      'expiresAt',
+      'packageManager',
+      'packageManagerVersion',
+      'lifecycleScriptsEnabled',
+      'directRootUnchanged',
+      'files',
+      'changes',
+      'resolvedAdvisories',
+      'remainingAdvisories',
+      'introducedAdvisories',
+      'blockingReasons',
+      'verification',
+    ]) ||
+    !isNonEmptyString(value['analysisId']) ||
+    !isNonEmptyString(value['rootPackage']) ||
+    !isNonEmptyString(value['currentVersion']) ||
+    typeof value['outcome'] !== 'string' ||
+    !TRANSITIVE_REMEDIATION_PLAN_OUTCOMES.has(value['outcome']) ||
+    !isNonEmptyString(value['explanation']) ||
+    !isCanonicalIsoDate(value['generatedAt']) ||
+    !isCanonicalIsoDate(value['expiresAt']) ||
+    Date.parse(value['expiresAt']) <= Date.parse(value['generatedAt']) ||
+    !(value['packageManager'] === null || (typeof value['packageManager'] === 'string' && PACKAGE_MANAGERS.has(value['packageManager']))) ||
+    !(value['packageManagerVersion'] === null || isNonEmptyString(value['packageManagerVersion'])) ||
+    typeof value['lifecycleScriptsEnabled'] !== 'boolean' ||
+    typeof value['directRootUnchanged'] !== 'boolean' ||
+    !isRecord(value['files']) ||
+    !hasOnlyKeys(value['files'], ['manifestPath', 'lockfilePath', 'manifestChanged', 'lockfileChanged']) ||
+    typeof value['files']['manifestPath'] !== 'string' ||
+    typeof value['files']['lockfilePath'] !== 'string' ||
+    typeof value['files']['manifestChanged'] !== 'boolean' ||
+    typeof value['files']['lockfileChanged'] !== 'boolean' ||
+    !isBoundedArrayOf(value['changes'], MAX_REMEDIATION_CHANGES, isTransitiveRemediationChange) ||
+    !isBoundedArrayOf(value['resolvedAdvisories'], MAX_REMEDIATION_ADVISORIES, isTransitiveRemediationAdvisorySummary) ||
+    !isBoundedArrayOf(value['remainingAdvisories'], MAX_REMEDIATION_ADVISORIES, isTransitiveRemediationAdvisorySummary) ||
+    !isBoundedArrayOf(value['introducedAdvisories'], MAX_REMEDIATION_ADVISORIES, isTransitiveRemediationAdvisorySummary) ||
+    !Array.isArray(value['blockingReasons']) ||
+    value['blockingReasons'].length > 32 ||
+    !value['blockingReasons'].every(isNonEmptyString) ||
+    !isVerification(value['verification'])
+  ) {
+    return false;
+  }
+
+  const actionable = value['outcome'] === 'full' || value['outcome'] === 'partial';
+  if (!actionable) return true;
+  return (
+    value['changes'].length > 0 &&
+    value['changes'].some((change) => change.targeted && change.toVersions.length > 0) &&
+    value['resolvedAdvisories'].length > 0 &&
+    value['introducedAdvisories'].length === 0 &&
+    value['directRootUnchanged'] === true &&
+    value['files']['manifestChanged'] === false &&
+    value['files']['lockfileChanged'] === true &&
+    (value['outcome'] === 'full'
+      ? value['remainingAdvisories'].length === 0
+      : value['remainingAdvisories'].length > 0)
+  );
+}
+
+function isTransitiveRemediationApplyResult(value: unknown): value is TransitiveRemediationApplyResult {
+  const valid = (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      'outcome',
+      'message',
+      'verification',
+      'rollback',
+      'resolvedAdvisories',
+      'remainingAdvisories',
+      'introducedAdvisories',
+    ]) &&
+    typeof value['outcome'] === 'string' &&
+    TRANSITIVE_REMEDIATION_APPLY_OUTCOMES.has(value['outcome']) &&
+    isNonEmptyString(value['message']) &&
+    typeof value['verification'] === 'string' &&
+    TRANSITIVE_REMEDIATION_VERIFICATION_OUTCOMES.has(value['verification']) &&
+    typeof value['rollback'] === 'string' &&
+    TRANSITIVE_REMEDIATION_ROLLBACK_OUTCOMES.has(value['rollback']) &&
+    isBoundedArrayOf(value['resolvedAdvisories'], MAX_REMEDIATION_ADVISORIES, isTransitiveRemediationAdvisorySummary) &&
+    isBoundedArrayOf(value['remainingAdvisories'], MAX_REMEDIATION_ADVISORIES, isTransitiveRemediationAdvisorySummary) &&
+    isBoundedArrayOf(value['introducedAdvisories'], MAX_REMEDIATION_ADVISORIES, isTransitiveRemediationAdvisorySummary)
+  );
+  if (!valid) return false;
+  const result = value as unknown as TransitiveRemediationApplyResult;
+  const outcome = result.outcome;
+  if (outcome === 'verified') {
+    return result.verification === 'passed' && result.rollback === 'not-needed' &&
+      result.resolvedAdvisories.length > 0 && result.remainingAdvisories.length === 0 &&
+      result.introducedAdvisories.length === 0;
+  }
+  if (outcome === 'partial') {
+    return result.verification === 'passed' && result.rollback === 'not-needed' &&
+      result.resolvedAdvisories.length > 0 && result.remainingAdvisories.length > 0 &&
+      result.introducedAdvisories.length === 0;
+  }
+  if (outcome === 'rolled-back') {
+    return result.rollback === 'succeeded' && result.resolvedAdvisories.length === 0 &&
+      result.introducedAdvisories.length === 0;
+  }
+  if (outcome === 'cancelled') {
+    return (result.rollback === 'not-needed' || result.rollback === 'succeeded') &&
+      result.resolvedAdvisories.length === 0 && result.introducedAdvisories.length === 0;
+  }
+  if (outcome === 'recovery-required') {
+    return (result.rollback === 'failed' || result.rollback === 'conflict') &&
+      result.resolvedAdvisories.length === 0 && result.remainingAdvisories.length === 0 &&
+      result.introducedAdvisories.length === 0;
+  }
+  return result.rollback === 'not-needed';
+}
+
 const REFERENCE_KINDS: ReadonlySet<string> = new Set(['import', 'require', 'dynamic-import', 'script', 'config']);
 
 function isDependencyReference(value: unknown): value is DependencyReference {
@@ -1953,6 +2286,42 @@ export function isHostToWebviewMessage(value: unknown): value is HostToWebviewMe
       hasOnlyKeys(value, ['status', 'package', 'result']) &&
       isNonEmptyString(value['package']) &&
       isRemediationResult(value['result'])
+    );
+  }
+  if (status === 'remediation-plan') {
+    const plan = value['plan'];
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'plan']) &&
+      isNonEmptyString(value['package']) &&
+      isTransitiveRemediationPlanSummary(plan) &&
+      plan.rootPackage === value['package']
+    );
+  }
+  if (status === 'remediation-applying') {
+    const cancelRequested = value['cancelRequested'];
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'analysisId', 'phase', 'cancelRequested']) &&
+      isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['analysisId']) &&
+      typeof value['phase'] === 'string' &&
+      TRANSITIVE_REMEDIATION_PROGRESS_PHASES.has(value['phase']) &&
+      (cancelRequested === undefined || typeof cancelRequested === 'boolean')
+    );
+  }
+  if (status === 'remediation-stale') {
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'analysisId', 'message']) &&
+      isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['analysisId']) &&
+      isNonEmptyString(value['message'])
+    );
+  }
+  if (status === 'remediation-apply-result') {
+    return (
+      hasOnlyKeys(value, ['status', 'package', 'analysisId', 'result']) &&
+      isNonEmptyString(value['package']) &&
+      isNonEmptyString(value['analysisId']) &&
+      isTransitiveRemediationApplyResult(value['result'])
     );
   }
   if (status === 'remediation-error') {

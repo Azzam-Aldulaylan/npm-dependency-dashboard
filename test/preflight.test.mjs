@@ -67,6 +67,20 @@ function proposal(requested, extras = []) {
 
 const defaultPolicy = { strictPeerDeps: false, legacyPeerDeps: false };
 
+test('resolver time limit is explicit unknown evidence, never a conflict or successful check', async () => {
+  const result = await analyzeCompatibility({
+    graph: graph([['node_modules/react', node('react', '18.2.0', { direct: true })]]),
+    proposal: proposal(change('react', '18.2.0', '18.3.0')),
+    metadataProvider: metadataProvider(), policy: defaultPolicy,
+    resolverVerifier: { verify: async () => { throw new DOMException('sensitive detail', 'TimeoutError'); } },
+  });
+  assert.equal(result.status, 'unknown');
+  assert.equal(result.resolverVerification.status, 'unknown');
+  assert.equal(result.resolverVerification.code, 'RESOLVER_TIMEOUT');
+  assert.match(result.resolverVerification.explanation, /time limit.*retry/);
+  assert.doesNotMatch(result.resolverVerification.explanation, /sensitive detail/);
+});
+
 test('a proposed version satisfying an existing peer range is compatible', async () => {
   const reactId = 'node_modules/react';
   const libraryId = 'node_modules/library';

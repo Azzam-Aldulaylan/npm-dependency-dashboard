@@ -72,7 +72,7 @@ For npm and pnpm workspaces, each member resolves the nearest supported ancestor
 - Independently of the TTL setting, a background timer checks every 30 minutes (while the panel is open) whether a refresh is due, and runs one if so — this is a fixed interval, separate from the (also currently 30-minute-default) TTL setting.
 - Manual refresh (command or button) always bypasses the cache and re-reads from disk.
 - The extension watches the project's `package.json` and supported lockfile topology (`package-lock.json`, `npm-shrinkwrap.json`, and `pnpm-lock.yaml`) and reloads automatically when they change outside the dashboard.
-- Cache data is stored using VS Code's own extension storage: project scan results are workspace-scoped; registry version-lookup ETags (public package metadata only, never project-specific) are shared across workspaces. Nothing is written anywhere outside VS Code's extension storage.
+- Persisted dashboard caches use VS Code's extension storage: project scan results are workspace-scoped; registry metadata and advisory identifier caches are shared across workspaces and keyed by their source URLs. Analysis can also create local temporary directories, and package-manager subprocesses can update their own caches. Confirmed dependency changes modify project files and the installed dependency tree; extension storage is not the only location these workflows write to.
 
 ## Settings
 
@@ -85,15 +85,18 @@ For npm and pnpm workspaces, each member resolves the nearest supported ancestor
 
 ## Privacy and network access
 
-**No telemetry, analytics, or tracking of any kind.** The extension talks only to npm registry infrastructure, on your behalf, for the sole purpose of showing you dependency and vulnerability data:
+**No telemetry, analytics, or tracking is collected by the extension.** Dependency checks do make network requests to npm, GitHub, and configured package registries. Those services receive normal request information, such as your IP address, plus the following dependency information:
 
-- `GET https://registry.npmjs.org/<package>/latest` and, when needed, the full package metadata — or whichever registry your resolved `.npmrc` points to instead, if `dependencyDashboard.registry.useProjectNpmrc` is enabled.
-- `POST https://registry.npmjs.org/-/npm/v1/security/advisories/bulk` for vulnerability data — always npm's own advisory host, regardless of which registry is otherwise configured, since private registry mirrors generally don't implement this endpoint.
-- A locally spawned `npm audit --json --package-lock-only --registry=https://registry.npmjs.org/` for optional vulnerability-fix enrichment — also always pinned to npm's own registry host, not your configured one.
-- An isolated npm/pnpm resolution check when an upgrade is considered, with scripts disabled and a temporary directory as its working project.
-- A locally spawned `npm install` or `pnpm add` after confirmation, which talks to the registry resolved by the package manager's own configuration.
+- **Version and package metadata:** package names and, for exact-version lookups, requested versions are sent to the effective registry (public npm by default). Registry selection uses supported user-level `.npmrc` settings and, when enabled, trusted project `.npmrc` settings, including scoped registries.
+- **Vulnerability detection:** `POST https://registry.npmjs.org/-/npm/v1/security/advisories/bulk` receives a map of resolved package names to installed versions from the dependency graph, including transitive dependencies. This endpoint is always public npm, even when metadata comes from a private registry. There is currently no private-package-name exclusion, so private names with resolved versions can also be submitted. Source files and dependency paths are not part of this bulk request.
+- **CVE/GHSA enrichment:** GitHub's public advisory API at `https://api.github.com/advisories` receives batches of affected package names to look up identifier aliases. Returned identifiers are attached only when the GHSA matches a finding already reported by npm. The exact-advisory lookup helper uses a GHSA ID instead. These requests do not send project source, installed versions, or dependency paths. Missing or rate-limited enrichment does not remove the original npm finding.
+- **Optional fix information:** a local `npm audit --json --package-lock-only --registry=https://registry.npmjs.org/` process submits dependency information from the lockfile to npm's advisory infrastructure. The installed npm client controls its audit request format and fallback behavior.
+- **Resolution and package inspection:** review workflows run isolated npm/pnpm resolution checks with scripts disabled, and import verification may download an exact target package with `npm pack --ignore-scripts` to inspect its published file inventory. These operations request package names, versions, metadata, and package archives from the relevant registry/download endpoints. Temporary working projects are local; the extension does not upload application source files for analysis.
+- **Confirmed changes:** package installation, removal, and lockfile updates use the local package manager and its effective configuration. Lifecycle scripts are disabled by default; if you enable them or explicitly select verification scripts, that code can perform its own network access outside the extension's dependency-check requests.
 
-The dashboard's webview has no network access of its own (`default-src 'none'`, no inline scripts); all network activity happens in the extension host, never in the webview. All version/vulnerability data returned is public npm registry metadata about packages you already declared a dependency on — nothing about you or your source code is ever sent anywhere.
+The dashboard webview does not fetch remote data directly; dependency requests run in the extension host or its package-manager subprocesses. Clicking a CVE opens its NVD page, and clicking a GHSA opens its GitHub advisory in your external browser. NVD is a reference link, not an additional vulnerability scanner.
+
+Source and configuration analysis stays local. Package names and versions are still project information, so check your organization's policy before scanning private projects; configuring a private registry does not redirect the public npm advisory check or GitHub enrichment.
 
 ## Development
 

@@ -41,7 +41,8 @@ test('simple and coordinated plans use distinct truthful presentation', () => {
   assert.match(cards, /plannerAddedUpgradeChanges\(requestedChanges, smartPlan\.changes\)/);
   assert.match(cards, /finding\.explanation/);
   assert.match(cards, /Coordinated plan not confirmed/);
-  assert.match(review, /A coordinated resolution could not be confirmed by this analysis/);
+  assert.match(review, /<UpgradeRecommendationCard/);
+  assert.match(read('src/host/upgradeReviewDecision.ts'), /A coordinated resolution could not be confirmed by this analysis/);
   assert.doesNotMatch(review, /No safe path is currently available/);
 });
 
@@ -54,10 +55,12 @@ test('hard analysis expiry is visible and disables both embedded action surfaces
 test('compatibility summary is separated from checks and unsupported checks stay honest', () => {
   assert.match(cards, /upgrade-compatibility__summary/);
   assert.match(styles, /\.upgrade-tab \.upgrade-compatibility__summary \{\s*margin-bottom: 0\.8rem;/);
-  assert.match(cards, /label="Engine requirements" value=\{runtimeValue\}/);
+  assert.match(cards, /label="Node requirements" value=\{runtimeValue\}/);
   assert.match(cards, /runtimeStatus === 'partial'/);
-  assert.match(cards, /label="Project compatibility" value=\{projectValue\}/);
-  assert.match(cards, /label="Deprecated APIs" value="Not checked"/);
+  assert.match(cards, /label="Source & config" value=\{projectValue\}/);
+  assert.doesNotMatch(cards, /label="Deprecated APIs"|No matches in known rules|No rules for this target/);
+  assert.match(cards, /known APIs being phased out/);
+  assert.match(styles, /\.upgrade-tab \.hygiene-strip \{\s*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\);/);
   assert.doesNotMatch(cards, /label="Breaking changes"|No major version change/);
 });
 

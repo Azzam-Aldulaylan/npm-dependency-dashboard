@@ -15,6 +15,7 @@ import type {
   TargetCommandEvidence,
 } from '../../core/projectCompatibility/index.js';
 import { createNextProjectCompatibilityAnalyzer } from '../../core/projectCompatibility/rules/next/index.js';
+import { analyzeDeprecatedApis } from '../../core/projectCompatibility/deprecatedApis.js';
 import type { PackageVersionMetadata } from '../../core/registry/versions.js';
 import type { CollectedProjectCompatibilityEvidence } from './projectEvidenceCollector.js';
 
@@ -31,6 +32,7 @@ export async function analyzeProjectCompatibilityMedium(input: {
   targetCommands?: readonly TargetCommandEvidence[];
   signal?: AbortSignal;
 }): Promise<ProjectCompatibilityAnalysis> {
+  const scanReason = input.project.scanLimitations?.join('|') || 'project-source-scan-truncated';
   const analyzers = [
     input.targetMetadata === undefined
       ? () => unavailable('runtime-compatibility', 'target-metadata-unavailable')
@@ -59,6 +61,10 @@ export async function analyzeProjectCompatibilityMedium(input: {
       scripts: input.project.scripts,
       declaredDependencies: input.project.declaredDependencies,
     }),
+    () => {
+      const result = analyzeDeprecatedApis({ identity: input.identity, references: input.project.imports, sourceComplete: !input.project.truncated });
+      return result.status === 'partial' ? { ...result, unavailableReason: scanReason } : result;
+    },
     input.targetCommands === undefined
       ? () => unavailable('package-script-compatibility', 'package-command-metadata-unavailable')
       : () => analyzePackageScripts({
@@ -70,7 +76,7 @@ export async function analyzeProjectCompatibilityMedium(input: {
       analyzerId: 'project-source-scan',
       status: input.project.truncated ? 'partial' as const : 'complete' as const,
       findings: [],
-      ...(input.project.truncated ? { unavailableReason: 'project-source-scan-truncated' } : {}),
+      ...(input.project.truncated ? { unavailableReason: scanReason } : {}),
     }),
   ];
   return runProjectCompatibilityAnalyzers({
@@ -129,6 +135,17 @@ export async function appendProjectCompatibilityImportAnalysis(input: {
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   });
   const analyzers = limitProjectCompatibilityAnalyzerResults([...input.analysis.analyzers, ...deep.analyzers]);
+  // A clean subset must not masquerade as a complete source check.
+  if (input.project.truncated) {
+    const imports = analyzers.find((entry) => entry.analyzerId === 'import-compatibility');
+    if (imports?.status === 'complete' || imports?.status === 'partial') {
+      imports.status = 'partial';
+      imports.unavailableReason = [...new Set([
+        ...(imports.unavailableReason?.split('|') ?? []),
+        ...(input.project.scanLimitations?.length ? input.project.scanLimitations : ['project-source-scan-truncated']),
+      ])].join('|');
+    }
+  }
   return {
     ...input.analysis,
     analyzers,

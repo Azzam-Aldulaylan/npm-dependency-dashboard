@@ -8,6 +8,16 @@ const compatibility = readFileSync(join(process.cwd(), 'webview/src/components/C
 const security = readFileSync(join(process.cwd(), 'webview/src/components/SecuritySection.tsx'), 'utf8');
 const embeddedReview = readFileSync(join(process.cwd(), 'webview/src/components/UpgradeReviewPanel.tsx'), 'utf8');
 const styles = readFileSync(join(process.cwd(), 'webview/src/styles.css'), 'utf8');
+const app = readFileSync(join(process.cwd(), 'webview/src/App.tsx'), 'utf8');
+
+test('dashboard enrichment cannot erase an open review or clear a structural stale marker', () => {
+  assert.match(app, /upgradeReviewDashboardEffect\(activeUpgradeRef\.current, dashboardDataRef\.current, incoming\)/);
+  const reset = app.slice(app.indexOf("if (reviewEffect === 'reset')"), app.indexOf('activeRemoveRef.current = null', app.indexOf("if (reviewEffect === 'reset')")));
+  assert.match(reset, /setAnalysis\(null\)/);
+  assert.match(reset, /setSelectedManageTarget\(null\)/);
+  assert.match(reset, /else if \(reviewEffect === 'mark-stale'\)\s*\{[\s\S]*setHardStaleAnalysisId\(analysisIdRef.current\)/);
+  assert.doesNotMatch(reset.slice(reset.indexOf('} else')), /setAnalysis\(null\)|setHardStaleAnalysisId\(null\)/);
+});
 
 test('completed Upgrade Review removes the static Files card and gives Security the full result width', () => {
   assert.doesNotMatch(modal, /FilesSection/);

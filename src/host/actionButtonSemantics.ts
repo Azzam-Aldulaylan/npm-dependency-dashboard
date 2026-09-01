@@ -5,6 +5,7 @@
  */
 
 import type { UpgradeAnalysisPresentation } from './webviewProtocol.js';
+import { deriveUpgradeReviewDecision } from './upgradeReviewDecision.js';
 
 export type SemanticButtonVariant = 'primary' | 'caution' | 'danger' | 'secondary' | 'subtle';
 
@@ -16,15 +17,18 @@ export interface UpgradeConfirmationAction {
 
 /** The final action offered after upgrade analysis, including its visual semantics. */
 export function upgradeConfirmationAction(
-  analysis: Pick<UpgradeAnalysisPresentation, 'changes' | 'compatibility' | 'smartPlan' | 'targetVersion'>
+  analysis: Pick<UpgradeAnalysisPresentation, 'changes' | 'compatibility' | 'smartPlan' | 'targetVersion'> &
+    Partial<Pick<UpgradeAnalysisPresentation, 'projectCompatibility' | 'security'>>
 ): UpgradeConfirmationAction | null {
+  const decision = deriveUpgradeReviewDecision(analysis);
   if (analysis.compatibility.status === 'conflict') {
+    const coordinatedCaution = decision.projectState !== 'checked' || analysis.compatibility.completeness !== 'complete';
     return analysis.smartPlan !== null
-      ? { label: 'Use coordinated upgrade', onClick: 'use-smart-plan', variant: 'primary' }
+      ? { label: 'Use coordinated upgrade', onClick: 'use-smart-plan', variant: coordinatedCaution ? 'caution' : 'primary' }
       : null;
   }
 
-  const caution = analysis.compatibility.status === 'warning' || analysis.compatibility.status === 'unknown';
+  const { caution } = decision;
   return {
     label:
       analysis.changes.length > 1

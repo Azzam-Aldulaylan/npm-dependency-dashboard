@@ -17,7 +17,6 @@ import { summaryFilterPredicate, summaryMetrics } from '../../src/host/summaryMe
 import { dependencyRowMatchesSearch } from '../../src/host/vulnerabilityUiState.js';
 import type { SortColumn, TableSortState } from '../../src/host/tableSort.js';
 import { nextColumnSortState, sortRows } from '../../src/host/tableSort.js';
-import type { TransitiveRemediationUiState } from '../../src/host/upgradeAction.js';
 import {
   applyUpgradeResultLocalFacts,
   manageRemovalReplacesUpgradeReview,
@@ -35,6 +34,7 @@ import {
   completedDashboardSnapshotAbandonsUpgradeEnrichment,
   retryUpgradeEnrichment,
   shouldQuarantineUpgradeDerivedData,
+  upgradeReviewDashboardEffect,
 } from '../../src/host/upgradeReviewUiState.js';
 import type { UpgradeEnrichmentUiState } from '../../src/host/upgradeReviewUiState.js';
 import type {
@@ -72,6 +72,8 @@ import type { UpgradeTargetLoadState } from './components/UpgradeTargetSelector.
 import type { UsageRequestState } from './components/UsageReferencesPanel.js';
 import { IconBroom, IconListChecks, IconRefresh } from './icons.js';
 import type { RemovalImpactState } from './removalImpactState.js';
+import { remediationPlanFromState } from './transitiveRemediationState.js';
+import type { TransitiveFixUiState } from './transitiveRemediationState.js';
 import { buildSmartCleanupPlan } from './smartCleanupPlanAdapter.js';
 import {
   createSmartCleanupState,
@@ -257,7 +259,7 @@ export function App(): ReactElement {
   // fact about the dependency itself (PackageRow carries none of this), so
   // it is cleared, like every other optimistic upgrade-adjacent state below,
   // the moment a fresh scan supersedes it.
-  const [remediationByPackage, setRemediationByPackage] = useState<ReadonlyMap<string, TransitiveRemediationUiState>>(
+  const [remediationByPackage, setRemediationByPackage] = useState<ReadonlyMap<string, TransitiveFixUiState>>(
     () => new Map()
   );
   const [remediationError, setRemediationError] = useState<{ package: string; message: string } | null>(null);
@@ -530,6 +532,7 @@ export function App(): ReactElement {
         // requestCancelUpgrade below for why this can still legitimately
         // happen even though the host is also told to drop it.
         if (upgradeAnalysisMessageMatchesRequest(activeRequestIdRef.current, incoming.requestId)) {
+          analysisIdRef.current = incoming.analysis.analysisId;
           setAnalysis(incoming.analysis);
           setAnalyzingPhase(null);
         }
@@ -802,24 +805,78 @@ export function App(): ReactElement {
       if (incoming.status === 'remediation-result') {
         setRemediationByPackage((previous) => {
           const next = new Map(previous);
-          next.set(incoming.package, { phase: 'done', status: incoming.result.status });
+          next.set(incoming.package, { phase: 'legacy-result', status: incoming.result.status });
+          return next;
+        });
+        return;
+      }
+
+      if (incoming.status === 'remediation-plan') {
+        setRemediationError(null);
+        setRemediationByPackage((previous) => {
+          const next = new Map(previous);
+          next.set(incoming.package, { phase: 'plan', plan: incoming.plan, reviewed: false });
+          return next;
+        });
+        return;
+      }
+
+      if (incoming.status === 'remediation-applying') {
+        setRemediationByPackage((previous) => {
+          const prior = previous.get(incoming.package);
+          const plan = remediationPlanFromState(prior);
+          if (plan === null || plan.analysisId !== incoming.analysisId) return previous;
+          const next = new Map(previous);
+          next.set(incoming.package, {
+            phase: 'applying',
+            plan,
+            progress: incoming.phase,
+            cancelRequested: incoming.cancelRequested ?? false,
+          });
+          return next;
+        });
+        return;
+      }
+
+      if (incoming.status === 'remediation-stale') {
+        setRemediationByPackage((previous) => {
+          const prior = previous.get(incoming.package);
+          const plan = remediationPlanFromState(prior);
+          if (plan === null || plan.analysisId !== incoming.analysisId) return previous;
+          const next = new Map(previous);
+          next.set(incoming.package, { phase: 'stale', plan, message: incoming.message });
+          return next;
+        });
+        return;
+      }
+
+      if (incoming.status === 'remediation-apply-result') {
+        setRemediationByPackage((previous) => {
+          const prior = previous.get(incoming.package);
+          const plan = remediationPlanFromState(prior);
+          if (plan === null || plan.analysisId !== incoming.analysisId) return previous;
+          const next = new Map(previous);
+          next.set(incoming.package, { phase: 'result', plan, result: incoming.result });
           return next;
         });
         return;
       }
 
       if (incoming.status === 'remediation-error') {
-        // Reverts to "Analyze remediation" rather than getting stuck showing
-        // "Analyzing…" forever — an ineligible/stale/forged request or a
-        // resolver failure is not a result worth remembering as this row's
-        // remediation state.
         setRemediationByPackage((previous) => {
-          if (!previous.has(incoming.package)) return previous;
           const next = new Map(previous);
-          next.delete(incoming.package);
+          next.set(
+            incoming.package,
+            incoming.error.code === 'NO_REMEDIATION_NEEDED'
+              ? {
+                  phase: 'not-needed',
+                  message: 'The current dependency tree has no transitive vulnerabilities that need a fix.',
+                }
+              : { phase: 'error', message: incoming.error.message }
+          );
           return next;
         });
-        setRemediationError({ package: incoming.package, message: incoming.error.message });
+        setRemediationError(null);
         return;
       }
 
@@ -1045,8 +1102,10 @@ export function App(): ReactElement {
         return;
       }
 
-      // Any other message is a dashboard snapshot that supersedes whatever
-      // optimistic upgrade state was showing.
+      // Any other message is a dashboard snapshot, not necessarily a change
+      // to the review the user is reading. Background enrichment must not
+      // discard its results, target choice, or request correlation.
+      const reviewEffect = upgradeReviewDashboardEffect(activeUpgradeRef.current, dashboardDataRef.current, incoming);
       let nextMessage = incoming;
       if ('data' in incoming) {
         dashboardDataRef.current = incoming.data;
@@ -1107,21 +1166,28 @@ export function App(): ReactElement {
           pendingEnrichmentDashboardMessageRef.current = null;
         }
       }
-      activeUpgradeRef.current = null;
-      activeRequestIdRef.current = null;
-      setActiveUpgrade(null);
-      setActiveTarget(null);
-      setActiveUpgradeChanges([]);
-      setAnalysis(null);
-      setAnalyzingPhase(null);
-      setAnalysisSections(WAITING_UPGRADE_ANALYSIS_SECTIONS);
-      setHardStaleAnalysisId(null);
-      setConfirmBusy(false);
-      setUpgradeError(null);
-      setUpgradeOrigin(null);
-      activeTargetRequestIdRef.current = null;
-      setUpgradeTargetState({ phase: 'idle' });
-      setSelectedManageTarget(null);
+      if (reviewEffect === 'reset') {
+        activeUpgradeRef.current = null;
+        activeRequestIdRef.current = null;
+        analysisIdRef.current = null;
+        setActiveUpgrade(null);
+        setActiveTarget(null);
+        setActiveUpgradeChanges([]);
+        setAnalysis(null);
+        setAnalyzingPhase(null);
+        setAnalysisSections(WAITING_UPGRADE_ANALYSIS_SECTIONS);
+        setHardStaleAnalysisId(null);
+        setConfirmBusy(false);
+        setUpgradeError(null);
+        setUpgradeOrigin(null);
+        activeTargetRequestIdRef.current = null;
+        setUpgradeTargetState({ phase: 'idle' });
+        setSelectedManageTarget(null);
+      } else if (reviewEffect === 'mark-stale') {
+        // Keep the evidence readable; a fresh ready snapshot must not clear
+        // this warning or re-authorize a host-revoked analysis.
+        setHardStaleAnalysisId(analysisIdRef.current);
+      }
       activeRemoveRef.current = null;
       setActiveRemove(null);
       setActiveRemoveChanges([]);
@@ -1133,7 +1199,14 @@ export function App(): ReactElement {
         removeOriginRef.current = null;
         setRemoveOrigin(null);
       }
-      setRemediationByPackage(new Map());
+      // A post-remediation dependency refresh is expected while the task is
+      // applying or immediately after it reaches a verified/restored result.
+      // Preserve those host-issued transaction states so the modal does not
+      // flash back to "Check transitive fixes" before the user can read the
+      // outcome. Read-only plans and old errors are intentionally discarded.
+      setRemediationByPackage((previous) => new Map(
+        [...previous.entries()].filter(([, state]) => state.phase === 'applying' || state.phase === 'result')
+      ));
       setRemediationError(null);
       setBulkActionsOpen(false);
       // `manageRow`/`manageTab` deliberately survive this reset: this branch
@@ -1472,7 +1545,67 @@ export function App(): ReactElement {
   // last-trusted scan.
   const requestAnalyzeRemediation = useCallback((packageName: string) => {
     setRemediationError(null);
+    setRemediationByPackage((previous) => {
+      const next = new Map(previous);
+      next.set(packageName, { phase: 'analyzing' });
+      return next;
+    });
     vscode.postMessage({ type: 'analyze-remediation', package: packageName });
+  }, []);
+
+  const reviewRemediation = useCallback((packageName: string, analysisId: string) => {
+    setRemediationByPackage((previous) => {
+      const current = previous.get(packageName);
+      if (current?.phase !== 'plan' || current.plan.analysisId !== analysisId || current.reviewed) return previous;
+      const next = new Map(previous);
+      next.set(packageName, { ...current, reviewed: true });
+      return next;
+    });
+  }, []);
+
+  const requestApplyRemediation = useCallback((analysisId: string) => {
+    setRemediationByPackage((previous) => {
+      const entry = [...previous.entries()].find(([, state]) => remediationPlanFromState(state)?.analysisId === analysisId);
+      if (entry === undefined) return previous;
+      const [packageName, state] = entry;
+      const plan = remediationPlanFromState(state);
+      if (plan === null || state.phase !== 'plan' || !state.reviewed) return previous;
+      const next = new Map(previous);
+      next.set(packageName, { phase: 'applying', plan, progress: 'preparing', cancelRequested: false });
+      return next;
+    });
+    vscode.postMessage({ type: 'confirm-remediation', analysisId });
+  }, []);
+
+  const requestCancelRemediation = useCallback((analysisId: string) => {
+    setRemediationByPackage((previous) => {
+      const entry = [...previous.entries()].find(([, state]) => remediationPlanFromState(state)?.analysisId === analysisId);
+      if (entry === undefined) return previous;
+      const [packageName, state] = entry;
+      if (state.phase !== 'applying' || state.cancelRequested) return previous;
+      const next = new Map(previous);
+      next.set(packageName, { ...state, cancelRequested: true });
+      return next;
+    });
+    vscode.postMessage({ type: 'cancel-remediation', analysisId });
+  }, []);
+
+  const requestRetryRemediation = useCallback((analysisId: string) => {
+    setRemediationByPackage((previous) => {
+      const entry = [...previous.entries()].find(([, state]) => remediationPlanFromState(state)?.analysisId === analysisId);
+      if (entry === undefined) return previous;
+      const [packageName, state] = entry;
+      const plan = remediationPlanFromState(state);
+      if (plan === null) return previous;
+      const next = new Map(previous);
+      if (state.phase === 'result' && state.result.outcome === 'unverified') {
+        next.set(packageName, { phase: 'applying', plan, progress: 'verifying-security', cancelRequested: false });
+      } else {
+        next.set(packageName, { phase: 'analyzing' });
+      }
+      return next;
+    });
+    vscode.postMessage({ type: 'retry-remediation', analysisId });
   }, []);
 
   const openManage = useCallback((packageName: string) => {
@@ -2051,10 +2184,14 @@ export function App(): ReactElement {
   // task is still writing to; the host rejects both too (see
   // DashboardPanel.handle), this just keeps the buttons from inviting a
   // click that can't do anything anyway.
+  const remediationBusy = [...remediationByPackage.values()].some(
+    (state) => state.phase === 'analyzing' || state.phase === 'applying'
+  );
   const actionsDisabled =
     loading ||
     activeUpgrade !== null ||
     activeRemove !== null ||
+    remediationBusy ||
     cleanupState.phase === 'analyzing';
 
   return (
@@ -2200,7 +2337,12 @@ export function App(): ReactElement {
                 upgradeDisabled={manageUpgradeDisabled}
                 updateResolutionAvailable={!data.availability.unavailableUpdatePackages.includes(row.name)}
                 advisoriesAvailable={data.availability.advisories === 'complete'}
-                blockClose={removalImpact.phase === 'analyzing' || confirmBusy || removeBusy}
+                blockClose={
+                  removalImpact.phase === 'analyzing' ||
+                  confirmBusy ||
+                  removeBusy ||
+                  remediationByPackage.get(row.name)?.phase === 'applying'
+                }
                 upgradeResult={upgradeResult?.package === row.name ? upgradeResult : null}
                 upgradeEnrichment={upgradeResult?.package === row.name ? upgradeEnrichment : null}
                 upgrade={{
@@ -2241,6 +2383,10 @@ export function App(): ReactElement {
                   onConfigureVerification: requestConfigureVerification,
                 }}
                 onAnalyzeRemediation={requestAnalyzeRemediation}
+                onReviewRemediation={reviewRemediation}
+                onApplyRemediation={requestApplyRemediation}
+                onCancelRemediation={requestCancelRemediation}
+                onRetryRemediation={requestRetryRemediation}
                 onOpenAdvisory={requestOpenAdvisory}
                 onReanalyzeUsage={requestReanalyzeUsage}
                 onOpenUsageReference={requestOpenUsageReference}

@@ -41,7 +41,7 @@ export function securityOutcomeDisplay(status: SecurityOutcomeStatus): OutcomeDi
 }
 
 const UPGRADE_SAFETY_LABELS: Record<CompatibilityStatus, string> = {
-  compatible: 'Upgrade is safe',
+  compatible: 'No dependency conflicts found',
   warning: 'Upgrade has warnings',
   conflict: 'Upgrade is blocked',
   unknown: 'Upgrade safety is unknown',

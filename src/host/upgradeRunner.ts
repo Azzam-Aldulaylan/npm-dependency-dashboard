@@ -21,6 +21,7 @@ import {
   buildCoordinatedInstallArgs,
   buildDedupeArgs,
   buildInstallArgs,
+  buildLockfileReconciliationArgs,
   buildManifestReconciliationArgs,
 } from '../core/upgrade/plan.js';
 import { createNodeNpmResolverDeps, resolveNpmInvocation } from './npmResolver.js';
@@ -67,11 +68,29 @@ export type PreparedManifestReconciliation =
   | { ok: false; code: string; message: string }
   | { ok: true; execute(): Promise<UpgradeRunOutcome> };
 
+/**
+ * Host-owned inputs for synchronizing node_modules to an exact lockfile that
+ * has already been generated and reviewed in an isolated project. The
+ * package name and target version deliberately do not appear here: those are
+ * represented solely by the staged lockfile bytes.
+ */
+export interface UpgradeLockfileReconciliationParams {
+  cwd: string;
+  ignoreScripts: boolean;
+  packageManager: 'npm' | 'pnpm';
+}
+
+export type PreparedLockfileReconciliation =
+  | { ok: false; code: string; message: string }
+  | { ok: true; execute(): Promise<UpgradeRunOutcome> };
+
 export interface UpgradeVerificationParams {
   packageName: string;
   cwd: string;
   packageManager: 'npm' | 'pnpm';
   scripts: readonly VerificationScript[];
+  /** Observed only between scripts; an in-flight task is always allowed to reach a stable boundary. */
+  signal?: AbortSignal;
 }
 
 const DISPOSED_OUTCOME: UpgradeRunOutcome = {
@@ -250,6 +269,68 @@ export class UpgradeExecutionSession {
     };
   }
 
+  /**
+   * Authorize and resolve an exact-lockfile reconciliation before the host
+   * stages that lockfile through the transaction's compare-and-swap boundary.
+   * The prepared execution is one-shot and re-checks Workspace Trust at the
+   * last possible moment, matching manifest reconciliation's safety model.
+   */
+  prepareLockfileReconciliation(
+    params: UpgradeLockfileReconciliationParams
+  ): PreparedLockfileReconciliation {
+    if (!vscode.workspace.isTrusted) {
+      return {
+        ok: false,
+        code: 'UNTRUSTED_WORKSPACE',
+        message: 'Upgrades are disabled in untrusted workspaces.',
+      };
+    }
+
+    const { cwd, packageManager, ignoreScripts } = params;
+    const invocation = this.resolveInvocation(cwd, packageManager);
+    if (invocation === null) {
+      void vscode.window.showErrorMessage(
+        `Dependency Dashboard could not locate a working ${packageManager} installation.`
+      );
+      return {
+        ok: false,
+        code: 'PACKAGE_MANAGER_NOT_FOUND',
+        message: `A working ${packageManager} installation could not be located.`,
+      };
+    }
+
+    const args = buildLockfileReconciliationArgs(packageManager, { ignoreScripts });
+    let executed = false;
+    return {
+      ok: true,
+      execute: async (): Promise<UpgradeRunOutcome> => {
+        if (executed) {
+          return {
+            ok: false,
+            code: 'RECONCILIATION_ALREADY_EXECUTED',
+            message: 'The prepared lockfile reconciliation has already been executed.',
+          };
+        }
+        executed = true;
+        if (!vscode.workspace.isTrusted) {
+          return {
+            ok: false,
+            code: 'UNTRUSTED_WORKSPACE',
+            message: 'Upgrades are disabled in untrusted workspaces.',
+          };
+        }
+        return await this.executeTask(
+          invocation,
+          cwd,
+          'transitive-remediation',
+          args,
+          'Dependency Dashboard: Apply transitive security fix',
+          `${packageManager} ${args[0]}`
+        );
+      },
+    };
+  }
+
   /** Runs only host-selected package.json script names, one visible task at a time. */
   async verify(params: UpgradeVerificationParams): Promise<VerificationExecutionResult> {
     if (!vscode.workspace.isTrusted) {
@@ -261,7 +342,9 @@ export class UpgradeExecutionSession {
     }
 
     const checks: Array<{ id: string; status: 'passed' | 'failed'; message?: string }> = [];
+    const cancelled = (): boolean => params.signal?.aborted === true;
     for (const script of params.scripts) {
+      if (cancelled()) return { status: 'cancelled', checks };
       const outcome = await this.executeTask(
         invocation,
         params.cwd,
@@ -270,6 +353,7 @@ export class UpgradeExecutionSession {
         `Dependency Dashboard: Verify ${script.scriptName}`,
         `${params.packageManager} run ${script.scriptName}`
       );
+      if (cancelled()) return { status: 'cancelled', checks };
       if (!outcome.ok) {
         checks.push({ id: script.id, status: 'failed', message: outcome.message });
         return { status: 'failed', checks, message: `Verification script ${script.scriptName} failed.` };

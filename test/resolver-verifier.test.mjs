@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   buildDedupeMaterializationArgs,
   buildResolverArgs,
+  buildTransitiveRemediationMaterializationArgs,
   IsolatedResolverVerifier,
 } from '../out/host/resolverVerifier.js';
 
@@ -262,4 +263,80 @@ test('materializeResolvedGraph degrades to ok:false when the resolver exits clea
   };
   const result = await verifier.materializeResolvedGraph(emptyProposal);
   assert.deepEqual(result, { ok: false });
+});
+
+test('targeted transitive remediation starts from the active lockfile and returns exact proposed bytes', async () => {
+  const manifestText = JSON.stringify({ dependencies: { 'sockjs-client': '1.6.1' } });
+  const currentLockfile = JSON.stringify({
+    lockfileVersion: 3,
+    packages: {
+      '': { dependencies: { 'sockjs-client': '1.6.1' } },
+      'node_modules/sockjs-client': { version: '1.6.1', dependencies: { 'faye-websocket': '^0.11.3' } },
+      'node_modules/faye-websocket': { version: '0.11.3', dependencies: { 'websocket-driver': '>=0.5.1' } },
+      'node_modules/websocket-driver': { version: '0.7.3' },
+    },
+  });
+  const proposedLockfile = JSON.stringify({
+    lockfileVersion: 3,
+    packages: {
+      '': { dependencies: { 'sockjs-client': '1.6.1' } },
+      'node_modules/sockjs-client': { version: '1.6.1', dependencies: { 'faye-websocket': '^0.11.3' } },
+      'node_modules/faye-websocket': { version: '0.11.3', dependencies: { 'websocket-driver': '>=0.5.1' } },
+      'node_modules/websocket-driver': { version: '0.7.5' },
+    },
+  });
+  let observedArgs;
+  const verifier = new IsolatedResolverVerifier({
+    packageManager: 'npm', packageManagerVersion: '11.0.0',
+    invocation: { executable: '/trusted/node', prefixArgs: ['/trusted/npm-cli.js'] },
+    manifestText,
+    lockfile: { name: 'package-lock.json', text: currentLockfile },
+    registry: 'https://registry.npmjs.org', policy: { strictPeerDeps: true, legacyPeerDeps: false },
+    runner: {
+      async run(_invocation, args, cwd) {
+        const { writeFile } = await import('node:fs/promises');
+        observedArgs = args;
+        await writeFile(`${cwd}/package-lock.json`, proposedLockfile);
+        return { exitCode: 0, stdout: '{}', stderr: '' };
+      },
+    },
+  });
+
+  const result = await verifier.materializeTransitiveRemediation(['websocket-driver']);
+  assert.equal(result.ok, true);
+  assert.equal(result.lockfileText, proposedLockfile);
+  assert.equal(result.beforeGraph.nodes.get('node_modules/websocket-driver').version, '0.7.3');
+  assert.equal(result.graph.nodes.get('node_modules/websocket-driver').version, '0.7.5');
+  assert.deepEqual(observedArgs, buildTransitiveRemediationMaterializationArgs(
+    'npm',
+    ['websocket-driver'],
+    'https://registry.npmjs.org',
+    { strictPeerDeps: true, legacyPeerDeps: false }
+  ));
+});
+
+test('targeted transitive remediation refuses a package-manager manifest mutation', async () => {
+  const manifestText = JSON.stringify({ dependencies: { 'sockjs-client': '1.6.1' } });
+  const lockfileText = JSON.stringify({
+    lockfileVersion: 3,
+    packages: { '': { dependencies: { 'sockjs-client': '1.6.1' } }, 'node_modules/sockjs-client': { version: '1.6.1' } },
+  });
+  const verifier = new IsolatedResolverVerifier({
+    packageManager: 'npm', packageManagerVersion: '11.0.0',
+    invocation: { executable: '/trusted/node', prefixArgs: ['/trusted/npm-cli.js'] },
+    manifestText,
+    lockfile: { name: 'package-lock.json', text: lockfileText },
+    registry: 'https://registry.npmjs.org', policy: { strictPeerDeps: false, legacyPeerDeps: false },
+    runner: {
+      async run(_invocation, _args, cwd) {
+        const { writeFile } = await import('node:fs/promises');
+        await writeFile(`${cwd}/package.json`, JSON.stringify({ dependencies: { 'sockjs-client': '1.6.2' } }));
+        return { exitCode: 0, stdout: '{}', stderr: '' };
+      },
+    },
+  });
+
+  const result = await verifier.materializeTransitiveRemediation(['websocket-driver']);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /unexpectedly changed package\.json/);
 });

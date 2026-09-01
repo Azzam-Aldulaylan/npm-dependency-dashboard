@@ -1,9 +1,38 @@
 import type {
+  DashboardData,
+  HostToWebviewMessage,
   UpgradeAnalysisChange,
   UpgradeAnalysisSmartPlanChange,
   UpgradeResultPresentation,
 } from './webviewProtocol.js';
 import { isUpgradeAnalysisSoftStale } from './upgradeFreshness.js';
+
+/** Dashboard enrichment is not a review lifecycle event. Preserve the reader's
+ * results for the same project. A revalidating dashboard is not proof that
+ * analysis inputs changed. Host content checks and expiry still own execution. */
+export function upgradeReviewDashboardEffect(
+  activePackage: string | null,
+  previous: DashboardData | null,
+  incoming: HostToWebviewMessage
+): 'reset' | 'preserve' | 'mark-stale' {
+  if (activePackage === null || previous === null || !('data' in incoming)) return 'reset';
+  const next = incoming.data;
+  if (
+    previous.project.label !== next.project.label ||
+    previous.project.manifestPath !== next.project.manifestPath ||
+    !next.rows.some((row) => row.name === activePackage)
+  ) return 'reset';
+  // Ignore revalidation notices with identical data and metadata/severity/
+  // generatedAt changes, never local versions
+  // or declarations (including other roots in a coordinated upgrade).
+  const previousRows = new Map(previous.rows.map((row) => [row.name, row]));
+  const declarationsChanged = next.rows.length !== previous.rows.length || next.rows.some((row) => {
+    const prior = previousRows.get(row.name);
+    return prior === undefined || prior.current !== row.current || prior.range !== row.range ||
+      prior.dev !== row.dev || prior.optional !== row.optional;
+  });
+  return declarationsChanged ? 'mark-stale' : 'preserve';
+}
 
 /**
  * Presentation-only lifecycle for the one targeted enrichment started by an

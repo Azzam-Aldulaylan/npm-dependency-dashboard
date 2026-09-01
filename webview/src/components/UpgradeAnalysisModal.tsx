@@ -3,7 +3,7 @@ import type { ReactElement } from 'react';
 
 import { semanticButtonClassName, upgradeConfirmationAction } from '../../../src/host/actionButtonSemantics.js';
 import type { UpgradeAnalysisPresentation } from '../../../src/host/webviewProtocol.js';
-import { compatibilityOutcomeDisplay } from '../../../src/host/outcomeCopy.js';
+import { deriveUpgradeReviewDecision } from '../../../src/host/upgradeReviewDecision.js';
 import { hasPlannerAddedCoordination, upgradeAnalysisFreshness } from '../../../src/host/upgradeReviewUiState.js';
 import { IconRefresh, IconX } from '../icons.js';
 import { CompatibilitySection } from './CompatibilitySection.js';
@@ -65,7 +65,10 @@ function UpgradeAnalysisBodyContent({
   onConfigureVerification: () => void;
   pendingChanges?: readonly { packageName: string; targetVersion: string }[] | undefined;
 }): ReactElement {
-  const overall = analysis !== null ? compatibilityOutcomeDisplay(analysis.compatibility.status) : null;
+  const decision = analysis === null ? null : deriveUpgradeReviewDecision(
+    analysis,
+    analysis.smartPlan !== null && hasPlannerAddedCoordination(analysis.changes, analysis.smartPlan.changes)
+  );
   const securityNeedsAttention = analysis?.security?.status === 'remains';
   const displayedChanges = analysis?.changes ?? pendingChanges ?? [{ packageName, targetVersion }];
 
@@ -82,11 +85,11 @@ function UpgradeAnalysisBodyContent({
 
   return (
     <>
-      {overall !== null ? (
+      {decision !== null ? (
         <OutcomeStatus
-          label={overall.label}
-          className={overall.className}
-          detail={overallStatusDetail(analysis)}
+          label={decision.headline.label}
+          className={decision.headline.className}
+          detail={decision.recommendation}
           size="large"
         />
       ) : null}

@@ -13,7 +13,11 @@ function analysis(status, overrides = {}) {
   return {
     targetVersion: '2.0.0',
     changes: [{ packageName: 'pkg' }],
-    compatibility: { status },
+    compatibility: { status, completeness: 'complete', findings: [] },
+    projectCompatibility: {
+      findings: [],
+      analyzers: ['runtime-compatibility', 'import-compatibility'].map(analyzerId => ({ analyzerId, status: 'complete', findings: [] })),
+    },
     smartPlan: null,
     ...overrides,
   };
@@ -33,6 +37,21 @@ test('warning and unknown upgrades use the same cautious action vocabulary', () 
       label: 'Upgrade anyway',
       onClick: 'confirm',
       variant: 'caution',
+    });
+  }
+});
+
+test('project findings, partial checks and legacy missing evidence require a caution action', () => {
+  for (const projectCompatibility of [
+    undefined,
+    { findings: [], analyzers: [] },
+    { findings: [{ confidence: 'confirmed' }], analyzers: [] },
+    { findings: [{ confidence: 'likely' }], analyzers: [] },
+    { findings: [{ confidence: 'review' }], analyzers: [] },
+    { findings: [], analyzers: [{ analyzerId: 'import-compatibility', status: 'partial', findings: [] }] },
+  ]) {
+    assert.deepEqual(upgradeConfirmationAction(analysis('compatible', { projectCompatibility })), {
+      label: 'Upgrade anyway', onClick: 'confirm', variant: 'caution',
     });
   }
 });

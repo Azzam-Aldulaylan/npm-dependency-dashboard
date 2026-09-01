@@ -1,4 +1,4 @@
-import type { ReactElement } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 
 import type { PackageRow } from '../../../src/core/types.js';
 import type {
@@ -10,6 +10,7 @@ import type {
 } from '../../../src/host/webviewProtocol.js';
 import { compatibilityOutcomeDisplay, securityOutcomeDisplay } from '../../../src/host/outcomeCopy.js';
 import { summarizeProjectCompatibility } from '../../../src/host/projectCompatibilityUiState.js';
+import { sortAdvisoriesBySeverity } from '../../../src/host/severityDisplay.js';
 import { vulnerabilityIdentifiers } from '../../../src/host/vulnerabilityUiState.js';
 import {
   plannerAddedUpgradeChanges,
@@ -20,6 +21,7 @@ import { DirectionalButton } from './DirectionalButton.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { overallStatusDetail } from './UpgradeAnalysisModal.js';
 import { SeverityBadge } from './SeverityBadge.js';
+import { InfoTooltip } from './Tooltip.js';
 import { patchedVersionText, VulnerabilityIdentifierLinks } from './VulnerabilityCard.js';
 
 /**
@@ -34,15 +36,25 @@ import { patchedVersionText, VulnerabilityIdentifierLinks } from './Vulnerabilit
 
 type CompatCheckTone = 'ok' | 'warn' | 'unknown';
 
-function CompatCheckItem({ tone, label, value }: { tone: CompatCheckTone; label: string; value: string }): ReactElement {
+function CompatCheckItem({ tone, label, value, detail, help }: {
+  tone: CompatCheckTone;
+  label: string;
+  value: string;
+  detail?: string | undefined;
+  help: ReactNode;
+}): ReactElement {
   const icon = tone === 'ok' ? <IconCheck /> : tone === 'warn' ? <IconAlertTriangle /> : <IconHelpCircle />;
   return (
-    <div className={`hygiene-strip__item${tone === 'warn' ? ' hygiene-strip__item--warn' : tone === 'unknown' ? ' hygiene-strip__item--unknown' : ''}`}>
-      <span className="hygiene-strip__icon" aria-hidden="true">
-        {icon}
-      </span>
-      <span className="hygiene-strip__label">{label}</span>
-      <span className="hygiene-strip__value">{value}</span>
+    <div className={`hygiene-strip__item hygiene-strip__item--compat${tone === 'warn' ? ' hygiene-strip__item--warn' : tone === 'unknown' ? ' hygiene-strip__item--unknown' : ''}`}>
+      <div className="hygiene-strip__heading">
+        <span className="hygiene-strip__label">{label}</span>
+        <InfoTooltip label={`About ${label.toLowerCase()}`} content={help} />
+      </div>
+      <div className="hygiene-strip__result">
+        <span className="hygiene-strip__icon" aria-hidden="true">{icon}</span>
+        <span className="hygiene-strip__value">{value}</span>
+      </div>
+      {detail === undefined ? null : <span className="hygiene-strip__detail">{detail}</span>}
     </div>
   );
 }
@@ -59,7 +71,7 @@ const PEER_FINDING_KINDS: ReadonlySet<CompatibilityFindingKind> = new Set([
  * The compact compatibility grid. Peer results remain dependency-tree facts;
  * runtime and project compatibility come only from the new host analyzers.
  * A major version alone is deliberately not rendered as a breaking-change
- * claim. Deprecated API analysis is still not implemented and stays honest.
+ * claim. Deprecated API coverage is explicitly limited to known rules.
  */
 export function CompatibilityCheckCard({
   compatibility,
@@ -76,7 +88,7 @@ export function CompatibilityCheckCard({
   // the underlying compatibility check (see CompatibilitySection.tsx's own
   // fallback copy) can't distinguish "genuinely has none" from "nothing was
   // available to check", so both collapse to the same honest "Not checked"
-  // this card already uses for the two checks with no detector at all.
+  // rather than claiming the project has no peer requirements.
   const peerTone: CompatCheckTone = peerFindings.length === 0 ? 'unknown' : peerProblems.length > 0 ? 'warn' : 'ok';
   const peerValue =
     peerFindings.length === 0
@@ -87,7 +99,17 @@ export function CompatibilityCheckCard({
 
   const projectSummary = projectCompatibility === undefined ? null : summarizeProjectCompatibility(projectCompatibility);
   const hasProjectAnalyzers = projectCompatibility !== undefined && projectCompatibility.analyzers.length > 0;
+  const hasImportAnalysis = projectCompatibility?.analyzers.some((entry) => entry.analyzerId === 'import-compatibility') === true;
   const runtimeFindings = projectCompatibility?.findings.filter((finding) => finding.category === 'runtime') ?? [];
+  // Deprecation rules are source checks, not a separate product capability.
+  // Count their findings once here. Unsupported rule coverage is explained in
+  // the evidence details; actual failures/cancellation still mark this partial.
+  const sourceFindings = projectCompatibility?.findings.filter((finding) => finding.category !== 'runtime') ?? [];
+  const sourceIncomplete = projectSummary?.incompleteAnalyzers.filter((entry) =>
+    entry.analyzerId !== 'runtime-compatibility' &&
+    !(entry.analyzerId === 'deprecated-api-compatibility' && entry.reason === 'deprecated-api-rules-unavailable')
+  ) ?? [];
+  const runtimeReason = projectCompatibility?.analyzers.find((entry) => entry.analyzerId === 'runtime-compatibility')?.unavailableReason;
   const runtimeTone: CompatCheckTone =
     projectSummary === null || projectSummary.runtimeStatus === 'missing' || projectSummary.runtimeStatus === 'unavailable' || projectSummary.runtimeStatus === 'cancelled'
       ? 'unknown'
@@ -104,29 +126,40 @@ export function CompatibilityCheckCard({
         : runtimeFindings.length > 0
           ? `${runtimeFindings.length} issue${runtimeFindings.length === 1 ? '' : 's'}`
           : projectSummary.runtimeStatus === 'partial'
-            ? 'Partially checked'
+            ? runtimeReason === 'runtime-node-version-unknown' ? 'Declared range checked' : 'Partially checked'
             : 'No conflicts found';
   const projectTone: CompatCheckTone =
-    projectSummary === null || !hasProjectAnalyzers || projectSummary.incompleteAnalyzers.length > 0
-      ? projectSummary !== null && projectSummary.total > 0 ? 'warn' : 'unknown'
-      : projectSummary.total > 0
+    projectSummary === null || !hasProjectAnalyzers || !hasImportAnalysis || sourceIncomplete.length > 0
+      ? sourceFindings.length > 0 ? 'warn' : 'unknown'
+      : sourceFindings.length > 0
         ? 'warn'
         : 'ok';
   const projectValue =
     projectSummary === null || !hasProjectAnalyzers
       ? 'Not checked'
-      : projectSummary.total > 0
-        ? `${projectSummary.total} finding${projectSummary.total === 1 ? '' : 's'}`
-        : projectSummary.incompleteAnalyzers.length > 0
-          ? 'Checks incomplete'
-          : 'No issues found';
+      : sourceFindings.length > 0
+        ? `${sourceFindings.length} finding${sourceFindings.length === 1 ? '' : 's'}`
+        : !hasImportAnalysis
+          ? 'Checking import paths'
+          : sourceIncomplete.length > 0
+            ? 'Checks incomplete'
+            : 'No issues found';
 
   return (
     <section className="analysis-card" aria-labelledby="upgrade-compat-heading">
-      <h3 className="analysis-card__title" id="upgrade-compat-heading">
-        <IconRoute className="analysis-card__title-icon" />
-        Compatibility check
-      </h3>
+      <div className="usage-card__head">
+        <h3 className="analysis-card__title" id="upgrade-compat-heading">
+          <IconRoute className="analysis-card__title-icon" />
+          Compatibility check
+        </h3>
+        {projectCompatibility === undefined ? null : (
+          <DirectionalButton direction="forward" className="usage-show-all" onClick={() => {
+            const heading = document.getElementById('project-compat-heading');
+            heading?.scrollIntoView({ block: 'start' });
+            heading?.focus({ preventScroll: true });
+          }}>View check details</DirectionalButton>
+        )}
+      </div>
       {summary !== undefined ? (
         <p className={`usage-status upgrade-compatibility__summary${summaryTone === 'compatible' ? ' usage-status--ok' : summaryTone === 'conflict' ? ' usage-status--error' : ''}`}>
           {summaryTone === 'compatible' ? (
@@ -140,10 +173,28 @@ export function CompatibilityCheckCard({
         </p>
       ) : null}
       <div className="hygiene-strip">
-        <CompatCheckItem tone={peerTone} label="Peer dependencies" value={peerValue} />
-        <CompatCheckItem tone={runtimeTone} label="Engine requirements" value={runtimeValue} />
-        <CompatCheckItem tone={projectTone} label="Project compatibility" value={projectValue} />
-        <CompatCheckItem tone="unknown" label="Deprecated APIs" value="Not checked" />
+        <CompatCheckItem tone={peerTone} label="Peer dependencies" value={peerValue} help={(
+          <>
+            <p>Checks whether companion packages required by this version, such as React, are installed at supported versions.</p>
+            <p>A conflict means a companion package is missing or its version does not fit. This does not test your application.</p>
+          </>
+        )} />
+        <CompatCheckItem tone={runtimeTone} label="Node requirements" value={runtimeValue}
+          help={(
+            <>
+              <p>Compares this package’s required Node.js versions with the range declared in your project’s <code>package.json</code>.</p>
+              <p>The Node.js version actually used to run or deploy your app may still need verification. VS Code’s own Node version does not prove it.</p>
+            </>
+          )}
+          detail={runtimeReason?.includes('runtime-node-version-unknown') ? 'Active runtime not verified' : undefined} />
+        <CompatCheckItem tone={projectTone} label="Source & config" value={projectValue}
+          help={(
+            <>
+              <p>Checks how your project uses this package: import paths, package scripts, framework settings, related tooling, and known APIs being phased out.</p>
+              <p>Looks for changes needed for the selected upgrade. These are limited static checks, not a build or test run. See check details for findings and coverage limits.</p>
+            </>
+          )}
+          detail={sourceFindings.length === 0 ? undefined : !hasImportAnalysis ? 'Import check pending' : sourceIncomplete.length > 0 ? 'Some checks incomplete' : undefined} />
       </div>
     </section>
   );
@@ -275,22 +326,9 @@ export function SecurityOutcomeCard({
   const resolvedCount = security.resolvedAdvisories.length;
   const remainingCount = security.remaining.filter((entry) => entry.status === 'remains').length;
   const unknownCount = security.remaining.filter((entry) => entry.status === 'unknown').length;
-  const remainingGroups = [
-    {
-      status: 'remains' as const,
-      label: 'Confirmed to remain',
-      description: 'The proposed dependency tree still resolves to an affected version.',
-      entries: security.remaining.filter((entry) => entry.status === 'remains'),
-    },
-    {
-      status: 'unknown' as const,
-      label: 'Undetermined',
-      description: 'The available resolver evidence could not confirm whether this advisory is fixed.',
-      entries: security.remaining.filter((entry) => entry.status === 'unknown'),
-    },
-  ].filter((group) => group.entries.length > 0);
+  const remainingEntries = sortAdvisoriesBySeverity(security.remaining);
   const after = securityOutcomeDisplay(security.status);
-  const contexts = security.contexts ?? [];
+  const contexts = sortAdvisoriesBySeverity(security.contexts ?? []);
   const subtitle =
     security.status === 'resolved'
       ? 'This upgrade will improve your security posture.'
@@ -313,120 +351,114 @@ export function SecurityOutcomeCard({
       </div>
       <p className="usage-card__subtitle">{subtitle}</p>
       <div className="security-outcome">
-        <div className="security-outcome__box">
-          <p className="security-outcome__label">Before upgrade</p>
+        <section className="security-outcome__box" aria-labelledby="security-before-heading">
+          <h4 className="security-outcome__label" id="security-before-heading">Before upgrade</h4>
           <p className="security-outcome__value security-outcome__value--bad">
             {beforeCount} known vulnerabilit{beforeCount === 1 ? 'y' : 'ies'}
           </p>
           <p className="security-outcome__detail">From this analysis</p>
-        </div>
+          {contexts.length > 0 ? (
+            <details className="vulnerability-contexts">
+              <summary className="vulnerability-contexts__summary">
+                Dependency paths and remediation evidence
+              </summary>
+              <ul className="vulnerability-contexts__list">
+                {contexts.map((context) => {
+                  const primaryPath = context.primaryPath.nodes.map((node) => node.packageName);
+                  const contextRootPackage = primaryPath[0] ?? row.name;
+                  return (
+                    <li className="vulnerability-context" key={`${String(context.advisory.id)}:${context.flaggedPackage}:${context.flaggedVersion ?? ''}`}>
+                      <div className="vulnerability-context__head">
+                        <SeverityBadge severity={context.advisory.severity} />
+                        <strong>{context.advisory.title}</strong>
+                        {onOpenAdvisory === undefined ? null : (
+                          <VulnerabilityIdentifierLinks
+                            identifiers={vulnerabilityIdentifiers(context.advisory)}
+                            onOpen={(identifier) => onOpenAdvisory(
+                              contextRootPackage,
+                              context.advisory.id,
+                              primaryPath,
+                              identifier
+                            )}
+                          />
+                        )}
+                      </div>
+                      <dl className="vulnerability-context__meta">
+                        <dt>Flagged package</dt>
+                        <dd><code>{context.flaggedPackage}{context.flaggedVersion === null ? '' : `@${context.flaggedVersion}`}</code></dd>
+                        <dt>Introduced through</dt>
+                        <dd><code>{context.primaryPath.nodes.map((node) => `${node.packageName}${node.version === null ? '' : `@${node.version}`}`).join(' → ')}</code></dd>
+                        <dt>Direct {context.directRoots.length === 1 ? 'dependency' : 'dependencies'}</dt>
+                        <dd>
+                          {context.directRoots.map((root) => (
+                            <code key={`${root.packageName}:${root.version ?? ''}`}>{root.packageName}{root.version === null ? '' : `@${root.version}`}</code>
+                          ))}
+                        </dd>
+                        <dt>{remainingVulnerabilityPatchedVersionLabel(context.flaggedPackage)}</dt>
+                        <dd><code>{patchedVersionText(context.patchedVersion)}</code></dd>
+                      </dl>
+                      {context.paths.length > 1 ? (
+                        <details className="vulnerability-context__paths">
+                          <summary>
+                            View {context.pathsTruncated === true ? `first ${context.paths.length}` : `all ${context.paths.length}`} dependency paths
+                          </summary>
+                          <ol>
+                            {context.paths.map((path, index) => (
+                              <li key={`${String(context.advisory.id)}:path:${index}`}>
+                                <code>{path.nodes.map((node) => node.packageName).join(' → ')}</code>
+                              </li>
+                            ))}
+                          </ol>
+                        </details>
+                      ) : null}
+                      {context.provenResolution !== null ? (
+                        <p className="vulnerability-context__resolution">
+                          <IconCheck aria-hidden="true" />
+                          {context.provenResolution.directDependencyChanges.length === 1 ? 'Resolved by upgrading ' : 'Resolved by coordinated upgrades: '}
+                          {context.provenResolution.directDependencyChanges.map((change, index) => (
+                            <span key={change.packageName}>
+                              {index > 0 ? ', ' : ''}<code>{change.packageName}</code> to <code>{change.targetVersion}</code>
+                            </span>
+                          ))}
+                        </p>
+                      ) : null}
+                      {onOpenAdvisory !== undefined ? (
+                        <button
+                          type="button"
+                          className="advisory__source"
+                          onClick={() => onOpenAdvisory(contextRootPackage, context.advisory.id, primaryPath)}
+                        >
+                          View advisory source
+                          <IconExternalLink />
+                        </button>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            </details>
+          ) : null}
+        </section>
         <span className="usage-path__arrow" aria-hidden="true">
           →
         </span>
-        <div className="security-outcome__box">
-          <p className="security-outcome__label">After upgrade</p>
+        <section className="security-outcome__box" aria-labelledby="security-after-heading">
+          <h4 className="security-outcome__label" id="security-after-heading">After upgrade</h4>
           <p className={`security-outcome__value${remainingCount === 0 && unknownCount === 0 ? ' security-outcome__value--good' : ''}`}>
             {remainingCount} vulnerabilit{remainingCount === 1 ? 'y' : 'ies'}
             {unknownCount > 0 ? `, ${unknownCount} undetermined` : ''}
           </p>
           <p className="security-outcome__detail">{after.label}</p>
-        </div>
-      </div>
-      {contexts.length > 0 ? (
-        <details className="vulnerability-contexts">
-          <summary className="vulnerability-contexts__summary">
-            Dependency paths and remediation evidence
-          </summary>
-          <ul className="vulnerability-contexts__list">
-            {contexts.map((context) => {
-              const primaryPath = context.primaryPath.nodes.map((node) => node.packageName);
-              const contextRootPackage = primaryPath[0] ?? row.name;
-              return (
-                <li className="vulnerability-context" key={`${String(context.advisory.id)}:${context.flaggedPackage}:${context.flaggedVersion ?? ''}`}>
-                  <div className="vulnerability-context__head">
-                    <SeverityBadge severity={context.advisory.severity} />
-                    <strong>{context.advisory.title}</strong>
-                    {onOpenAdvisory === undefined ? null : (
-                      <VulnerabilityIdentifierLinks
-                        identifiers={vulnerabilityIdentifiers(context.advisory)}
-                        onOpen={(identifier) => onOpenAdvisory(
-                          contextRootPackage,
-                          context.advisory.id,
-                          primaryPath,
-                          identifier
-                        )}
-                      />
-                    )}
-                  </div>
-                  <dl className="vulnerability-context__meta">
-                    <dt>Flagged package</dt>
-                    <dd><code>{context.flaggedPackage}{context.flaggedVersion === null ? '' : `@${context.flaggedVersion}`}</code></dd>
-                    <dt>Introduced through</dt>
-                    <dd><code>{context.primaryPath.nodes.map((node) => `${node.packageName}${node.version === null ? '' : `@${node.version}`}`).join(' → ')}</code></dd>
-                    <dt>Direct {context.directRoots.length === 1 ? 'dependency' : 'dependencies'}</dt>
-                    <dd>
-                      {context.directRoots.map((root) => (
-                        <code key={`${root.packageName}:${root.version ?? ''}`}>{root.packageName}{root.version === null ? '' : `@${root.version}`}</code>
-                      ))}
-                    </dd>
-                    <dt>{remainingVulnerabilityPatchedVersionLabel(context.flaggedPackage)}</dt>
-                    <dd><code>{patchedVersionText(context.patchedVersion)}</code></dd>
-                  </dl>
-                  {context.paths.length > 1 ? (
-                    <details className="vulnerability-context__paths">
-                      <summary>
-                        View {context.pathsTruncated === true ? `first ${context.paths.length}` : `all ${context.paths.length}`} dependency paths
-                      </summary>
-                      <ol>
-                        {context.paths.map((path, index) => (
-                          <li key={`${String(context.advisory.id)}:path:${index}`}>
-                            <code>{path.nodes.map((node) => node.packageName).join(' → ')}</code>
-                          </li>
-                        ))}
-                      </ol>
-                    </details>
-                  ) : null}
-                  {context.provenResolution !== null ? (
-                    <p className="vulnerability-context__resolution">
-                      <IconCheck aria-hidden="true" />
-                      {context.provenResolution.directDependencyChanges.length === 1 ? 'Resolved by upgrading ' : 'Resolved by coordinated upgrades: '}
-                      {context.provenResolution.directDependencyChanges.map((change, index) => (
-                        <span key={change.packageName}>
-                          {index > 0 ? ', ' : ''}<code>{change.packageName}</code> to <code>{change.targetVersion}</code>
-                        </span>
-                      ))}
-                    </p>
-                  ) : null}
-                  {onOpenAdvisory !== undefined ? (
-                    <button
-                      type="button"
-                      className="advisory__source"
-                      onClick={() => onOpenAdvisory(contextRootPackage, context.advisory.id, primaryPath)}
-                    >
-                      View advisory source
-                      <IconExternalLink />
-                    </button>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        </details>
-      ) : null}
-      {security.remaining.length > 0 ? (
-        <details className="security-remaining">
-          <summary className="security-remaining__summary">
-            Inspect {remainingCount > 0 ? `${remainingCount} remaining` : ''}
-            {remainingCount > 0 && unknownCount > 0 ? ' and ' : ''}
-            {unknownCount > 0 ? `${unknownCount} undetermined` : ''}
-          </summary>
-          <div className="security-remaining__content">
-            {remainingGroups.map((group) => (
-              <section className="security-remaining__group" key={group.status} aria-labelledby={`security-remaining-${group.status}`}>
-                <h4 id={`security-remaining-${group.status}`}>{group.label}</h4>
-                <p>{group.description}</p>
+          {security.remaining.length > 0 ? (
+            <details className="security-remaining">
+              <summary className="security-remaining__summary">
+                Inspect {remainingCount > 0 ? `${remainingCount} remaining` : ''}
+                {remainingCount > 0 && unknownCount > 0 ? ' and ' : ''}
+                {unknownCount > 0 ? `${unknownCount} undetermined` : ''}
+              </summary>
+              <div className="security-remaining__content">
                 <ul className="security-remaining__list">
-                  {group.entries.map((entry, index) => (
+                  {remainingEntries.map((entry, index) => (
                     <li className="security-remaining__item" key={`${String(entry.advisory.id)}:${entry.flaggedPackage}:${index}`}>
                       <div className="security-remaining__head">
                         <SeverityBadge severity={entry.advisory.severity} />
@@ -448,6 +480,8 @@ export function SecurityOutcomeCard({
                         )}
                       </div>
                       <dl className="security-remaining__meta">
+                        <dt>Outcome</dt>
+                        <dd>{entry.status === 'remains' ? 'Confirmed to remain' : 'Undetermined — could not verify a fix'}</dd>
                         <dt>Flagged package</dt>
                         <dd><code>{entry.flaggedPackage}</code></dd>
                         <dt>Dependency path</dt>
@@ -474,11 +508,11 @@ export function SecurityOutcomeCard({
                     </li>
                   ))}
                 </ul>
-              </section>
-            ))}
-          </div>
-        </details>
-      ) : null}
+              </div>
+            </details>
+          ) : null}
+        </section>
+      </div>
     </section>
   );
 }

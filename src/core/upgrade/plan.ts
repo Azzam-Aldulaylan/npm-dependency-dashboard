@@ -37,6 +37,14 @@ export interface ManifestReconciliationArgsOptions {
   ignoreScripts: boolean;
 }
 
+export interface LockfileReconciliationArgsOptions {
+  ignoreScripts: boolean;
+}
+
+export interface TransitiveRemediationArgsOptions {
+  ignoreScripts: boolean;
+}
+
 export interface DedupeArgsOptions {
   ignoreScripts: boolean;
 }
@@ -122,6 +130,59 @@ export function buildManifestReconciliationArgs(
   // host-staged manifest change, so the lockfile must be allowed to reconcile
   // even when the extension host itself is running in a CI-like environment.
   if (packageManager === 'pnpm') args.push('--no-frozen-lockfile');
+  if (options.ignoreScripts) args.push('--ignore-scripts');
+  return args;
+}
+
+/**
+ * Materialize a targeted transitive update in an isolated project.
+ *
+ * Package names are still validated even though argv is structured: unlike
+ * direct-upgrade builders, this helper may be called with the name extracted
+ * from advisory evidence rather than a manifest declaration. Refusing an
+ * invalid npm name keeps that evidence from selecting a package-manager
+ * option or pattern by using a leading dash or other non-package syntax.
+ *
+ * Targets are de-duplicated and sorted so a host-owned plan always produces
+ * the same literal argv independent of advisory ordering. Both variants are
+ * lockfile-only and never execute lifecycle scripts. pnpm
+ * additionally receives --no-save because the target may be indirect and the
+ * isolated resolver must not add it to package.json.
+ */
+export function buildTransitiveRemediationArgs(
+  packageManager: PackageManagerKind,
+  packageNames: readonly string[],
+  options: TransitiveRemediationArgsOptions
+): string[] {
+  const targets = [...new Set(packageNames)].sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+  if (targets.length === 0) {
+    throw new Error('A transitive remediation needs at least one package target.');
+  }
+  if (targets.some((packageName) => !isSafeNpmPackageName(packageName))) {
+    throw new Error('Every transitive remediation target must be a valid npm package name.');
+  }
+  const args =
+    packageManager === 'pnpm'
+      ? ['update', ...targets, '--no-save', '--lockfile-only']
+      : ['update', ...targets, '--package-lock-only'];
+  if (options.ignoreScripts) args.push('--ignore-scripts');
+  return args;
+}
+
+/**
+ * Synchronize the installed tree to an exact host-staged lockfile without
+ * asking the package manager to rewrite package.json or choose newer ranges.
+ * npm ci and pnpm's frozen install both fail when the staged lockfile is not
+ * compatible with the unchanged manifest, turning stale/invalid plans into a
+ * visible task failure instead of silently broadening the resolution.
+ */
+export function buildLockfileReconciliationArgs(
+  packageManager: PackageManagerKind,
+  options: LockfileReconciliationArgsOptions
+): string[] {
+  const args = packageManager === 'pnpm' ? ['install', '--frozen-lockfile'] : ['ci'];
   if (options.ignoreScripts) args.push('--ignore-scripts');
   return args;
 }

@@ -3,7 +3,6 @@ import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent
 
 import type { PackageRow, Severity } from '../../../src/core/types.js';
 import type { DependencyFinding } from '../../../src/core/hygiene/types.js';
-import type { TransitiveRemediationUiState } from '../../../src/host/upgradeAction.js';
 import type { RemoveAnalysisPresentation, UpgradeAnalysisPresentation, UpgradeResultPresentation } from '../../../src/host/webviewProtocol.js';
 import type { UpgradeAnalysisSections } from '../../../src/host/upgradeAnalysisSections.js';
 import {
@@ -14,6 +13,7 @@ import type { UpgradeEnrichmentUiState } from '../../../src/host/upgradeReviewUi
 import { CLASSIFICATION_LABEL, classificationOf } from '../dependencyClassification.js';
 import { IconFolder, IconInfo, IconRefresh, IconShield, IconSliders, IconTrash, IconTrendUp, IconX } from '../icons.js';
 import type { RemovalImpactState } from '../removalImpactState.js';
+import type { TransitiveFixUiState } from '../transitiveRemediationState.js';
 import { OverviewPanel } from './OverviewPanel.js';
 import { PackageIcon } from './PackageIcon.js';
 import { RemovalReviewPanel } from './RemovalReviewPanel.js';
@@ -213,8 +213,7 @@ function TabButton({
     const nextTab = tabs[nextIndex];
     if (nextTab === undefined) return;
     event.preventDefault();
-    nextTab.focus();
-    nextTab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    nextTab.focus({ preventScroll: true });
     nextTab.click();
   };
 
@@ -233,7 +232,7 @@ function TabButton({
       <span className="manage-tabs__icon" aria-hidden="true">
         {icon}
       </span>
-      {label}
+      <span className="manage-tabs__label">{label}</span>
       {dotTone !== undefined ? <span className={`manage-tabs__dot manage-tabs__dot--${dotTone}`} aria-hidden="true" /> : null}
     </button>
   );
@@ -281,6 +280,10 @@ export function ManageDependencyModal({
   upgrade,
   removal,
   onAnalyzeRemediation,
+  onReviewRemediation,
+  onApplyRemediation,
+  onCancelRemediation,
+  onRetryRemediation,
   onOpenAdvisory,
   onReanalyzeUsage,
   onOpenUsageReference,
@@ -292,7 +295,7 @@ export function ManageDependencyModal({
   row: PackageRow;
   /** Every host-issued row in the same completed scan, used only to aggregate graph-proven vulnerability roots and paths. */
   allRows: readonly PackageRow[];
-  remediation: TransitiveRemediationUiState | undefined;
+  remediation: TransitiveFixUiState | undefined;
   removalImpact: RemovalImpactState;
   usage: UsageRequestState | undefined;
   hygieneFindings: readonly DependencyFinding[];
@@ -311,6 +314,10 @@ export function ManageDependencyModal({
   upgrade: UpgradeReviewState;
   removal: RemovalReviewState;
   onAnalyzeRemediation: (packageName: string) => void;
+  onReviewRemediation: (packageName: string, analysisId: string) => void;
+  onApplyRemediation: (analysisId: string) => void;
+  onCancelRemediation: (analysisId: string) => void;
+  onRetryRemediation: (analysisId: string) => void;
   onOpenAdvisory: (packageName: string, advisoryId: string | number, path: string[], reference?: string) => void;
   onReanalyzeUsage: (packageName: string) => void;
   onOpenUsageReference: (usageId: string, referenceIndex: number) => void;
@@ -394,7 +401,6 @@ export function ManageDependencyModal({
   };
   const startTransitiveCheckFromVulnerabilities = (): void => {
     onAnalyzeRemediation(row.name);
-    onChangeTab('overview');
   };
 
   const quarantineDerivedData = shouldQuarantineUpgradeDerivedData(upgradeEnrichment);
@@ -422,6 +428,11 @@ export function ManageDependencyModal({
         onStartUpgradeReview={startUpgradeReview}
         onStartRemovalReview={startRemovalReview}
         onAnalyzeRemediation={onAnalyzeRemediation}
+        onReviewRemediation={onReviewRemediation}
+        onApplyRemediation={onApplyRemediation}
+        onCancelRemediation={onCancelRemediation}
+        onRetryRemediation={onRetryRemediation}
+        onOpenAdvisory={onOpenAdvisory}
         onChangeTab={onChangeTab}
       />
     );
@@ -444,7 +455,11 @@ export function ManageDependencyModal({
         advisoriesAvailable={quarantineDerivedData ? false : advisoriesAvailable}
         onOpenAdvisory={onOpenAdvisory}
         onStartUpgradeReview={(target) => startUpgradeReview(row.name, target)}
-        onStartTransitiveCheck={startTransitiveCheckFromVulnerabilities}
+        onAnalyzeRemediation={startTransitiveCheckFromVulnerabilities}
+        onReviewRemediation={(analysisId) => onReviewRemediation(row.name, analysisId)}
+        onApplyRemediation={onApplyRemediation}
+        onCancelRemediation={onCancelRemediation}
+        onRetryRemediation={onRetryRemediation}
       />
     );
   } else if (activeTab === 'usage') {

@@ -107,10 +107,11 @@ export function InfoTooltip({
     if (trigger === null || popover === null) return;
     const margin = 8;
     const triggerRect = trigger.getBoundingClientRect();
-    // First pass: anchor below-left of the trigger so getBoundingClientRect
-    // below measures the popover's real size at its eventual font/wrap.
-    popover.style.left = `${triggerRect.left}px`;
-    popover.style.top = `${triggerRect.bottom + 6}px`;
+    // Measure from the viewport margin, with the full available width.
+    // Measuring beside a right-edge trigger shrink-wraps the popover; moving
+    // it left then makes it wider again and invalidates the clamped position.
+    popover.style.left = `${margin}px`;
+    popover.style.top = `${margin}px`;
     const popoverRect = popover.getBoundingClientRect();
     const left = Math.min(
       Math.max(margin, triggerRect.left),
@@ -146,9 +147,12 @@ export function InfoTooltip({
           if (pinned.current) show();
           else hideNow();
         }}
-        onKeyDown={(event) => {
+        // Capture Escape before a parent dialog's native keydown listener.
+        // Closing help must not also dismiss the review behind it.
+        onKeyDownCapture={(event) => {
           if (event.key === 'Escape' && open) {
             event.preventDefault();
+            event.stopPropagation();
             hideNow();
             triggerRef.current?.focus();
           }

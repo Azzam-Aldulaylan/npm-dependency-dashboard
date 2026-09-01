@@ -21,6 +21,7 @@ test('status banners share one component with an optional recovery action', () =
 
 test('banner copy is structurally left aligned and resilient to long text', () => {
   assert.match(styles, /\.banner\s*\{[\s\S]*?grid-template-columns: auto minmax\(0, 1fr\) auto/);
+  assert.match(styles, /\.banner\s*\{[\s\S]*?align-items: center;/);
   assert.match(styles, /\.banner__text\s*\{[\s\S]*?overflow-wrap: anywhere;[\s\S]*?text-align: start;/);
   assert.match(styles, /@media \(max-width: 34rem\)[\s\S]*?\.banner__action\s*\{[\s\S]*?grid-column: 2;/);
 });

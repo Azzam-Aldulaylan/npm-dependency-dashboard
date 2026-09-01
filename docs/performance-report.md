@@ -1,5 +1,32 @@
 # Dependency Dashboard performance report
 
+## Upgrade analysis scheduling and inventory cache — 2026-08-31
+
+This stabilization pass extracts project compatibility orchestration into its own workflow. Metadata/source checks run independently of dependency resolution; compatibility and security sections publish as soon as their own evidence settles. An uncached package archive still waits for the resolver subprocess lane, so two package-manager processes are not deliberately started together. Source evidence and final freshness checks are not cached or skipped.
+
+Published file inventories now use a positive-result-only cache keyed by exact registry, package, and version: at most four entries, 16 MiB estimated retained memory, and a 30-minute lifetime. Changing source recomputes findings against the inventory; switching target versions never reuses another version's files. Failed or cancelled inspections do not poison retries. Archive inspection has a 20-second budget and waits for child termination before temporary-directory cleanup.
+
+Each isolated Upgrade Review resolver invocation has a two-minute budget; timeout results remain unverified, not conflicts or successful checks. This does not impose a new deadline on confirmed installations, and is not a two-minute limit for the entire multi-stage review. Shared process cleanup waits for child closure and terminates the isolated process group/tree on cancellation.
+
+Reproduce the controlled workflow measurement after compiling host code:
+
+```bash
+npm run pretest
+node scripts/performance/project-analysis-benchmark.mjs
+```
+
+Five runs per scenario, with injected delays of 10 ms source reading, 20 ms target metadata, 40 ms current metadata, a 200 ms resolver lane, and 80 ms archive inspection:
+
+| Scenario | First project result (median) | Enriched checks (median) | Complete source checks (median) | Archive calls |
+| --- | ---: | ---: | ---: | ---: |
+| Cold inventory | 24.1 ms | 41.3 ms | 285.4 ms | 1 |
+| Same target cached | 21.5 ms | 42.0 ms | 42.1 ms | 0 |
+| Return to target after checking another | 21.3 ms | 41.3 ms | 41.4 ms | 0 |
+
+The benchmark asserts one active package-manager lane and exact-target reuse. These are synthetic workflow timings, **not total Upgrade Review duration or real-registry latency claims**. Real-project cold/warm benchmarks, packaged Extension Host testing, and performance thresholds remain deferred in `docs/v1-deferred-work.md`.
+
+## Earlier dashboard baseline
+
 Measured on 2026-08-19 for the dedicated `perf/dependency-dashboard` pass based on source commit `356205ecafda63408448882bd81e3f871cd7fb65` (`feat/bulk-dependency-actions`). The baseline was captured before changing performance behavior.
 
 ## Environment

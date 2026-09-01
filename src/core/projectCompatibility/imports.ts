@@ -42,6 +42,8 @@ export interface TargetPackageSurfaceEvidence {
   version: string;
   exports: TargetPackageExportsEvidence;
   files?: TargetPackageFilesEvidence;
+  /** Exact published main entry, or null for index.js. Omitted when metadata is unavailable. */
+  main?: string | null;
   /** Explicit ecosystem knowledge, e.g. "./dist/" for Next.js. */
   privateSubpathPrefixes?: readonly string[];
 }
@@ -125,10 +127,8 @@ function fileCandidates(subpath: string): string[] {
   ];
 }
 
-function fileExists(surface: TargetPackageSurfaceEvidence, subpath: string): boolean {
-  if (surface.files === undefined) return false;
-  const normalized = new Set(surface.files.paths.map((path) => path.replace(/^\.\//, '')));
-  return fileCandidates(subpath).some((candidate) => normalized.has(candidate));
+function fileExists(paths: ReadonlySet<string>, subpath: string): boolean {
+  return fileCandidates(subpath).some((candidate) => paths.has(candidate));
 }
 
 function privateSubpath(surface: TargetPackageSurfaceEvidence, subpath: string): boolean {
@@ -156,7 +156,11 @@ export function analyzeImportCompatibility(input: {
   }
 
   const findings = [];
-  let insufficientEvidence = false;
+  const limitations = new Set<string>();
+  // An import-heavy project must not rebuild a potentially large inventory
+  // for every reference. Known exports do not need the inventory at all.
+  const publishedPaths = new Set(input.targetSurface.exports.status === 'known'
+    ? [] : input.targetSurface.files?.paths.map((path) => path.replace(/^\.\//, '')) ?? []);
   for (const reference of input.references) {
     const subpath = packageSubpath(reference.specifier, input.identity.packageName);
     if (subpath === null) continue;
@@ -179,14 +183,27 @@ export function analyzeImportCompatibility(input: {
         );
         continue;
       }
-      if (exportMatch.conditional) insufficientEvidence = true;
+      if (exportMatch.conditional) limitations.add('conditional-exports-unresolved');
     } else if (subpath === '.') {
-      // Without an exports map, root resolution depends on main/module/index
-      // metadata that this evidence model deliberately does not guess.
-      insufficientEvidence = true;
+      // Prove classic root entry presence only from exact main + published
+      // runtime files. Type declarations alone are never runtime evidence.
+      const main = input.targetSurface.main === null ? 'index.js' : input.targetSurface.main;
+      const normalized = main?.replace(/^\.\//, '');
+      const safe = normalized !== undefined && normalized.length > 0 &&
+        !/[\\\0:?#]/.test(normalized) &&
+        !normalized.split('/').some((segment) => segment === '..' || segment === '.' || segment === '');
+      // Keep this a narrow file-presence check, not a claim about module
+      // format, named exports, bundler aliases, or directory package.json.
+      const candidates = safe
+        ? /\.(?:js|mjs|cjs)$/.test(normalized) ? [normalized]
+          : !normalized.split('/').at(-1)?.includes('.') ? [`${normalized}.js`] : []
+        : [];
+      if (input.targetSurface.exports.status !== 'absent' || !candidates.some((path) => publishedPaths.has(path))) {
+        limitations.add('root-entry-point-unverified');
+      }
       continue;
     } else if (input.targetSurface.exports.status === 'absent') {
-      if (fileExists(input.targetSurface, subpath)) {
+      if (fileExists(publishedPaths, subpath)) {
         // Classic Node package resolution proves this package-relative file is present.
       } else if (input.targetSurface.files?.completeness === 'complete') {
         findings.push(
@@ -203,10 +220,10 @@ export function analyzeImportCompatibility(input: {
         );
         continue;
       } else {
-        insufficientEvidence = true;
+        limitations.add('published-files-incomplete');
       }
-    } else if (!fileExists(input.targetSurface, subpath)) {
-      insufficientEvidence = true;
+    } else if (!fileExists(publishedPaths, subpath)) {
+      limitations.add('target-exports-unavailable');
     }
 
     if (isPrivate) {
@@ -227,8 +244,8 @@ export function analyzeImportCompatibility(input: {
 
   return {
     analyzerId: 'import-compatibility',
-    status: insufficientEvidence ? 'partial' : 'complete',
+    status: limitations.size > 0 ? 'partial' : 'complete',
     findings,
-    ...(insufficientEvidence ? { unavailableReason: 'target-surface-incomplete' } : {}),
+    ...(limitations.size > 0 ? { unavailableReason: [...limitations].sort().join('|') } : {}),
   };
 }

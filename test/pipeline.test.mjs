@@ -301,6 +301,15 @@ test('with no audit runner the self-computed fallback still finds a fix', async 
   );
 });
 
+test('a deliberately not-applicable audit runner does not degrade otherwise complete data', async () => {
+  const client = fakeClient(LATEST_ROUTES, json({}));
+  const result = await buildPackageRows(baseOptions(client, { auditUnavailableWhenOmitted: false }));
+
+  assert.equal(result.auditUnavailable, undefined);
+  assert.equal(result.availability.updates, 'complete');
+  assert.equal(result.availability.advisories, 'complete');
+});
+
 test('garbage on audit stdout degrades to the same fallback', async () => {
   const client = fakeClient({ ...LATEST_ROUTES, [`${REGISTRY}/minimatch`]: MINIMATCH_PACKUMENT }, BULK_RESPONSE);
 

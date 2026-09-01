@@ -49,6 +49,12 @@ export interface BuildPackageRowsOptions {
   etagStore: EtagStore;
   /** Omit entirely to skip the optional `npm audit` enrichment. */
   auditRunner?: AuditRunner;
+  /**
+   * Defaults to true so an accidentally omitted npm runner remains visible as
+   * degraded coverage. Set false only when npm audit is genuinely not
+   * applicable, currently the pnpm host path.
+   */
+  auditUnavailableWhenOmitted?: boolean;
   concurrency?: number;
   signal?: AbortSignal;
   /** Local diagnostics only. The default recorder is a zero-allocation no-op. */
@@ -190,7 +196,12 @@ export async function buildPackageRows(
   // it as soon as the normalized graph provides the direct-name allow-list,
   // then consume its optional fixAvailable enrichment at the original stage.
   const auditPromise: Promise<{ fixes: Map<string, FixAvailable>; unavailable: boolean }> = (() => {
-    if (options.auditRunner === undefined) return Promise.resolve({ fixes: new Map(), unavailable: true });
+    if (options.auditRunner === undefined) {
+      return Promise.resolve({
+        fixes: new Map(),
+        unavailable: options.auditUnavailableWhenOmitted ?? true,
+      });
+    }
     options.onProgress?.({ stage: 'npm-audit' });
     const endAudit = recorder.start('npm audit');
     recorder.increment('package-manager subprocesses');

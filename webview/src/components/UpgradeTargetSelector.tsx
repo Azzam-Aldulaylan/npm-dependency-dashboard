@@ -13,8 +13,8 @@ function optionLabel(
 ): string {
   const labels = option.labels.map((label) => {
     if (label === 'recommended') return 'Recommended';
-    if (label === 'lts') return 'LTS';
-    return 'Latest';
+    if (label === 'lts') return 'Publisher LTS';
+    return 'Latest stable';
   });
   return labels.length === 0 ? option.version : `${option.version} — ${labels.join(' · ')}`;
 }
@@ -46,7 +46,8 @@ export function UpgradeTargetSelector({
           Upgrade to
         </label>
         <p className="upgrade-target-picker__hint">
-          Choose the published version this review should analyze.
+          Publisher LTS is preferred when the package declares an <code>lts</code> tag. Otherwise, the latest stable
+          release is recommended.
         </p>
       </div>
       <div className="upgrade-target-picker__control">

@@ -41,7 +41,7 @@ const FOCUSABLE_SELECTOR =
   'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
 
 const CONFIDENCE_LABEL: Record<SmartCleanupConfidence, string> = {
-  safe: 'Recommended',
+  safe: 'Recommended removal',
   review: 'Needs review',
   blocked: 'Blocked',
   unknown: 'Not verified',
@@ -425,7 +425,7 @@ function ReviewView({
 
       <div className="smart-cleanup-outcome">
         <div className="smart-cleanup-outcome__headline">
-          <strong>{safe} recommended</strong>
+          <strong>{safe} recommended cleanup {safe === 1 ? 'action' : 'actions'}</strong>
           <span>{review} need review</span>
         </div>
         <p>
@@ -435,6 +435,13 @@ function ReviewView({
           {plan.security.length > 0 ? ` · ${plan.security.length} advisory findings` : ''}
           {blocked > 0 ? ` · ${blocked} unavailable removals` : ''}
         </p>
+        {safeRemovalCount > 0 ? (
+          <p>
+            A recommended removal means the supported source, script, configuration, and dependency checks found no
+            known blocker. Static analysis cannot guarantee runtime safety, so review the evidence and run your build
+            and tests after cleanup.
+          </p>
+        ) : null}
       </div>
 
       <div className="smart-cleanup-selection-bar">
@@ -448,7 +455,7 @@ function ReviewView({
             className="button button--small button--secondary"
             onClick={() => dispatch({ type: safeSelected ? 'clear-selection' : 'select-all-safe' })}
           >
-            {safeSelected && selectedCount > 0 ? 'Clear selection' : 'Select all safe'}
+            {safeSelected && selectedCount > 0 ? 'Clear selection' : 'Select recommendations'}
           </button>
         </div>
       </div>

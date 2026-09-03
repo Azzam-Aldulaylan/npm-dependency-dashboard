@@ -52,6 +52,17 @@ test('hard analysis expiry is visible and disables both embedded action surfaces
   assert.match(review, /disabled=\{busy \|\| executionBlocked\}/);
 });
 
+test('caution reviews name the evidence areas that need attention in a summary banner', () => {
+  assert.match(review, /function upgradeReviewAreas/);
+  assert.match(review, /project compatibility \$\{projectSummary\.total === 1 \? 'finding' : 'findings'\}/);
+  assert.match(review, /incomplete dependency checks/);
+  assert.match(review, /vulnerabilities that remain/);
+  assert.match(review, /undetermined security/);
+  assert.match(review, /decision\.caution/);
+  assert.match(review, /<StatusBanner tone="warning" className="upgrade-review__summary-banner">/);
+  assert.match(review, /Review \{joinedReviewAreas\(reviewAreas\)\} before upgrading/);
+});
+
 test('compatibility summary is separated from checks and unsupported checks stay honest', () => {
   assert.match(cards, /upgrade-compatibility__summary/);
   assert.match(styles, /\.upgrade-tab \.upgrade-compatibility__summary \{\s*margin-bottom: 0\.8rem;/);

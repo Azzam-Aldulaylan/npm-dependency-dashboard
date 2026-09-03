@@ -189,6 +189,7 @@ test('Manage and standalone review render the same warning; selected target is n
     assert.match(html, /required project changes/);
     assert.doesNotMatch(html, /This is a safe update|This is a compatible update/);
   }
+  assert.match(manage, /Review 1 project compatibility finding before upgrading/);
   assert.match(manage, /<dt>Target version<\/dt><dd>15\.5\.24<\/dd>/);
   assert.doesNotMatch(manage, /<dt>Latest version<\/dt>/);
   assert.equal((manage.match(/>Upgrade anyway/g) ?? []).length, 2, 'rail and footer share the same caution action');

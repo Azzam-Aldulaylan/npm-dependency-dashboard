@@ -34,6 +34,19 @@ export interface UpgradeTargetSelection {
   truncated: boolean;
 }
 
+/**
+ * Replace only the dashboard's default target with the registry-backed
+ * recommendation. A target explicitly selected by the user is preserved.
+ */
+export function preferPublisherRecommendedTarget(
+  requestedTarget: string,
+  existingFallback: string | null,
+  selection: UpgradeTargetSelection
+): string {
+  if (requestedTarget !== existingFallback || selection.recommendedVersion === null) return requestedTarget;
+  return selection.recommendedVersion;
+}
+
 function validPublishedTag(
   packument: PackumentDoc,
   tag: string,

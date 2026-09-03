@@ -5,6 +5,7 @@ import {
   loadUpgradeTargets,
   MAX_PRERELEASE_UPGRADE_TARGETS,
   MAX_STABLE_UPGRADE_TARGETS,
+  preferPublisherRecommendedTarget,
   publishedUpgradeTargetsForRequest,
   selectUpgradeTargets,
   selectUpgradeTargetsFromDistTags,
@@ -28,6 +29,17 @@ test('a valid stable lts tag ahead of installed is the recommended target', () =
     channel: 'stable',
     labels: ['recommended', 'lts'],
   });
+});
+
+test('publisher recommendation replaces only the dashboard default target', () => {
+  const selection = selectUpgradeTargets(
+    packument(['4.0.0', '5.4.2', '6.0.0'], { lts: '5.4.2', latest: '6.0.0' }),
+    '4.0.0',
+    '6.0.0'
+  );
+
+  assert.equal(preferPublisherRecommendedTarget('6.0.0', '6.0.0', selection), '5.4.2');
+  assert.equal(preferPublisherRecommendedTarget('5.1.0', '6.0.0', selection), '5.1.0');
 });
 
 test('a package without lts recommends its stable latest dist-tag', () => {

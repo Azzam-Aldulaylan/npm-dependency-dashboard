@@ -28,3 +28,25 @@ test('usage indexing keeps per-package references isolated', () => {
   assert.deepEqual(index.forPackage('alpha').map((reference) => reference.filePath), ['src/a.ts']);
   assert.deepEqual(index.forPackage('beta').map((reference) => reference.filePath), ['src/b.ts']);
 });
+
+test('usage indexing treats a static require.resolve package subpath as a reference', () => {
+  const index = new UsageReferenceIndex(['react-native-svg-transformer', 'unused-package']);
+  index.addSourceFile('metro.config.js', [
+    'module.exports = {',
+    '  transformer: {',
+    '    babelTransformerPath: require.resolve(',
+    "      'react-native-svg-transformer/react-native',",
+    '    ),',
+    '  },',
+    '};',
+  ].join('\n'));
+
+  assert.deepEqual(index.forPackage('react-native-svg-transformer'), [{
+    filePath: 'metro.config.js',
+    line: 4,
+    column: 8,
+    snippet: "'react-native-svg-transformer/react-native',",
+    kind: 'require',
+  }]);
+  assert.deepEqual(index.forPackage('unused-package'), []);
+});

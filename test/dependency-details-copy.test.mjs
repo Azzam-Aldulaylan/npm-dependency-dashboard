@@ -7,6 +7,7 @@ import {
   introducedDuplicateFindings,
   ownDuplicateFinding,
   usageSignificanceCopy,
+  usageScopeLabel,
   usageSummaryCounts,
 } from '../out/host/dependencyDetailsCopy.js';
 
@@ -98,6 +99,8 @@ test('usageSummaryCounts tallies each reference kind independently, never invent
     dynamicImports: 0,
     scripts: 1,
     configReferences: 1,
+    testReferences: 0,
+    nonTestReferences: 5,
   });
 });
 
@@ -114,6 +117,8 @@ test('usageSummaryCounts on no references is all zero', () => {
     dynamicImports: 0,
     scripts: 0,
     configReferences: 0,
+    testReferences: 0,
+    nonTestReferences: 0,
   });
 });
 
@@ -139,4 +144,31 @@ test('usageSignificanceCopy: nothing found at all', () => {
     usageSignificanceCopy(row({}), usageSummaryCounts([])),
     'No direct source references to react were found. Review its scripts, configuration, and dependency paths before removing it.'
   );
+});
+
+test('test-only references are identified without changing the reference protocol', () => {
+  const counts = usageSummaryCounts([
+    { filePath: 'src/components/Button.test.tsx', line: 2, column: 1, snippet: "import x from 'react'", kind: 'import' },
+    { filePath: 'package.json', line: 0, column: 0, snippet: 'test', kind: 'script', context: 'test:coverage' },
+    { filePath: 'jest.config.js', line: 0, column: 0, snippet: 'jest.config.js', kind: 'config', context: 'jest.config.js' },
+  ]);
+
+  assert.equal(counts.testReferences, 3);
+  assert.equal(counts.nonTestReferences, 0);
+  assert.equal(usageScopeLabel(counts), 'Tests only');
+  assert.equal(
+    usageSignificanceCopy(row({}), counts),
+    'react is referenced only by tests or test tooling. Removing it may break test coverage even when the application build succeeds.'
+  );
+});
+
+test('mixed application and test references are labeled distinctly', () => {
+  const counts = usageSummaryCounts([
+    REFERENCES[0],
+    { filePath: '__tests__/client.ts', line: 1, column: 1, snippet: "import axios from 'axios'", kind: 'import' },
+  ]);
+
+  assert.equal(usageScopeLabel(counts), 'Application and tests');
+  assert.equal(counts.testReferences, 1);
+  assert.equal(counts.nonTestReferences, 1);
 });

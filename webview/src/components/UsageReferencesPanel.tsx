@@ -9,6 +9,7 @@ import {
   introducedDuplicateFindings,
   ownDuplicateFinding,
   usageSignificanceCopy,
+  usageScopeLabel,
   usageSummaryCounts,
 } from '../../../src/host/dependencyDetailsCopy.js';
 import { severityDisplay } from '../../../src/host/severityDisplay.js';
@@ -437,6 +438,7 @@ export function UsageReferencesPanel({
             Usage summary
           </h3>
           <dl className="manage-glance">
+            <GlanceRow label="Usage scope">{counts === null ? '—' : usageScopeLabel(counts)}</GlanceRow>
             <GlanceRow label="Referenced in">{counts === null ? '—' : `${counts.referencedInFiles} file${counts.referencedInFiles === 1 ? '' : 's'}`}</GlanceRow>
             <GlanceRow label="Import statements">{counts === null ? '—' : `${counts.importStatements}`}</GlanceRow>
             <GlanceRow label="Dynamic imports">{counts === null ? '—' : `${counts.dynamicImports}`}</GlanceRow>

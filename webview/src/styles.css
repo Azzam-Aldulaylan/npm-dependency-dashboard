@@ -459,13 +459,22 @@ button {
 
 /*
  * The table genuinely cannot shrink below this width and stay legible, so it
- * scrolls horizontally inside its own container rather than the whole panel
- * — the header and footer stay put while only the table body scrolls.
+ * scrolls inside its own keyboard-focusable region rather than widening the
+ * whole panel. A bounded vertical viewport gives the sticky column labels a
+ * real scroll container on long tables while short tables keep their natural
+ * height.
  */
 .packages-container {
-  overflow-x: auto;
+  max-height: min(68vh, 48rem);
+  overflow: auto;
+  scrollbar-gutter: stable;
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
   border-radius: 5px;
+}
+
+.packages-container:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
 }
 
 .packages {
@@ -493,12 +502,21 @@ button {
 }
 
 .packages thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   color: var(--vscode-descriptionForeground);
   font-weight: 600;
   text-transform: uppercase;
   font-size: 0.72em;
   letter-spacing: 0.04em;
-  background: var(--vscode-sideBar-background, transparent);
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+}
+
+.dashboard__matching-results {
+  margin: -0.15rem 0 0.6rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
 }
 
 /*
@@ -1141,11 +1159,9 @@ button {
 /* ------------------------------------------------------------- pagination */
 
 /*
- * Sticky to the bottom of the (body-level) scroll, not just the table: at
- * 25+ rows the table alone can be taller than the panel, and pagination
- * controls a user can't see without scrolling past every row defeat their
- * own purpose. `position: sticky` keeps it reachable without a second,
- * nested scroll region — the page still scrolls as one piece.
+ * Sticky to the bottom of the page-level scroll so the controls remain
+ * reachable below the bounded table viewport. The table owns its scrolling
+ * and sticky header; pagination continues to own pages and page size.
  */
 .pagination {
   position: sticky;

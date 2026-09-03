@@ -244,7 +244,7 @@ export function App(): ReactElement {
   const [hygieneFilter, setHygieneFilter] = useState<HygieneFilterId>('all');
   // The dashboard opens sorted by vulnerability severity, worst first — the
   // one piece of information most worth seeing before any interaction, even
-  // though the default "all" card's own implied order is alphabetical (see
+  // matching the default "all" card's own implied order (see
   // cardDefaultComparator). A real column sort state, not `null`, so the
   // Vulnerabilities header shows its descending indicator immediately on
   // first render rather than only after a manual click. Selecting a summary
@@ -2314,10 +2314,22 @@ export function App(): ReactElement {
             // becomes available again. Its Analyze action performs the lock
             // handoff above; genuinely active work remains disabled.
             const embeddedRemovalCanYield = removeActive && removeAnalysis !== null && !removeBusy;
+            // `actionsDisabled` treats every retained removal review as active
+            // because it is also shared with dashboard-level controls. Inside
+            // this same Manage workspace, a completed read-only review may be
+            // replaced deliberately; preserve every other global blocker and
+            // keep actual removal/remediation work protected.
+            const manageActionsDisabled =
+              loading ||
+              activeUpgrade !== null ||
+              remediationBusy ||
+              cleanupState.phase === 'analyzing' ||
+              (activeRemove !== null && !embeddedRemovalCanYield);
             const manageUpgradeDisabled =
               coreDataIncomplete ||
               loading ||
               cleanupState.phase === 'analyzing' ||
+              remediationBusy ||
               confirmBusy ||
               removeBusy ||
               removalImpact.phase === 'analyzing' ||
@@ -2333,7 +2345,7 @@ export function App(): ReactElement {
                 hygieneFindings={allHygieneFindings}
                 activeTab={manageTab}
                 onChangeTab={setManageTab}
-                actionsDisabled={actionsDisabled}
+                actionsDisabled={manageActionsDisabled}
                 upgradeDisabled={manageUpgradeDisabled}
                 updateResolutionAvailable={!data.availability.unavailableUpdatePackages.includes(row.name)}
                 advisoriesAvailable={data.availability.advisories === 'complete'}
@@ -2567,18 +2579,24 @@ function Dashboard({
     [data.hygieneFindings, cleanupFindings]
   );
   // Faceted against each other: the Type filter's own selection is
-  // deliberately excluded when computing Finding's counts (and vice versa)
-  // so picking "Production" immediately lowers what Likely unused/Duplicate
-  // versions show, reflecting the actual combined match — not a count
-  // frozen against the whole table. The summary-card filter and search are
-  // deliberately left out of this narrowing: those are global/transient,
-  // not part of this pair's own AND relationship.
+  // deliberately excluded when computing Finding's counts. Production and
+  // Dev remain contextual to the active Finding filter, while All is the
+  // stable project-wide dependency total: changing a hygiene filter must not
+  // make the meaning of "All" shift underneath the user. The matching-results
+  // status below communicates the narrowed table size instead. The summary-
+  // card filter and search are deliberately left out of these counts: those
+  // are global/transient, not part of this pair's own AND relationship.
   const findingCounts = useMemo(
     () => hygieneFilterCounts(data.rows.filter(dependencyTypeFilterPredicate(dependencyType)), hygieneFindings),
     [data.rows, dependencyType, hygieneFindings]
   );
   const typeCounts = useMemo(
-    () => dependencyTypeFilterCounts(data.rows.filter(hygieneFilterPredicate(hygieneFilter, hygieneFindings))),
+    () => {
+      const contextualCounts = dependencyTypeFilterCounts(
+        data.rows.filter(hygieneFilterPredicate(hygieneFilter, hygieneFindings))
+      );
+      return { ...contextualCounts, all: data.rows.length };
+    },
     [data.rows, hygieneFilter, hygieneFindings]
   );
 
@@ -2676,6 +2694,12 @@ function Dashboard({
               onChange={onHygieneFilterChange}
             />
           </DashboardToolbar>
+
+          {filteredRows.length === data.rows.length ? null : (
+            <p className="dashboard__matching-results" aria-live="polite">
+              Current filters match {filteredRows.length} of {dependencyCountLabel(data.rows.length)}.
+            </p>
+          )}
 
           {filteredRows.length === 0 ? (
             query !== '' ? (

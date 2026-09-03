@@ -54,7 +54,8 @@ import type { CompatibilityStatus, UpgradeProposal } from '../core/compatibility
 import { RegistryPackageMetadataProvider, registryForPackage } from '../core/compatibility/registryMetadataProvider.js';
 import { FetchError } from '../core/registry/http.js';
 import type { HttpClient } from '../core/registry/http.js';
-import { fetchPackument } from '../core/registry/versions.js';
+import { runPool } from '../core/registry/pool.js';
+import { fetchDistTags, fetchPackument } from '../core/registry/versions.js';
 import type { EtagStore } from '../core/registry/versions.js';
 import type { DependencyReference } from '../core/usage/types.js';
 import type {
@@ -64,7 +65,12 @@ import type { PerformanceRecorder } from '../core/performance/measurement.js';
 import { createPerformanceSession } from '../core/performance/measurement.js';
 import { inspectAppliedUpgradeState } from '../core/upgrade/appliedState.js';
 import { planSmartUpgrade } from '../core/upgrade/smartPlan.js';
-import { loadUpgradeTargets, publishedUpgradeTargetsForRequest } from '../core/upgrade/targets.js';
+import {
+  loadUpgradeTargets,
+  preferPublisherRecommendedTarget,
+  publishedUpgradeTargetsForRequest,
+  selectUpgradeTargetsFromDistTags,
+} from '../core/upgrade/targets.js';
 import { buildStagedManifest, buildStagedManifestForRemoval } from '../core/upgrade/stagedManifest.js';
 import { isMajorUpgrade, requiresManifestReconciliation } from '../core/upgrade/plan.js';
 import { stillRequiredBy } from '../core/upgrade/removeImpact.js';
@@ -888,6 +894,63 @@ export class UpgradeAssistantCoordinator {
     return new Map(entries);
   }
 
+  private async publisherRecommendedBulkRequests(
+    controller: DashboardController,
+    requests: readonly UpgradeChangeRequest[],
+    signal: AbortSignal
+  ): Promise<{
+    requests: readonly UpgradeChangeRequest[];
+    publishedTargetsByPackage: ReadonlyMap<string, ReadonlySet<string>>;
+  }> {
+    const source = controller.upgradeSource;
+    const rowsByName = new Map(controller.lastResultRows().map((row) => [row.name, row]));
+    const candidates = requests.flatMap((request) => {
+      const row = rowsByName.get(request.package);
+      if (
+        row === undefined ||
+        row.current === null ||
+        row.upgradeTo === null ||
+        request.target !== row.upgradeTo
+      ) return [];
+      return [{ request, row }];
+    });
+    const results = await runPool(
+      candidates,
+      ({ row }, workerSignal) => fetchDistTags(
+        this.options.httpClient,
+        this.options.etagStore,
+        registryForPackage(source.resolvedRegistry, row.name),
+        row.name,
+        workerSignal
+      ),
+      { signal }
+    );
+
+    const replacements = new Map<string, string>();
+    const publishedTargetsByPackage = new Map<string, ReadonlySet<string>>();
+    candidates.forEach(({ request, row }, index) => {
+      const result = results[index];
+      if (result?.ok !== true || row.current === null) return;
+      const selection = selectUpgradeTargetsFromDistTags(
+        result.value,
+        row.current,
+        row.upgradeTo
+      );
+      const target = preferPublisherRecommendedTarget(request.target, row.upgradeTo, selection);
+      if (target === request.target) return;
+      replacements.set(request.package, target);
+      publishedTargetsByPackage.set(request.package, new Set([target]));
+    });
+
+    return {
+      requests: requests.map((request) => {
+        const target = replacements.get(request.package);
+        return target === undefined ? request : { ...request, target };
+      }),
+      publishedTargetsByPackage,
+    };
+  }
+
   /**
    * Phase 1: eligibility, lock, preflight, smart-plan search, security
    * outcome. Ends by storing the analysis and posting it — never by
@@ -898,10 +961,14 @@ export class UpgradeAssistantCoordinator {
   }
 
   async handleAnalyzeBulkUpgrade(message: BulkUpgradeMessage): Promise<void> {
-    await this.handleAnalyzeUpgradeRequests(message.requestId, message.changes);
+    await this.handleAnalyzeUpgradeRequests(message.requestId, message.changes, true);
   }
 
-  private async handleAnalyzeUpgradeRequests(requestId: string, messages: readonly UpgradeChangeRequest[]): Promise<void> {
+  private async handleAnalyzeUpgradeRequests(
+    requestId: string,
+    messages: readonly UpgradeChangeRequest[],
+    preferPublisherLts = false
+  ): Promise<void> {
     this.reclaimExpiredAnalysis();
     this.reclaimExpiredRemoval();
 
@@ -940,9 +1007,11 @@ export class UpgradeAssistantCoordinator {
       });
       return;
     }
-    const eligibility = batch.upgrades[0];
-    if (eligibility === undefined) return;
-    const eligibilities = batch.upgrades;
+    const initialEligibility = batch.upgrades[0];
+    if (initialEligibility === undefined) return;
+    let eligibility: EligibleUpgrade = initialEligibility;
+    let eligibilities = batch.upgrades;
+    let effectiveMessages = messages;
 
     // Reserve across preflight and however long the analysis modal stays
     // open, not merely process execution: forged requests cannot stack
@@ -970,8 +1039,34 @@ export class UpgradeAssistantCoordinator {
       'Dependency Dashboard upgrade analysis',
       this.options.performanceEnabled?.() ?? false
     );
-    performance.setMetadata('changes', eligibilities.length);
     try {
+      if (preferPublisherLts) {
+        const recommended = await this.publisherRecommendedBulkRequests(
+          controller,
+          effectiveMessages,
+          analysisAbort.signal
+        );
+        if (analysisAbort.signal.aborted || this.droppedByCancellation(eligibility.packageName)) return;
+        effectiveMessages = recommended.requests;
+        publishedTargetsByPackage = new Map([
+          ...publishedTargetsByPackage,
+          ...recommended.publishedTargetsByPackage,
+        ]);
+        batch = controller.validateBulkUpgradeRequest(effectiveMessages, publishedTargetsByPackage);
+        if (!batch.ok) {
+          this.options.sink.postMessage({
+            status: 'upgrade-error',
+            package: batch.packageName ?? eligibility.packageName,
+            error: describeBulkRejection(batch),
+          });
+          return;
+        }
+        const recommendedEligibility = batch.upgrades[0];
+        if (recommendedEligibility === undefined) return;
+        eligibility = recommendedEligibility;
+        eligibilities = batch.upgrades;
+      }
+      performance.setMetadata('changes', eligibilities.length);
       const selected = this.options.getSelectedProject();
       if (selected === undefined) return;
       const source = controller.upgradeSource;
@@ -1397,7 +1492,7 @@ export class UpgradeAssistantCoordinator {
       const expiresAt = Date.now() + UPGRADE_ANALYSIS_RETENTION_MS;
       this.analysis = {
         id: analysisId,
-        requests: [...messages],
+        requests: [...effectiveMessages],
         publishedTargetsByPackage,
         eligibility,
         snapshot: preflightProject,

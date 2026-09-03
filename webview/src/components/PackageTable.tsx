@@ -211,7 +211,7 @@ export function PackageTable({
   };
 
   return (
-    <div className="packages-container">
+    <div className="packages-container" role="region" aria-label="Dependency packages" tabIndex={0}>
       <table className="packages">
         <colgroup>
           <col className="col-disclosure" />

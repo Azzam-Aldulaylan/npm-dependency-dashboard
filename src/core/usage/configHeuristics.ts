@@ -22,6 +22,8 @@ export const CONFIG_FILE_GLOBS: readonly string[] = [
   'webpack.config.*',
   'vite.config.*',
   'next.config.*',
+  'metro.config.*',
+  'react-native.config.*',
   'jest.config.*',
   'vitest.config.*',
   'rollup.config.*',

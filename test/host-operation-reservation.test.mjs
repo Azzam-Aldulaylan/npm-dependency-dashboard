@@ -173,6 +173,125 @@ test('a host source change terminates a real in-flight Upgrade analysis exactly 
   assert.equal(coordinator.isBusy(), false);
 });
 
+test('bulk upgrade review prefers a publisher-declared LTS target over the dashboard latest target', async () => {
+  const { UpgradeAssistantCoordinator } = await import('../out/host/upgradeAssistantCoordinator.js');
+  const validatedRequests = [];
+  const validationProofs = [];
+  const requestedUrls = [];
+  const messages = [];
+  const body = JSON.stringify({ lts: '2.0.0', latest: '3.0.0' });
+  const controller = {
+    upgradeSource: {
+      resolvedRegistry: { url: 'https://registry.npmjs.org/', source: 'default', scoped: {} },
+    },
+    lastResultRows: () => [{ name: 'pkg', current: '1.0.0', upgradeTo: '3.0.0' }],
+    validateBulkUpgradeRequest: (requests, publishedTargets) => {
+      validatedRequests.push(requests);
+      validationProofs.push(publishedTargets);
+      if (requests[0]?.target === '3.0.0') {
+        return {
+          ok: true,
+          upgrades: [{ packageName: 'pkg', currentVersion: '1.0.0', target: '3.0.0', classification: 'major' }],
+        };
+      }
+      return {
+        ok: false,
+        reason: 'change-rejected',
+        changeReason: 'no-eligible-upgrade',
+        packageName: 'pkg',
+      };
+    },
+  };
+  const coordinator = new UpgradeAssistantCoordinator({
+    sink: { postMessage: (message) => messages.push(message) },
+    httpClient: {
+      get: async (url) => {
+        requestedUrls.push(url);
+        return { status: 200, headers: {}, body, wireBytes: body.length };
+      },
+    },
+    etagStore: { get: () => undefined, set: () => {} },
+    ensureController: async () => controller,
+    getSelectedProject: () => undefined,
+    isDisposed: () => false,
+    reloadFinalState: async () => {},
+    flushDeferredChanges: async () => {},
+    loadProject: async () => { throw new Error('validation should stop before project loading'); },
+  });
+
+  await coordinator.handleAnalyzeBulkUpgrade({
+    type: 'bulk-upgrade',
+    requestId: 'publisher-lts',
+    changes: [{ package: 'pkg', target: '3.0.0' }],
+  });
+
+  assert.equal(validatedRequests.length, 2);
+  assert.deepEqual(validatedRequests[0], [{ package: 'pkg', target: '3.0.0' }]);
+  assert.deepEqual(validatedRequests[1], [{ package: 'pkg', target: '2.0.0' }]);
+  assert.deepEqual([...validationProofs[1].get('pkg')], ['2.0.0']);
+  assert.deepEqual(requestedUrls, ['https://registry.npmjs.org/-/package/pkg/dist-tags']);
+  assert.equal(messages.at(-1).status, 'upgrade-error');
+});
+
+test('publisher LTS lookup uses bounded registry concurrency', async () => {
+  const { UpgradeAssistantCoordinator } = await import('../out/host/upgradeAssistantCoordinator.js');
+  const changes = Array.from({ length: 18 }, (_, index) => ({ package: `pkg-${index}`, target: '3.0.0' }));
+  const rows = changes.map((change) => ({ name: change.package, current: '1.0.0', upgradeTo: '3.0.0' }));
+  const body = JSON.stringify({ lts: '2.0.0', latest: '3.0.0' });
+  let active = 0;
+  let peak = 0;
+  let validations = 0;
+  const coordinator = new UpgradeAssistantCoordinator({
+    sink: { postMessage: () => {} },
+    httpClient: {
+      get: async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setImmediate(resolve));
+        active -= 1;
+        return { status: 200, headers: {}, body, wireBytes: body.length };
+      },
+    },
+    etagStore: { get: () => undefined, set: () => {} },
+    ensureController: async () => ({
+      upgradeSource: {
+        resolvedRegistry: { url: 'https://registry.npmjs.org/', source: 'default', scoped: {} },
+      },
+      lastResultRows: () => rows,
+      validateBulkUpgradeRequest: (requests) => {
+        validations += 1;
+        if (requests.every((request) => request.target === '3.0.0')) {
+          return {
+            ok: true,
+            upgrades: requests.map((request) => ({
+              packageName: request.package,
+              currentVersion: '1.0.0',
+              target: request.target,
+              classification: 'major',
+            })),
+          };
+        }
+        return {
+          ok: false,
+          reason: 'change-rejected',
+          changeReason: 'no-eligible-upgrade',
+          packageName: requests[0]?.package,
+        };
+      },
+    }),
+    getSelectedProject: () => undefined,
+    isDisposed: () => false,
+    reloadFinalState: async () => {},
+    flushDeferredChanges: async () => {},
+    loadProject: async () => { throw new Error('validation should stop before project loading'); },
+  });
+
+  await coordinator.handleAnalyzeBulkUpgrade({ type: 'bulk-upgrade', requestId: 'bounded-lts', changes });
+
+  assert.equal(validations, 2);
+  assert.equal(peak, 8);
+});
+
 test('cancel-remove with a null id cancels a pending project load and releases without publishing a stale review', async () => {
   const { UpgradeAssistantCoordinator } = await import('../out/host/upgradeAssistantCoordinator.js');
   const messages = [];

@@ -146,6 +146,9 @@ function updateTierRank(row: PackageRow): number {
 }
 
 export function cardDefaultComparator(filter: SummaryFilterId): (a: PackageRow, b: PackageRow) => number {
+  if (filter === 'all') {
+    return (a, b) => severityRank(b.worstSeverity) - severityRank(a.worstSeverity) || byName(a, b);
+  }
   if (filter === 'updates') {
     return (a, b) => updateTierRank(b) - updateTierRank(a) || byName(a, b);
   }

@@ -16,3 +16,11 @@ test('the target selector is registry-backed and has no free-text version entry'
   assert.doesNotMatch(component, /Enter another version|Exact published version|manualVersion|<input/);
   assert.doesNotMatch(component, /onAnalyzeUpgrade/);
 });
+
+test('target labels distinguish publisher-declared LTS from the latest stable fallback', () => {
+  assert.match(component, /return 'Publisher LTS'/);
+  assert.match(component, /return 'Latest stable'/);
+  assert.match(component, /Publisher LTS is preferred when the package declares an/);
+  assert.match(component, /Otherwise, the latest stable/);
+  assert.doesNotMatch(component, /return 'LTS'/);
+});

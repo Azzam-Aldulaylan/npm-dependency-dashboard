@@ -70,6 +70,10 @@ test('only direct removals render selectable controls and uncertain recommendati
   assert.match(workspace, /Why removal is blocked/);
   assert.match(workspace, /Why removal could not be verified/);
   assert.match(workspace, /Why removal is recommended/);
+  assert.match(workspace, /safe: 'Recommended removal'/);
+  assert.match(workspace, /A recommended removal means the supported source, script, configuration, and dependency checks found no/);
+  assert.match(workspace, /Static analysis cannot guarantee runtime safety/);
+  assert.match(workspace, /Select recommendations/);
   assert.match(workspace, /Deprecation alone never authorizes removal/);
   assert.match(adapter, /duplicateAssessments/);
   assert.match(workspace, /Review removal/);

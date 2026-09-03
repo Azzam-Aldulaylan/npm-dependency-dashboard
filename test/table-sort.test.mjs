@@ -183,8 +183,28 @@ test('ties within a manual sort break by package name', () => {
 
 // --------------------------------------------------------- cardDefaultComparator
 
-test('the "all" card default sorts by package name', () => {
-  const rows = [row({ name: 'zebra' }), row({ name: 'apple' })];
+test('the "all" card default ranks vulnerabilities from critical through safe', () => {
+  const rows = [
+    row({ name: 'safe' }),
+    row({ name: 'low', worstSeverity: 'low' }),
+    row({ name: 'critical', worstSeverity: 'critical' }),
+    row({ name: 'moderate', worstSeverity: 'moderate' }),
+    row({ name: 'high', worstSeverity: 'high' }),
+  ];
+  assert.deepEqual(names(rows.slice().sort(cardDefaultComparator('all'))), [
+    'critical',
+    'high',
+    'moderate',
+    'low',
+    'safe',
+  ]);
+});
+
+test('the "all" card default resolves equal severity rows by package name', () => {
+  const rows = [
+    row({ name: 'zebra', worstSeverity: 'high' }),
+    row({ name: 'apple', worstSeverity: 'high' }),
+  ];
   assert.deepEqual(names(rows.slice().sort(cardDefaultComparator('all'))), ['apple', 'zebra']);
 });
 
@@ -238,8 +258,8 @@ test('the "attention" card default ranks critical vuln, then high vuln, then dep
 // ------------------------------------------------------- resolveSortComparator
 
 test('a null sort state falls back to the card default', () => {
-  const rows = [row({ name: 'zebra' }), row({ name: 'apple' })];
-  assert.deepEqual(names(sortRows(rows, null, 'all')), ['apple', 'zebra']);
+  const rows = [row({ name: 'safe' }), row({ name: 'critical', worstSeverity: 'critical' })];
+  assert.deepEqual(names(sortRows(rows, null, 'all')), ['critical', 'safe']);
 });
 
 test('a manual sort state overrides the card default', () => {

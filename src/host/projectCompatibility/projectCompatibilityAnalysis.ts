@@ -33,6 +33,23 @@ export async function analyzeProjectCompatibilityMedium(input: {
   signal?: AbortSignal;
 }): Promise<ProjectCompatibilityAnalysis> {
   const scanReason = input.project.scanLimitations?.join('|') || 'project-source-scan-truncated';
+  const frameworkAnalyzers = input.identity.packageName === 'next'
+    ? [
+        createNextProjectCompatibilityAnalyzer({
+          files: input.project.ruleFiles,
+          scripts: input.project.scripts,
+          declaredDependencies: input.project.declaredDependencies,
+        }),
+        () => {
+          const result = analyzeDeprecatedApis({
+            identity: input.identity,
+            references: input.project.imports,
+            sourceComplete: !input.project.truncated,
+          });
+          return result.status === 'partial' ? { ...result, unavailableReason: scanReason } : result;
+        },
+      ]
+    : [];
   const analyzers = [
     input.targetMetadata === undefined
       ? () => unavailable('runtime-compatibility', 'target-metadata-unavailable')
@@ -56,15 +73,7 @@ export async function analyzeProjectCompatibilityMedium(input: {
         unavailableReason: 'tooling-metadata-incomplete',
       };
     },
-    createNextProjectCompatibilityAnalyzer({
-      files: input.project.ruleFiles,
-      scripts: input.project.scripts,
-      declaredDependencies: input.project.declaredDependencies,
-    }),
-    () => {
-      const result = analyzeDeprecatedApis({ identity: input.identity, references: input.project.imports, sourceComplete: !input.project.truncated });
-      return result.status === 'partial' ? { ...result, unavailableReason: scanReason } : result;
-    },
+    ...frameworkAnalyzers,
     input.targetCommands === undefined
       ? () => unavailable('package-script-compatibility', 'package-command-metadata-unavailable')
       : () => analyzePackageScripts({

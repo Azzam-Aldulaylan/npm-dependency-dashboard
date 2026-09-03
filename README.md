@@ -1,6 +1,6 @@
-# npm Dependency Dashboard
+# Dependency Dashboard
 
-A VS Code extension that shows every direct npm dependency of your project — package name, current/wanted/latest version, and known vulnerabilities — in a single in-editor panel, with a one-click upgrade action. No more jumping to the terminal for `npm outdated` and `npm audit`.
+A VS Code extension for understanding and safely changing npm and pnpm dependencies. It combines installed and available versions, vulnerability paths, compatibility-aware upgrade and removal reviews, transitive remediation, and Smart Cleanup in one in-editor workflow.
 
 Supports npm and pnpm projects. Yarn and private-registry authentication beyond the package manager's own configuration remain out of scope (see [Known limitations](#known-limitations)).
 
@@ -12,16 +12,31 @@ Opening the dashboard scans the selected project's `package.json` (and lockfile,
 - **Current** — the version actually installed, from the lockfile. If there's no lockfile, this shows the declared range instead, tagged as `workspace`, `file:`, `git`, `alias`, `tarball`, or `unresolved`, depending on why a lockfile version can't be shown.
 - **Wanted / Latest** — see [Current, Wanted, and Latest](#current-wanted-and-latest).
 - **Vulnerabilities** — a severity badge; click a row to expand full advisory details, including which transitive package is actually flagged and the dependency path down to it.
-- **Action** — an Upgrade button when a newer version is available.
+- **Action** — a package workspace for vulnerability details, Upgrade Review, Removal Review, and verified transitive fixes.
+
+Project Maintenance adds bulk review actions, while Smart Cleanup identifies removal candidates, deprecated packages, and duplicate installed versions. Destructive changes always receive a final review and project-state revalidation first.
+
+## Screenshots
+
+![Dependency Dashboard showing a disposable npm project's updates and vulnerabilities](media/screenshots/dashboard.png)
+
+![Smart Cleanup review showing recommended and blocked dependency removals](media/screenshots/smart-cleanup.png)
 
 ## Installation
 
-1. Install the extension from the VS Code Marketplace (search "Dependency Dashboard") — see [Publisher and Marketplace status](#publisher-and-marketplace-status) below for current availability.
+1. Install the extension from the VS Code Marketplace (search "Dependency Dashboard") after the first public release. Until then, install the packaged VSIX from the repository's release artifacts — see [Publisher and Marketplace status](#publisher-and-marketplace-status).
 2. Open a workspace that contains a `package.json`. The extension activates automatically at that point, but activating does not open anything by itself.
 3. Run **Dependency Dashboard: Open** from the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) to open the panel.
 4. If the workspace has more than one `package.json` (a monorepo), you'll be asked to pick a project — see [Monorepo support](#monorepo-and-project-picker-support).
 
 Use **Dependency Dashboard: Refresh** to force a re-scan at any time.
+
+## Reviewing removals and cleanup
+
+- **Removal Review** checks project usage, package scripts and configuration, dependency requirements, and affected security findings before a direct dependency can be removed.
+- **Project Maintenance** lets you filter and review multiple direct dependencies without treating an initial “unused” heuristic as permission to remove them.
+- **Smart Cleanup** combines unused-dependency evidence, installed-version deprecations, safe duplicate consolidation simulations, and the security impact of the current selection. Recommended actions are revalidated before execution; blocked and not-verified items remain unselected.
+- **Transitive remediation** can build a bounded fix plan when the dependency graph can move an affected child package to a patched version without changing the selected direct package.
 
 ## Current, Wanted, and Latest
 
@@ -123,6 +138,8 @@ npm run package    # runs vscode:prepublish (a production build) automatically, 
 
 `@vscode/vsce` and the pnpm fixture CLI are pinned development dependencies, so packaging and release tests do not depend on global tools.
 
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and [SECURITY.md](SECURITY.md) for private vulnerability reporting.
+
 ## Known limitations
 
 - Yarn is not supported.
@@ -136,9 +153,9 @@ npm run package    # runs vscode:prepublish (a production build) automatically, 
 
 ## Publisher and Marketplace status
 
-This extension has not yet been published to the VS Code Marketplace. Publishing requires a registered Marketplace publisher ID (any publisher account) — the Marketplace's separate "verified" badge (domain ownership verification) is optional and not a prerequisite for a first publication.
+This extension has not yet been published to the VS Code Marketplace. The v1 package is prepared, but `package.json` must be given the repository owner's registered Marketplace publisher ID before publication. The Marketplace's separate "verified" badge (domain ownership verification) is optional and not a prerequisite for a first publication.
 
-The manifest sets `"preview": true`, which shows a "Preview" badge on the listing once published. That is independent of, and not the same as, VS Code's separate pre-release release channel (`vsce publish --pre-release`), which requires users to explicitly opt in to pre-release updates and was not used for this release.
+The v1 manifest is configured as a stable release (`"preview": false`). A future pre-release channel would be published explicitly with `vsce publish --pre-release`.
 
 ## License
 

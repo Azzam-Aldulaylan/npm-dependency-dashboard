@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Dependency Dashboard</title>
+  <rect width="256" height="256" rx="52" fill="#0877c9"/>
+  <path d="M128 47 62 84v73l66 38 66-38V84l-66-37Z" fill="none" stroke="#fff" stroke-width="15" stroke-linejoin="round"/>
+  <path d="m63 85 65 38 65-38M128 123v72" fill="none" stroke="#fff" stroke-width="15" stroke-linejoin="round"/>
+  <circle cx="183" cy="184" r="39" fill="#1f9d55" stroke="#0877c9" stroke-width="9"/>
+  <path d="m164 184 13 13 25-29" fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

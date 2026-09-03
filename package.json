@@ -1,12 +1,13 @@
 {
   "name": "npm-dependency-dashboard",
   "displayName": "Dependency Dashboard",
-  "description": "See installed packages, available updates, and vulnerabilities in one panel.",
-  "version": "0.0.1",
+  "description": "Audit, review, upgrade, and clean npm or pnpm dependencies safely inside VS Code.",
+  "version": "1.0.0",
   "private": true,
-  "preview": true,
+  "preview": false,
   "license": "MIT",
   "publisher": "CHANGEME",
+  "icon": "media/icon.png",
   "author": "Azzam Aldulaylan",
   "homepage": "https://github.com/Azzam-Aldulaylan/npm-dependency-dashboard#readme",
   "bugs": {

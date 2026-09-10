@@ -12,7 +12,7 @@
  *      through untouched — length-preserving throughout, so every offset in
  *      the stripped text is the identical offset in the original.
  *   2. A small set of targeted patterns then finds only the specifier
- *      immediately following `import`, `require(`, `import(`, or
+ *      immediately following `import`, `require(`, `require.resolve(`, `import(`, or
  *      `export ... from` — never an arbitrary quoted string elsewhere in
  *      the file.
  *
@@ -232,6 +232,10 @@ const QUOTED = "(['\"`])((?:\\\\.|(?!\\1).)*)\\1";
 
 const KEYWORD_PATTERNS: KeywordPattern[] = [
   { kind: 'dynamic-import', regex: new RegExp(`\\bimport\\s*\\(\\s*${QUOTED}`, 'g') },
+  // Keep `require.resolve()` compatible with existing consumers by reporting
+  // it as a `require` reference. Static resolution is still concrete evidence
+  // that the package is needed at runtime or during tool configuration.
+  { kind: 'require', regex: new RegExp(`\\brequire\\s*\\.\\s*resolve\\s*\\(\\s*${QUOTED}`, 'g') },
   { kind: 'require', regex: new RegExp(`\\brequire\\s*\\(\\s*${QUOTED}`, 'g') },
   // `import ... from '<spec>'` and `export ... from '<spec>'` — anything
   // between the keyword and `from` that isn't a quote/semicolon (covers

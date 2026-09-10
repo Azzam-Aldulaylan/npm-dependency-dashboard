@@ -25,17 +25,45 @@ export interface UsageSummaryCounts {
   dynamicImports: number;
   scripts: number;
   configReferences: number;
+  /** References whose file or package.json script is clearly test-scoped. */
+  testReferences: number;
+  /** References not proven to be test-scoped. */
+  nonTestReferences: number;
+}
+
+function isTestReference(reference: DependencyReference): boolean {
+  if (reference.kind === 'script') {
+    return /^(?:test|coverage|e2e)(?::|$)/i.test(reference.context ?? '');
+  }
+  const filePath = reference.filePath.toLowerCase();
+  return (
+    /(?:^|\/)(?:__tests__|tests?|specs?|e2e)(?:\/|$)/.test(filePath) ||
+    /\.(?:test|spec)\.[^/]+$/.test(filePath) ||
+    /(?:^|\/)(?:jest|vitest)\.(?:config|setup)\.[^/]+$/.test(filePath) ||
+    /(?:^|\/)setup-tests?\.[^/]+$/.test(filePath)
+  );
 }
 
 /** Pure tally over an already-completed usage scan's references — never a second scan, never a category the scanner doesn't already distinguish (see DependencyReferenceKind). */
 export function usageSummaryCounts(references: readonly DependencyReference[]): UsageSummaryCounts {
+  const testReferences = references.filter(isTestReference).length;
   return {
     referencedInFiles: new Set(references.map((reference) => reference.filePath)).size,
     importStatements: references.filter((reference) => reference.kind === 'import' || reference.kind === 'require').length,
     dynamicImports: references.filter((reference) => reference.kind === 'dynamic-import').length,
     scripts: references.filter((reference) => reference.kind === 'script').length,
     configReferences: references.filter((reference) => reference.kind === 'config').length,
+    testReferences,
+    nonTestReferences: references.length - testReferences,
   };
+}
+
+export function usageScopeLabel(counts: UsageSummaryCounts): string {
+  const total = counts.testReferences + counts.nonTestReferences;
+  if (total === 0) return 'No references found';
+  if (counts.nonTestReferences === 0) return 'Tests only';
+  if (counts.testReferences > 0) return 'Application and tests';
+  return 'Application or tooling';
 }
 
 /**
@@ -47,6 +75,9 @@ export function usageSummaryCounts(references: readonly DependencyReference[]): 
  */
 export function usageSignificanceCopy(row: PackageRow, counts: UsageSummaryCounts | null): string {
   if (counts === null) return `Usage analysis for ${row.name} hasn't finished yet.`;
+  if (counts.testReferences > 0 && counts.nonTestReferences === 0) {
+    return `${row.name} is referenced only by tests or test tooling. Removing it may break test coverage even when the application build succeeds.`;
+  }
   if (counts.importStatements + counts.dynamicImports > 0) {
     return `${row.name} is referenced directly by application code and is actively used by this project.`;
   }

@@ -7,6 +7,7 @@ import type { UpgradeAnalysisPresentation } from '../../../src/host/webviewProto
 import type { UpgradeAnalysisSections as UpgradeAnalysisSectionsState } from '../../../src/host/upgradeAnalysisSections.js';
 import { hasPlannerAddedCoordination, upgradeAnalysisFreshness } from '../../../src/host/upgradeReviewUiState.js';
 import { deriveUpgradeReviewDecision } from '../../../src/host/upgradeReviewDecision.js';
+import { summarizeProjectCompatibility } from '../../../src/host/projectCompatibilityUiState.js';
 import { classifyUpdate } from '../../../src/host/updateClassification.js';
 import { severityDisplay } from '../../../src/host/severityDisplay.js';
 import { summarizeUpgradeSecurity } from '../../../src/host/upgradeSecuritySummary.js';
@@ -61,6 +62,49 @@ function usageAnalysisLabel(usage: UsageRequestState | undefined): string {
   if (usage.phase === 'error') return 'Usage check failed';
   const count = usage.result.references.length;
   return count === 0 ? 'No references found' : `Used in ${count} file${count === 1 ? '' : 's'}`;
+}
+
+function joinedReviewAreas(areas: readonly string[]): string {
+  if (areas.length < 2) return areas[0] ?? 'the analysis details below';
+  if (areas.length === 2) return `${areas[0]} and ${areas[1]}`;
+  return `${areas.slice(0, -1).join(', ')}, and ${areas.at(-1)}`;
+}
+
+function upgradeReviewAreas(analysis: UpgradeAnalysisPresentation, coordinated: boolean): string[] {
+  const areas: string[] = [];
+  if (analysis.compatibility.status === 'conflict') {
+    areas.push(coordinated ? 'the coordinated dependency changes' : 'the unresolved dependency conflict');
+  } else if (analysis.compatibility.status === 'warning') {
+    const count = analysis.compatibility.findings.length;
+    areas.push(count > 0 ? `${count} dependency compatibility ${count === 1 ? 'warning' : 'warnings'}` : 'the dependency compatibility warnings');
+  }
+  if (analysis.compatibility.status === 'unknown' || analysis.compatibility.completeness !== 'complete') {
+    areas.push('the incomplete dependency checks');
+  }
+
+  const projectSummary = summarizeProjectCompatibility(analysis.projectCompatibility);
+  if (projectSummary.total > 0) {
+    areas.push(`${projectSummary.total} project compatibility ${projectSummary.total === 1 ? 'finding' : 'findings'}`);
+  }
+  const applicableIncompleteAnalyzers = projectSummary.incompleteAnalyzers.filter((entry) => !(
+    entry.reason === 'deprecated-api-rules-unavailable' && analysis.projectCompatibility.identity.packageName !== 'next'
+  ));
+  if (analysis.projectCompatibility.analyzers.length === 0) {
+    areas.push('the missing project compatibility checks');
+  } else if (applicableIncompleteAnalyzers.length > 0) {
+    areas.push(`${applicableIncompleteAnalyzers.length} incomplete project ${applicableIncompleteAnalyzers.length === 1 ? 'check' : 'checks'}`);
+  }
+
+  if (analysis.security !== null) {
+    const security = summarizeUpgradeSecurity(analysis.security);
+    if (security.confirmedRemainingCount > 0) {
+      areas.push(`${security.confirmedRemainingCount} ${security.confirmedRemainingCount === 1 ? 'vulnerability that remains' : 'vulnerabilities that remain'}`);
+    }
+    if (security.unknownCount > 0) {
+      areas.push(`${security.unknownCount} undetermined security ${security.unknownCount === 1 ? 'outcome' : 'outcomes'}`);
+    }
+  }
+  return areas;
 }
 
 /**
@@ -452,6 +496,8 @@ export function UpgradeReviewPanel({
   const expired = upgradeAnalysisFreshness(analysis.analyzedAt, analysis.expiresAt, now) === 'expired';
   const executionBlocked = hardStale || expired;
   const action = upgradeConfirmationAction(coordinated ? analysis : { ...analysis, smartPlan: null });
+  const decision = deriveUpgradeReviewDecision(analysis, coordinated);
+  const reviewAreas = upgradeReviewAreas(analysis, coordinated);
 
   return withTargetSelector(
     <div className="review-panel">
@@ -462,6 +508,11 @@ export function UpgradeReviewPanel({
         now={now}
         onRefresh={onRefresh}
       />
+      {decision.caution ? (
+        <StatusBanner tone="warning" className="upgrade-review__summary-banner">
+          <strong>{decision.headline.label}.</strong> Review {joinedReviewAreas(reviewAreas)} before upgrading.
+        </StatusBanner>
+      ) : null}
       <div className="upgrade-tab">
         <div className="upgrade-tab__summary">
           <UpgradeSummaryCard analysis={analysis} />

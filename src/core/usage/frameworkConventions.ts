@@ -29,6 +29,9 @@ const CONVENTION_PATTERNS: RegExp[] = [
   /^remark-/,
   /^rehype-/,
   /^unplugin-/,
+  /^react-native-/,
+  /^@react-native\//,
+  /^@react-native-community\//,
 ];
 
 /** Well-known CLI/tooling packages, invoked by convention (a config file, a `bin` script) more often than a static import. */

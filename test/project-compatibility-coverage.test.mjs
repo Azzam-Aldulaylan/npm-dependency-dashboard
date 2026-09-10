@@ -133,6 +133,36 @@ test('source coverage reasons survive medium and deep phases without losing find
   }
 });
 
+test('Next.js rule analyzers are omitted for non-Next package reviews', async () => {
+  const project = {
+    scripts: {},
+    declaredDependencies: { 'react-native': '^0.80.0' },
+    projectNodeRange: null,
+    imports: [reference('react-native-svg-transformer/react-native')],
+    ruleFiles: [],
+    scannedFileCount: 1,
+    truncated: false,
+    scanLimitations: [],
+    evidenceFingerprint: 'react-native-fixture',
+  };
+  const analysis = await analyzeProjectCompatibilityMedium({
+    identity: {
+      ...identity,
+      packageName: 'react-native-svg-transformer',
+      currentVersion: '1.5.0',
+      targetVersion: '1.5.1',
+    },
+    project,
+    toolingPackages: [],
+    toolingMetadataIncomplete: false,
+  });
+
+  assert.equal(analysis.analyzers.some((entry) => entry.analyzerId === 'next-migration-rules'), false);
+  assert.equal(analysis.analyzers.some((entry) => entry.analyzerId === 'deprecated-api-compatibility'), false);
+  assert.equal(analysis.analyzers.some((entry) => entry.analyzerId === 'runtime-compatibility'), true);
+  assert.equal(analysis.analyzers.some((entry) => entry.analyzerId === 'project-source-scan'), true);
+});
+
 test('coverage messages are actionable, deduplicated and never echo raw failures', () => {
   const messages = projectCompatibilityLimitations('project-node-range-missing|runtime-node-version-unknown|project-node-range-missing', 'partial');
   assert.equal(messages.length, 2);

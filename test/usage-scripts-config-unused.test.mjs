@@ -47,6 +47,11 @@ test('usage config discovery includes extensionless ESLint and Babel inputs', ()
   assert.equal(CONFIG_FILE_GLOBS.includes('.babelrc'), true);
 });
 
+test('usage config discovery includes React Native host configuration', () => {
+  assert.equal(CONFIG_FILE_GLOBS.includes('metro.config.*'), true);
+  assert.equal(CONFIG_FILE_GLOBS.includes('react-native.config.*'), true);
+});
+
 test('a package referenced in a config file body is found', () => {
   assert.equal(configReferencesPackage(`module.exports = { plugins: ['tailwindcss'] };`, 'tailwindcss'), true);
 });
@@ -78,6 +83,12 @@ test('known ESLint/Babel/PostCSS plugin naming conventions are recognized', () =
 test('well-known CLI tooling packages are recognized', () => {
   assert.equal(isFrameworkConventionPackage('typescript'), true);
   assert.equal(isFrameworkConventionPackage('eslint'), true);
+});
+
+test('React Native convention-loaded packages are handled conservatively', () => {
+  assert.equal(isFrameworkConventionPackage('react-native-svg-transformer'), true);
+  assert.equal(isFrameworkConventionPackage('@react-native/metro-config'), true);
+  assert.equal(isFrameworkConventionPackage('@react-native-community/netinfo'), true);
 });
 
 test('an ordinary application dependency is not a framework-convention package', () => {

@@ -150,8 +150,13 @@ export function ProjectCompatibilitySection({
   const groups = groupProjectCompatibilityFindings(analysis);
   const grouped = new Map(groups.map((group) => [group.confidence, group.findings]));
   const summary = summarizeProjectCompatibility(analysis);
-  const incomplete = summary.incompleteAnalyzers;
-  const allCompleted = analysis.analyzers.length > 0 && incomplete.length === 0;
+  const nonApplicableRulePack = (reason: string | undefined): boolean =>
+    reason === 'deprecated-api-rules-unavailable' && analysis.identity.packageName !== 'next';
+  const incomplete = summary.incompleteAnalyzers.filter((entry) => !nonApplicableRulePack(entry.reason));
+  const applicableAnalyzerCount = analysis.analyzers.filter(
+    (entry) => !nonApplicableRulePack(entry.unavailableReason)
+  ).length;
+  const allCompleted = applicableAnalyzerCount > 0 && incomplete.length === 0;
   const noFindings = analysis.findings.length === 0;
 
   return (

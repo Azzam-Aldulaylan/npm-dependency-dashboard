@@ -37,6 +37,50 @@ test('require("foo") is detected', () => {
   assert.equal(matches[0].kind, 'require');
 });
 
+test('require.resolve detects a static package subpath in Metro config formatting', () => {
+  const source = [
+    'const config = {',
+    '  transformer: {',
+    '    babelTransformerPath: require.resolve(',
+    "      'react-native-svg-transformer/react-native',",
+    '    ),',
+    '  },',
+    '};',
+  ].join('\n');
+
+  const matches = scanSourceForImportSpecifiers(source);
+  assert.deepEqual(matches, [{
+    packageName: 'react-native-svg-transformer',
+    specifier: 'react-native-svg-transformer/react-native',
+    line: 4,
+    column: 8,
+    snippet: "'react-native-svg-transformer/react-native',",
+    kind: 'require',
+  }]);
+});
+
+test('require.resolve preserves scoped base-package normalization', () => {
+  const matches = scanSourceForImportSpecifiers(
+    "const configPath = require.resolve('@scope/tool/config/defaults');"
+  );
+  assert.deepEqual(
+    matches.map(({ packageName, specifier, kind }) => ({ packageName, specifier, kind })),
+    [{ packageName: '@scope/tool', specifier: '@scope/tool/config/defaults', kind: 'require' }]
+  );
+});
+
+test('require.resolve ignores comments, documentation strings, and dynamic expressions', () => {
+  const source = [
+    "// require.resolve('comment-only')",
+    "/* require.resolve('block-comment-only') */",
+    `const docs = "require.resolve('documentation-only')";`,
+    "const dynamic = require.resolve(packageName);",
+    'const interpolated = require.resolve(`plugin-${name}`);',
+  ].join('\n');
+
+  assert.deepEqual(scanSourceForImportSpecifiers(source), []);
+});
+
 test('dynamic import("foo") is detected', () => {
   const matches = scanSourceForImports(`const x = await import('foo');`);
   assert.deepEqual(names(matches), ['foo']);
@@ -131,6 +175,7 @@ test('multiple imports across multiple lines are all found with correct kinds', 
     `import a from 'alpha';`,
     `const b = require('beta');`,
     `const c = import('gamma');`,
+    `const d = require.resolve('delta/adapter');`,
   ].join('\n');
   const matches = scanSourceForImports(source);
   assert.deepEqual(
@@ -139,6 +184,7 @@ test('multiple imports across multiple lines are all found with correct kinds', 
       ['alpha', 'import', 1],
       ['beta', 'require', 2],
       ['gamma', 'dynamic-import', 3],
+      ['delta', 'require', 4],
     ]
   );
 });

@@ -60,7 +60,13 @@ function sourceReferenceCount(usage: UsageRequestState | undefined): number | nu
   return sourcePaths.size;
 }
 
-function statusCopy(assessment: RemovalAssessment | undefined): {
+function requiredPeerEvidence(assessment: RemovalAssessment | undefined): Extract<RemovalEvidence, { kind: 'peer-requirement' }>[] {
+  return evidenceOfKind(assessment, 'peer-requirement').filter(
+    (entry): entry is Extract<RemovalEvidence, { kind: 'peer-requirement' }> => entry.kind === 'peer-requirement' && !entry.optional
+  );
+}
+
+function statusCopy(packageName: string, assessment: RemovalAssessment | undefined): {
   label: string;
   className: 'compatible' | 'warning' | 'conflict' | 'unknown';
   detail: string;
@@ -73,6 +79,22 @@ function statusCopy(assessment: RemovalAssessment | undefined): {
     };
   }
   if (assessment.status === 'blocked') {
+    const blockers = requiredPeerEvidence(assessment);
+    const first = blockers[0];
+    if (blockers.length === 1 && first !== undefined) {
+      return {
+        label: `Blocked by ${first.requiredBy}`,
+        className: 'conflict',
+        detail: `${first.requiredBy} requires ${packageName} as a peer dependency matching ${first.requestedRange}.`,
+      };
+    }
+    if (blockers.length > 1) {
+      return {
+        label: `Blocked by ${blockers.length} peer requirements`,
+        className: 'conflict',
+        detail: `${blockers.map((entry) => entry.requiredBy).join(', ')} require ${packageName} as a peer dependency. Review each required range before changing the dependency graph.`,
+      };
+    }
     return {
       label: 'Removal blocked',
       className: 'conflict',
@@ -109,7 +131,7 @@ function RemovalSummaryCard({
   assessment: RemovalAssessment | undefined;
   advisoriesAvailable: boolean;
 }): ReactElement {
-  const status = statusCopy(assessment);
+  const status = statusCopy(row.name, assessment);
   const change = analysis.changes.find((candidate) => candidate.packageName === row.name) ?? analysis.changes[0];
   const requiredBy = change?.stillRequiredBy.length ?? 0;
 
@@ -184,13 +206,14 @@ function RecommendedActionCard({
   onViewReferences: () => void;
 }): ReactElement {
   const allowed = assessment?.status === 'low-risk' || assessment?.status === 'review';
+  const blockedStatus = assessment?.status === 'blocked' ? statusCopy(row.name, assessment) : null;
   const message =
     assessment?.status === 'low-risk'
       ? 'No known project reference or required peer dependency was found.'
       : assessment?.status === 'review'
         ? 'Review the detected references before choosing to remove this dependency.'
         : assessment?.status === 'blocked'
-          ? 'Resolve the required peer dependency before removing this package.'
+          ? `${blockedStatus?.detail ?? 'A required peer dependency blocks this removal.'} Keep this dependency or change the requiring package in a coordinated operation.`
           : 'Re-run impact analysis before allowing a destructive removal.';
 
   return (
@@ -565,6 +588,7 @@ export function RemovalReviewPanel({
 
   const removalAllowed = assessment?.status === 'low-risk' || assessment?.status === 'review';
   const blocked = assessment?.status === 'blocked';
+  const blockedStatus = blocked ? statusCopy(row.name, assessment) : null;
 
   return (
     <div className="review-panel removal-review">
@@ -607,7 +631,7 @@ export function RemovalReviewPanel({
           className="button button--danger removal-review__footer-action"
           onClick={onConfirm}
           disabled={busy || !removalAllowed}
-          title={blocked ? 'Removal is blocked by a required peer dependency.' : !removalAllowed ? 'Removal impact must be known before proceeding.' : undefined}
+          title={blocked ? blockedStatus?.detail : !removalAllowed ? 'Removal impact must be known before proceeding.' : undefined}
         >
           <IconTrash aria-hidden="true" />
           {actionLabel(row.name, assessment)}

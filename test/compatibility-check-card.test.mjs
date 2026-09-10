@@ -82,6 +82,26 @@ test('unsupported API scope is explained as a coverage limit, never a successful
   assert.doesNotMatch(details, /Some checks could not be completed/);
 });
 
+test('a package without a matching framework rule does not show Next.js-specific coverage guidance', () => {
+  const reactNativeIdentity = {
+    ...identity,
+    packageName: 'react-native',
+    currentVersion: '0.86.0',
+    targetVersion: '0.87.0',
+  };
+  const value = {
+    ...analysis([
+      { analyzerId: 'runtime-compatibility', status: 'complete', findings: [] },
+      { analyzerId: 'import-compatibility', status: 'complete', findings: [] },
+      analyzeDeprecatedApis({ identity: reactNativeIdentity, references: [], sourceComplete: true }),
+    ]),
+    identity: reactNativeIdentity,
+  };
+  const details = renderDetails(value);
+  assert.match(details, /Completed checks found no project compatibility issues/);
+  assert.doesNotMatch(details, /Next\.js|Next 16|next\/legacy\/image|Coverage limits/);
+});
+
 test('a deprecated import counts once in source/config and retains its detailed evidence', () => {
   const deprecated = analyzeDeprecatedApis({ identity, references: [{ specifier: 'next/legacy/image', kind: 'import', filePath: 'src/page.tsx', line: 2, column: 1, snippet: 'import Image from "next/legacy/image"', usageId: 'trusted', referenceIndex: 0 }], sourceComplete: true });
   const value = analysis([{ analyzerId: 'project-source-scan', status: 'complete', findings: [] }, deprecated]);

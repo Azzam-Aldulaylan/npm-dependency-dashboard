@@ -38,6 +38,15 @@ test('Smart Cleanup preserves readable hierarchy across low-contrast VS Code the
   assert.match(styles, /\.smart-cleanup-category__count\[data-empty='true'\]/);
 });
 
+test('the cleanup plan owns the shrinking scroll region between its fixed header and footer', () => {
+  assert.match(styles, /\.smart-cleanup-body\s*\{[\s\S]*?flex:\s*1 1 auto/);
+  assert.match(styles, /\.smart-cleanup-body\s*\{[\s\S]*?min-height:\s*0/);
+  assert.match(styles, /\.smart-cleanup-body\s*\{[\s\S]*?overflow-y:\s*auto/);
+  assert.match(styles, /\.smart-cleanup-body\s*\{[\s\S]*?overscroll-behavior:\s*contain/);
+  assert.match(styles, /\.smart-cleanup-header\s*\{[\s\S]*?flex-shrink:\s*0/);
+  assert.match(styles, /\.smart-cleanup-footer\s*\{[\s\S]*?flex-shrink:\s*0/);
+});
+
 test('progress lists only checks that perform asynchronous analysis', () => {
   assert.doesNotMatch(app, /Reading dependency inventory/);
   assert.doesNotMatch(app, /Preparing security impact/);

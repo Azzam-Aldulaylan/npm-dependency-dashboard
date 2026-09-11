@@ -7027,11 +7027,14 @@ button {
 
 .smart-cleanup-body {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 0.9rem;
-  min-height: 13rem;
+  min-height: 0;
   padding: 1rem 1.15rem 1.15rem;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .smart-cleanup-footer {

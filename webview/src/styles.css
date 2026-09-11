@@ -1501,6 +1501,7 @@ button {
   .banner__icon--spin {
     animation: none;
   }
+
 }
 
 /* ------------------------------------------------------------ empty state */
@@ -2039,6 +2040,7 @@ button {
 }
 
 .manage-tabs__tab {
+  --manage-tab-accent: var(--accent-total);
   display: grid;
   grid-template-columns: 1.35rem minmax(0, 1fr) 0.4rem;
   min-width: 0;
@@ -2057,6 +2059,26 @@ button {
   cursor: pointer;
 }
 
+.manage-tabs__tab--overview {
+  --manage-tab-accent: var(--accent-total);
+}
+
+.manage-tabs__tab--vulnerabilities {
+  --manage-tab-accent: var(--accent-vulnerabilities);
+}
+
+.manage-tabs__tab--usage {
+  --manage-tab-accent: var(--vscode-charts-blue, #3794ff);
+}
+
+.manage-tabs__tab--upgrade {
+  --manage-tab-accent: var(--accent-updates);
+}
+
+.manage-tabs__tab--removal {
+  --manage-tab-accent: var(--vscode-charts-orange, var(--vscode-editorWarning-foreground, #cca700));
+}
+
 .manage-tabs__label {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -2071,7 +2093,7 @@ button {
   width: 1.35rem;
   height: 1.35rem;
   border-radius: 4px;
-  color: var(--vscode-descriptionForeground);
+  color: color-mix(in srgb, var(--manage-tab-accent) 58%, var(--vscode-descriptionForeground));
 }
 
 .manage-tabs__icon svg {
@@ -2081,7 +2103,7 @@ button {
 
 .manage-tabs__tab:hover {
   color: var(--vscode-foreground);
-  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+  background: color-mix(in srgb, var(--manage-tab-accent) 7%, var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)));
 }
 
 .manage-tabs__tab:focus-visible {
@@ -2090,14 +2112,14 @@ button {
 }
 
 .manage-tabs__tab--active {
-  border-bottom-color: var(--accent-total);
+  border-bottom-color: var(--manage-tab-accent);
   color: var(--vscode-foreground);
   font-weight: 600;
 }
 
 .manage-tabs__tab--active .manage-tabs__icon {
-  color: var(--accent-total);
-  background: color-mix(in srgb, var(--accent-total) 14%, transparent);
+  color: var(--manage-tab-accent);
+  background: color-mix(in srgb, var(--manage-tab-accent) 14%, transparent);
 }
 
 .manage-tabs__dot {
@@ -2109,7 +2131,7 @@ button {
 }
 
 .manage-tabs__dot--active {
-  color: var(--accent-total);
+  color: var(--manage-tab-accent);
 }
 
 .manage-tabs__dot--neutral {
@@ -2133,6 +2155,7 @@ button {
 .manage-modal__body {
   padding: 0.95rem 1.1rem 1.05rem;
   overflow-y: auto;
+  scroll-padding-block: 0.75rem 5rem;
   scrollbar-gutter: stable;
 }
 
@@ -2176,6 +2199,30 @@ button {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+}
+
+.overview-summary-card {
+  --overview-summary-accent: var(--accent-total);
+  padding: 0.75rem;
+  border: 1px solid color-mix(
+    in srgb,
+    var(--overview-summary-accent) 34%,
+    var(--vscode-panel-border, rgba(128, 128, 128, 0.25))
+  );
+  border-radius: 6px;
+  background: color-mix(
+    in srgb,
+    var(--overview-summary-accent) 4%,
+    var(--vscode-editorWidget-background, var(--vscode-editor-background))
+  );
+}
+
+.overview-summary-card--health {
+  --overview-summary-accent: var(--vscode-charts-purple, #a78bfa);
+}
+
+.overview-summary-card .manage-section-heading {
+  color: color-mix(in srgb, var(--overview-summary-accent) 68%, var(--vscode-foreground));
 }
 
 .manage-section-heading {
@@ -2936,6 +2983,8 @@ button {
   align-items: flex-start;
   gap: 0.4rem;
   margin: -0.2rem 0 0;
+  padding-bottom: 0.7rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 26%, var(--vscode-panel-border, transparent));
   color: var(--vscode-descriptionForeground);
   font-size: 0.78em;
   line-height: 1.45;
@@ -2949,13 +2998,26 @@ button {
 
 /* Security summary — a solid (not tinted) icon circle in the worst-case red, since this card's whole job is to be the one urgent glance. */
 .vuln-summary-card {
+  --vuln-summary-accent: var(--vscode-editorError-foreground, #f14c4c);
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
   padding: 0.75rem 0.8rem;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border: 1px solid color-mix(in srgb, var(--vuln-summary-accent) 42%, var(--vscode-panel-border, rgba(128, 128, 128, 0.25)));
   border-radius: 6px;
-  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  background: color-mix(in srgb, var(--vuln-summary-accent) 4%, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+}
+
+.vuln-summary-card--moderate {
+  --vuln-summary-accent: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.vuln-summary-card--low {
+  --vuln-summary-accent: var(--vscode-editorInfo-foreground, #75beff);
+}
+
+.vuln-summary-card--info {
+  --vuln-summary-accent: var(--vscode-charts-purple, #a78bfa);
 }
 
 .vuln-summary-card__total {
@@ -2973,7 +3035,7 @@ button {
   height: 2.3rem;
   border-radius: 50%;
   color: var(--vscode-editor-background, #fff);
-  background: var(--vscode-editorError-foreground);
+  background: var(--vuln-summary-accent);
 }
 
 .vuln-summary-card__icon svg {
@@ -3000,7 +3062,7 @@ button {
   gap: 0.4rem 0.85rem;
   margin: 0;
   padding: 0.65rem 0 0;
-  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.18));
+  border-top: 1px solid color-mix(in srgb, var(--vuln-summary-accent) 30%, var(--vscode-panel-border, rgba(128, 128, 128, 0.18)));
   list-style: none;
 }
 
@@ -3065,6 +3127,15 @@ button {
   align-self: flex-start;
 }
 
+.vuln-tab__summary > .vuln-recommended {
+  border-color: color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 38%, var(--vscode-panel-border, transparent));
+  background: color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 5%, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+}
+
+.vuln-tab__summary > .vuln-recommended .manage-section-heading {
+  color: color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 58%, var(--vscode-foreground));
+}
+
 .vuln-filters {
   display: flex;
   flex-wrap: wrap;
@@ -3087,6 +3158,19 @@ button {
 
 .vuln-filter:hover {
   background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.vuln-filter--critical,
+.vuln-filter--high {
+  border-color: color-mix(in srgb, var(--vscode-editorError-foreground, #f14c4c) 32%, var(--vscode-panel-border, transparent));
+}
+
+.vuln-filter--moderate {
+  border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 32%, var(--vscode-panel-border, transparent));
+}
+
+.vuln-filter--low {
+  border-color: color-mix(in srgb, var(--vscode-editorInfo-foreground, #75beff) 32%, var(--vscode-panel-border, transparent));
 }
 
 .vuln-filter__count {
@@ -3133,13 +3217,27 @@ button {
 }
 
 .vuln-card {
+  --vuln-card-accent: var(--vscode-charts-purple, #a78bfa);
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
   padding: 0.75rem 0.85rem;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border: 1px solid color-mix(in srgb, var(--vuln-card-accent) 38%, var(--vscode-panel-border, rgba(128, 128, 128, 0.25)));
   border-radius: 6px;
-  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  background: color-mix(in srgb, var(--vuln-card-accent) 3%, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+}
+
+.vuln-card--critical,
+.vuln-card--high {
+  --vuln-card-accent: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+.vuln-card--moderate {
+  --vuln-card-accent: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.vuln-card--low {
+  --vuln-card-accent: var(--vscode-editorInfo-foreground, #75beff);
 }
 
 .vuln-card__head {
@@ -3147,6 +3245,8 @@ button {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.55rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--vuln-card-accent) 26%, var(--vscode-panel-border, transparent));
 }
 
 .vuln-card__title {
@@ -3336,6 +3436,54 @@ button {
   gap: 0.7rem;
 }
 
+.usage-summary-card {
+  --usage-summary-accent: var(--vscode-charts-blue, var(--accent-total));
+  padding: 0.7rem 0.75rem;
+  border: 1px solid color-mix(
+    in srgb,
+    var(--usage-summary-accent) 42%,
+    var(--vscode-panel-border, rgba(128, 128, 128, 0.25))
+  );
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--usage-summary-accent) 4%, transparent);
+}
+
+.usage-summary-card--secondary,
+.usage-summary-card--insight {
+  --usage-summary-accent: var(--vscode-charts-purple, #a78bfa);
+}
+
+.usage-summary-card > .manage-section-heading {
+  color: color-mix(in srgb, var(--usage-summary-accent) 66%, var(--vscode-descriptionForeground));
+}
+
+.usage-detail-card {
+  --usage-detail-accent: var(--vscode-charts-purple, #a78bfa);
+  border-color: color-mix(
+    in srgb,
+    var(--usage-detail-accent) 34%,
+    var(--vscode-panel-border, rgba(128, 128, 128, 0.25))
+  );
+  background: color-mix(in srgb, var(--usage-detail-accent) 2.5%, transparent);
+}
+
+.usage-detail-card--references {
+  --usage-detail-accent: var(--vscode-charts-blue, var(--accent-total));
+}
+
+.usage-detail-card--duplicates,
+.usage-detail-card--warning {
+  --usage-detail-accent: var(--vscode-editorWarning-foreground);
+}
+
+.usage-detail-card--hygiene:not(.usage-detail-card--warning) {
+  --usage-detail-accent: var(--vscode-charts-green, #89d185);
+}
+
+.usage-detail-card .analysis-card__title-icon {
+  color: var(--usage-detail-accent);
+}
+
 .usage-card__head {
   display: flex;
   align-items: center;
@@ -3416,7 +3564,11 @@ button {
   gap: 0.55rem;
   width: 100%;
   padding: 0.45rem 0.55rem;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border: 1px solid color-mix(
+    in srgb,
+    var(--vscode-charts-blue, var(--accent-total)) 28%,
+    var(--vscode-panel-border, rgba(128, 128, 128, 0.25))
+  );
   border-radius: 5px;
   background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   color: inherit;
@@ -3426,7 +3578,12 @@ button {
 }
 
 .usage-ref__button:not(.usage-ref__button--static):hover {
-  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+  border-color: color-mix(in srgb, var(--vscode-charts-blue, var(--accent-total)) 58%, var(--vscode-focusBorder));
+  background: color-mix(
+    in srgb,
+    var(--vscode-charts-blue, var(--accent-total)) 7%,
+    var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground))
+  );
 }
 
 .usage-ref__button--static {
@@ -3702,6 +3859,11 @@ button {
   font-size: 0.85em;
 }
 
+.review-panel__empty-status--explainer {
+  max-width: 38rem;
+  line-height: 1.5;
+}
+
 .review-panel {
   display: flex;
   flex-direction: column;
@@ -3718,41 +3880,424 @@ button {
   border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
 }
 
-/* Same two-column shell as .overview-panel / .vuln-tab / .usage-tab — one visual system across every tab. */
-.upgrade-tab {
+.upgrade-decision {
+  --upgrade-review-violet: var(--vscode-charts-purple, #a78bfa);
+  --upgrade-review-line: color-mix(in srgb, var(--upgrade-review-violet) 34%, var(--vscode-panel-border, transparent));
+  --upgrade-decision-accent: var(--vscode-charts-blue, var(--accent-total));
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(17rem, 0.9fr);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--upgrade-decision-accent) 56%, var(--upgrade-review-line));
+  border-radius: 8px;
+  background: linear-gradient(
+    118deg,
+    color-mix(in srgb, var(--upgrade-decision-accent) 9%, var(--vscode-editorWidget-background, var(--vscode-editor-background))) 0%,
+    color-mix(in srgb, var(--upgrade-review-violet) 5%, var(--vscode-editorWidget-background, var(--vscode-editor-background))) 100%
+  );
+}
+
+.upgrade-decision--compatible {
+  --upgrade-decision-accent: var(--vscode-charts-green, #89d185);
+}
+
+.upgrade-decision--warning {
+  --upgrade-decision-accent: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.upgrade-decision--conflict {
+  --upgrade-decision-accent: var(--vscode-errorForeground, #f14c4c);
+}
+
+.upgrade-decision--unknown {
+  --upgrade-decision-accent: var(--upgrade-review-violet);
+}
+
+.upgrade-decision__lead {
+  min-width: 0;
+  padding: 1.25rem 1.35rem;
+}
+
+.upgrade-decision__lead h3 {
+  margin: 0.7rem 0 0.4rem;
+  font-size: 1.08rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.upgrade-decision__versions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.upgrade-decision__versions code,
+.upgrade-decision__context code {
+  overflow-wrap: anywhere;
+}
+
+.upgrade-decision__versions code {
+  padding: 0.1rem 0.35rem;
+  border: 1px solid color-mix(in srgb, var(--upgrade-review-violet) 35%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--upgrade-review-violet) 11%, var(--vscode-textCodeBlock-background, transparent));
+  color: color-mix(in srgb, var(--upgrade-review-violet) 55%, var(--vscode-foreground));
+  font-variant-numeric: tabular-nums;
+}
+
+.upgrade-decision__reason {
+  max-width: 62ch;
+  margin: 0.85rem 0 0;
+  line-height: 1.45;
+}
+
+.upgrade-decision__review {
+  margin-top: 0.85rem;
+  border-color: color-mix(in srgb, var(--upgrade-review-violet) 62%, var(--vscode-button-border, transparent));
+}
+
+.upgrade-decision__context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.9rem;
+  margin-top: 1rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid color-mix(in srgb, var(--upgrade-review-line) 70%, transparent);
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.79em;
+}
+
+.upgrade-decision__context span {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.28rem;
+  min-width: 0;
+}
+
+.upgrade-decision__signals {
   display: flex;
   flex-direction: column;
+  justify-content: center;
+  margin: 0;
+  padding: 0.65rem 0.85rem;
+  border-left: 1px solid var(--upgrade-review-line);
+  background: color-mix(in srgb, var(--upgrade-review-violet) 3%, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+  list-style: none;
+}
+
+.upgrade-decision__signal + .upgrade-decision__signal {
+  border-top: 1px solid color-mix(in srgb, var(--upgrade-review-line) 72%, transparent);
+}
+
+.upgrade-decision__signal > button {
+  display: grid;
+  grid-template-columns: 1.7rem minmax(8.5rem, 1fr) minmax(7.5rem, auto) 0.9rem;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 3rem;
+  padding: 0.65rem 0.25rem;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font: inherit;
+  text-align: left;
+}
+
+.upgrade-decision__signal > button {
+  cursor: pointer;
+}
+
+.upgrade-decision__signal > button:hover {
+  background: color-mix(in srgb, var(--upgrade-review-violet) 9%, var(--vscode-list-hoverBackground, transparent));
+}
+
+.upgrade-decision__signal > button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.upgrade-decision__signal-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border: 1px solid color-mix(in srgb, currentColor 34%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  color: var(--vscode-descriptionForeground);
+}
+
+.upgrade-decision__signal--ok .upgrade-decision__signal-icon {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.upgrade-decision__signal--warning .upgrade-decision__signal-icon {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.upgrade-decision__signal--error .upgrade-decision__signal-icon {
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.upgrade-decision__signal--unknown .upgrade-decision__signal-icon,
+.upgrade-decision__signal--neutral .upgrade-decision__signal-icon {
+  color: var(--upgrade-review-violet);
+}
+
+.upgrade-decision__signal-label {
+  font-size: 0.84em;
+  font-weight: 600;
+}
+
+.upgrade-decision__signal-value {
+  min-width: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.79em;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.upgrade-decision__signal--ok .upgrade-decision__signal-value {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.upgrade-decision__signal--warning .upgrade-decision__signal-value {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.upgrade-decision__signal--error .upgrade-decision__signal-value {
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.upgrade-decision__signal--unknown .upgrade-decision__signal-value,
+.upgrade-decision__signal--neutral .upgrade-decision__signal-value {
+  color: color-mix(in srgb, var(--upgrade-review-violet) 68%, var(--vscode-foreground));
+}
+
+.upgrade-decision__signal-arrow {
+  color: var(--vscode-descriptionForeground);
+}
+
+/* The evidence column stays dominant; the recommendation is a short reading aid, not a second action surface. */
+.upgrade-tab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1.1rem;
 }
 
 @media (min-width: 64rem) {
   .upgrade-tab {
-    flex-direction: row;
+    grid-template-columns: minmax(0, 1fr) minmax(15rem, 18rem);
     align-items: flex-start;
     gap: 0.85rem;
   }
 
-  .upgrade-tab__summary {
-    flex: 0 0 18rem;
+  .upgrade-tab__recommendation {
     min-width: 0;
   }
 
   .upgrade-tab__details {
-    flex: 1 1 0;
     min-width: 0;
   }
 }
 
-.upgrade-tab__summary {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
+@media (min-width: 64rem) and (min-height: 44rem) {
+  .upgrade-tab__recommendation {
+    position: sticky;
+    top: 0;
+  }
 }
 
 .upgrade-tab__details {
   display: flex;
   flex-direction: column;
-  gap: 0.7rem;
+  gap: 0.55rem;
+}
+
+.upgrade-review-disclosure {
+  --upgrade-disclosure-tone: var(--vscode-charts-purple, #a78bfa);
+  scroll-margin-block: 0.8rem 5rem;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--upgrade-disclosure-tone) 26%, var(--vscode-panel-border, rgba(128, 128, 128, 0.25)));
+  border-inline-start-width: 2px;
+  border-radius: 7px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.upgrade-review-disclosure--ok {
+  --upgrade-disclosure-tone: var(--vscode-charts-green, #89d185);
+}
+
+.upgrade-review-disclosure--warning {
+  --upgrade-disclosure-tone: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.upgrade-review-disclosure--error {
+  --upgrade-disclosure-tone: var(--vscode-errorForeground, #f14c4c);
+}
+
+.upgrade-review-disclosure > summary {
+  display: grid;
+  grid-template-columns: minmax(8rem, 1fr) minmax(0, auto) 0.9rem;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2.75rem;
+  padding: 0.75rem 0.9rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.upgrade-review-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.upgrade-review-disclosure > summary:hover {
+  background: color-mix(in srgb, var(--upgrade-disclosure-tone) 7%, var(--vscode-list-hoverBackground, transparent));
+}
+
+.upgrade-review-disclosure > summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.upgrade-review-disclosure__label {
+  font-size: 0.84em;
+  font-weight: 600;
+}
+
+.upgrade-review-disclosure__value {
+  min-width: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.upgrade-review-disclosure--warning .upgrade-review-disclosure__value {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.upgrade-review-disclosure--error .upgrade-review-disclosure__value {
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.upgrade-review-disclosure__chevron {
+  color: var(--vscode-descriptionForeground);
+  transition: transform 120ms ease;
+}
+
+.upgrade-review-disclosure[open] .upgrade-review-disclosure__chevron {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .upgrade-review-disclosure__chevron {
+    transition: none;
+  }
+}
+
+.upgrade-review-disclosure__body {
+  min-width: 0;
+  padding: 0.9rem 1rem 1rem;
+  border-top: 1px solid color-mix(in srgb, var(--upgrade-disclosure-tone) 24%, var(--vscode-panel-border, rgba(128, 128, 128, 0.2)));
+}
+
+.upgrade-review-disclosure__body > .analysis-card,
+.upgrade-review-disclosure__body > .smart-plan-banner {
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.upgrade-review-disclosure__body > .analysis-card > :first-child,
+.upgrade-review-disclosure__body > .smart-plan-banner > :first-child {
+  margin-top: 0;
+}
+
+.upgrade-recommendation__steps {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0.3rem 0 0;
+  padding: 0.8rem 0 0;
+  border-top: 1px solid color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 28%, var(--vscode-panel-border, transparent));
+  counter-reset: recommendation-step;
+  list-style: none;
+}
+
+.upgrade-recommendation__lead {
+  margin: 0;
+  color: var(--vscode-foreground);
+  font-size: 0.9em;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.upgrade-tab__recommendation .vuln-recommended__message {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
+}
+
+.upgrade-recommendation__steps li {
+  display: grid;
+  grid-template-columns: 1.35rem minmax(0, 1fr);
+  align-items: start;
+  gap: 0.45rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
+  line-height: 1.35;
+  counter-increment: recommendation-step;
+}
+
+.upgrade-recommendation__steps li::before {
+  display: inline-grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 1px solid color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 50%, var(--vscode-panel-border, transparent));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 12%, transparent);
+  color: color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 68%, var(--vscode-foreground));
+  content: counter(recommendation-step);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.upgrade-tab .upgrade-tab__recommendation .vuln-recommended {
+  gap: 0.75rem;
+  padding: 1rem;
+  border-color: color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 38%, var(--vscode-panel-border, transparent));
+  background: linear-gradient(
+    150deg,
+    color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 8%, var(--vscode-editorWidget-background, var(--vscode-editor-background))) 0%,
+    var(--vscode-editorWidget-background, var(--vscode-editor-background)) 72%
+  );
+}
+
+.upgrade-recommendation__heading {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.upgrade-recommendation__heading-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 48%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 14%, transparent);
+  color: color-mix(in srgb, var(--vscode-charts-purple, #a78bfa) 72%, var(--vscode-foreground));
+}
+
+.upgrade-tab .upgrade-recommendation__heading .manage-section-heading {
+  color: var(--vscode-foreground);
+  font-size: 0.74rem;
 }
 
 .upgrade-tab__bottom-grid {
@@ -3794,6 +4339,36 @@ button {
 
 .upgrade-tab .upgrade-compatibility__summary {
   margin-bottom: 0.8rem;
+}
+
+.upgrade-compatibility__findings {
+  margin-top: 0.85rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid color-mix(
+    in srgb,
+    var(--upgrade-disclosure-tone, var(--vscode-charts-purple, #a78bfa)) 28%,
+    var(--vscode-panel-border, rgba(128, 128, 128, 0.2))
+  );
+}
+
+.upgrade-compatibility__findings-heading {
+  margin: 0 0 0.55rem;
+  color: var(--vscode-foreground);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.upgrade-compatibility__findings .finding-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem;
+  margin: 0;
+}
+
+@media (min-width: 70rem) {
+  .upgrade-compatibility__findings .finding-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .upgrade-tab .hygiene-strip__item {
@@ -3877,6 +4452,8 @@ button {
 /* ------------------------------------------------------- removal review */
 
 .removal-review {
+  --removal-accent: var(--vscode-charts-orange, var(--vscode-editorWarning-foreground, #cca700));
+  --removal-danger: var(--vscode-charts-red, var(--vscode-editorError-foreground, #f14c4c));
   gap: 0.7rem;
 }
 
@@ -3920,10 +4497,66 @@ button {
   padding: 0.6rem 0.7rem;
 }
 
+.removal-tab .analysis-card,
+.removal-tab .vuln-recommended {
+  border-color: color-mix(in srgb, var(--removal-card-accent, var(--removal-accent)) 28%, var(--vscode-panel-border, rgba(128, 128, 128, 0.24)));
+  background: color-mix(in srgb, var(--removal-card-accent, var(--removal-accent)) 3%, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+}
+
+.removal-summary-card {
+  --removal-card-accent: var(--removal-accent);
+}
+
+.removal-summary-card--compatible {
+  --removal-card-accent: var(--vscode-charts-green, #89d185);
+}
+
+.removal-summary-card--warning {
+  --removal-card-accent: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.removal-summary-card--conflict {
+  --removal-card-accent: var(--removal-danger);
+}
+
+.removal-summary-card--unknown {
+  --removal-card-accent: var(--vscode-charts-purple, #a78bfa);
+}
+
+.removal-card--glance {
+  --removal-card-accent: var(--vscode-charts-purple, #a78bfa);
+}
+
+.removal-card--checks {
+  --removal-card-accent: var(--vscode-charts-blue, #3794ff);
+}
+
+.removal-card--package,
+.removal-card--files {
+  --removal-card-accent: var(--removal-accent);
+}
+
+.removal-card--impact {
+  --removal-card-accent: var(--vscode-charts-green, #89d185);
+}
+
+.removal-card--verification {
+  --removal-card-accent: var(--vscode-charts-purple, #a78bfa);
+}
+
+.removal-recommended {
+  --removal-card-accent: var(--removal-danger);
+}
+
 .removal-tab .analysis-card__title,
 .removal-tab .manage-section-heading {
   margin-bottom: 0.4rem;
+  color: color-mix(in srgb, var(--removal-card-accent, var(--removal-accent)) 65%, var(--vscode-foreground));
   font-size: 0.68rem;
+}
+
+.removal-tab .analysis-card__title-icon {
+  color: var(--removal-card-accent, var(--removal-accent));
 }
 
 .removal-tab .manage-glance {
@@ -3967,6 +4600,18 @@ button {
   min-width: 0;
   padding: 0.55rem 0.65rem;
   border-right: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.removal-check__item--ok {
+  background: color-mix(in srgb, var(--vscode-charts-green, #89d185) 5%, transparent);
+}
+
+.removal-check__item--warning {
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 6%, transparent);
+}
+
+.removal-check__item--blocked {
+  background: color-mix(in srgb, var(--removal-danger) 7%, transparent);
 }
 
 .removal-check__item:last-child {
@@ -4027,7 +4672,10 @@ button {
   width: 1.35rem;
   height: 1.35rem;
   margin-top: 0.05rem;
-  color: var(--vscode-descriptionForeground);
+  padding: 0.2rem;
+  border-radius: 5px;
+  color: var(--removal-accent);
+  background: color-mix(in srgb, var(--removal-accent) 12%, transparent);
 }
 
 .removal-package__identity {
@@ -4068,7 +4716,19 @@ button {
 .removal-impact__icon {
   display: inline-flex;
   flex-shrink: 0;
-  color: var(--vscode-descriptionForeground);
+  color: var(--removal-card-accent, var(--vscode-descriptionForeground));
+}
+
+.removal-impact__item:nth-child(1) .removal-impact__icon {
+  color: var(--vscode-charts-green, #89d185);
+}
+
+.removal-impact__item:nth-child(2) .removal-impact__icon {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.removal-impact__item:nth-child(3) .removal-impact__icon {
+  color: var(--vscode-charts-purple, #a78bfa);
 }
 
 .removal-impact__copy {
@@ -4109,6 +4769,7 @@ button {
 
 .removal-review__rollback {
   align-items: flex-start;
+  color: color-mix(in srgb, var(--removal-accent) 52%, var(--vscode-descriptionForeground));
   line-height: 1.35;
 }
 
@@ -5939,18 +6600,61 @@ button {
 /* Below the wide 18rem-rail composition, cards may use the full stacked
    column without inheriting an intrinsic width from a long label or path. */
 @media (max-width: 63.99rem) {
+  .upgrade-decision {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .upgrade-decision__signals {
+    border-top: 1px solid color-mix(in srgb, var(--upgrade-decision-accent) 24%, var(--vscode-panel-border, transparent));
+    border-left: none;
+  }
+
   .overview-panel__summary,
   .overview-panel__actions,
   .vuln-tab__summary,
   .vuln-tab__details,
   .usage-tab__summary,
   .usage-tab__details,
-  .upgrade-tab__summary,
+  .upgrade-tab__recommendation,
   .upgrade-tab__details,
   .removal-tab__summary,
   .removal-tab__details {
     width: 100%;
     min-width: 0;
+  }
+}
+
+@media (max-width: 32rem) {
+  .upgrade-decision__lead {
+    padding: 0.85rem;
+  }
+
+  .upgrade-decision__signal > button {
+    grid-template-columns: 1.7rem minmax(0, 1fr) 0.8rem;
+  }
+
+  .upgrade-decision__signal-value {
+    grid-column: 2;
+    text-align: left;
+  }
+
+  .upgrade-decision__signal-arrow {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+
+  .upgrade-review-disclosure > summary {
+    grid-template-columns: minmax(0, 1fr) 0.9rem;
+  }
+
+  .upgrade-review-disclosure__value {
+    grid-column: 1;
+    text-align: left;
+  }
+
+  .upgrade-review-disclosure__chevron {
+    grid-column: 2;
+    grid-row: 1 / span 2;
   }
 }
 

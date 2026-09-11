@@ -314,7 +314,7 @@ export class DashboardPanel {
       ensureController: () => this.ensureController(),
       getSelectedProject: () => this.selectedProject,
       isDisposed: () => this.disposed,
-      isUpgradeBusy: () => this.upgradeCoordinator.isBusy(),
+      isUpgradeBusy: () => this.upgradeCoordinator.isMutationBusy(),
       performanceEnabled: this.performanceEnabled,
     });
     this.smartCleanupMetadataCoordinator = new SmartCleanupMetadataCoordinator({
@@ -468,6 +468,14 @@ export class DashboardPanel {
   }
 
   private async handle(message: WebviewToHostMessage): Promise<void> {
+    if (message.type === 'ready') {
+      await this.upgradeCoordinator.handleWebviewReady();
+      const controller = await this.ensureController();
+      if (controller === undefined) return;
+      await controller.handleReady(this.sink);
+      void this.usageCoordinator.requestBackgroundUsageRefresh();
+      return;
+    }
     if (message.type === 'load-upgrade-targets') {
       await this.upgradeCoordinator.handleLoadUpgradeTargets(message);
       return;
@@ -517,14 +525,13 @@ export class DashboardPanel {
       return;
     }
     if (message.type === 'analyze-remediation') {
-      // Read-only, but a concurrent disk read could still race an in-flight
-      // upgrade's file writes — same rule refresh/change-project already
-      // follow below, not a new one invented for this message.
-      if (this.upgradeCoordinator.isBusy()) {
+      // Read-only reviews may coexist; only a transaction that can write the
+      // dependency files blocks another source/dependency read.
+      if (this.upgradeCoordinator.isMutationBusy()) {
         this.sink.postMessage({
           status: 'remediation-error',
           package: message.package,
-          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'A dependency change is currently being applied to this project.' },
         });
         return;
       }
@@ -532,10 +539,10 @@ export class DashboardPanel {
       return;
     }
     if (message.type === 'analyze-remediations') {
-      if (this.upgradeCoordinator.isBusy()) {
+      if (this.upgradeCoordinator.isMutationBusy()) {
         this.sink.postMessage({
           status: 'remediation-batch-error',
-          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'A dependency change is currently being applied to this project.' },
         });
         return;
       }
@@ -559,13 +566,13 @@ export class DashboardPanel {
       return;
     }
     if (message.type === 'where-used') {
-      // Same rule as analyze-remediation: read-only, but a concurrent read
-      // could still race an in-flight upgrade's file writes.
-      if (this.upgradeCoordinator.isBusy()) {
+      // A retained decision review is not active work. Only mutation owns
+      // package.json/lockfile strongly enough to defer this read.
+      if (this.upgradeCoordinator.isMutationBusy()) {
         this.sink.postMessage({
           status: 'usage-error',
           package: message.package,
-          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'A dependency change is currently being applied to this project.' },
         });
         return;
       }
@@ -573,11 +580,11 @@ export class DashboardPanel {
       return;
     }
     if (message.type === 'reanalyze-usage') {
-      if (this.upgradeCoordinator.isBusy()) {
+      if (this.upgradeCoordinator.isMutationBusy()) {
         this.sink.postMessage({
           status: 'usage-error',
           package: message.package,
-          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'A dependency change is currently being applied to this project.' },
         });
         return;
       }
@@ -585,10 +592,10 @@ export class DashboardPanel {
       return;
     }
     if (message.type === 'analyze-cleanup') {
-      if (this.upgradeCoordinator.isBusy()) {
+      if (this.upgradeCoordinator.isMutationBusy()) {
         this.sink.postMessage({
           status: 'cleanup-error',
-          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+          error: { code: 'UPGRADE_IN_PROGRESS', message: 'A dependency change is currently being applied to this project.' },
         });
         return;
       }
@@ -596,7 +603,7 @@ export class DashboardPanel {
       return;
     }
     if (message.type === 'analyze-smart-cleanup-metadata') {
-      if (this.upgradeCoordinator.isBusy()) {
+      if (this.upgradeCoordinator.isMutationBusy()) {
         this.sink.postMessage({
           status: 'smart-cleanup-metadata-error',
           requestId: message.requestId,
@@ -612,7 +619,7 @@ export class DashboardPanel {
       return;
     }
     if (message.type === 'analyze-smart-cleanup-duplicates') {
-      if (this.upgradeCoordinator.isBusy()) {
+      if (this.upgradeCoordinator.isMutationBusy()) {
         this.sink.postMessage({
           status: 'smart-cleanup-duplicates-error',
           requestId: message.requestId,
@@ -636,14 +643,17 @@ export class DashboardPanel {
       return;
     }
     if (message.type === 'analyze-removal-impact') {
-      // Same rule as where-used/analyze-cleanup: read-only, but a concurrent
-      // read could still race an in-flight upgrade's file writes.
-      if (this.upgradeCoordinator.isBusy()) {
+      // Read-only reviews may coexist. Only a package-manager transaction can
+      // make this source scan race dependency-file writes.
+      if (this.upgradeCoordinator.isMutationBusy()) {
         this.sink.postMessage({
           status: 'removal-impact-error',
           requestId: message.requestId,
           packages: [...message.packages].sort((left, right) => left.localeCompare(right)),
-          error: { code: 'UPGRADE_IN_PROGRESS', message: 'Another upgrade is already in progress for this project.' },
+          error: {
+            code: 'UPGRADE_IN_PROGRESS',
+            message: 'A dependency change is currently being applied. Wait for it to finish, then analyze removal impact again.',
+          },
         });
         return;
       }

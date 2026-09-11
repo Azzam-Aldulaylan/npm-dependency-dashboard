@@ -127,7 +127,7 @@ function WhereUsedCard({
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <section className="analysis-card" aria-labelledby="usage-where-heading">
+    <section className="analysis-card usage-detail-card usage-detail-card--references" aria-labelledby="usage-where-heading">
       <div className="usage-card__head">
         <h3 className="analysis-card__title" id="usage-where-heading">
           <IconTarget className="analysis-card__title-icon" />
@@ -207,7 +207,7 @@ function WhereUsedCard({
  */
 function WhyInstalledCard({ row }: { row: PackageRow }): ReactElement {
   return (
-    <section className="analysis-card" aria-labelledby="usage-why-installed-heading">
+    <section className="analysis-card usage-detail-card usage-detail-card--path" aria-labelledby="usage-why-installed-heading">
       <h3 className="analysis-card__title" id="usage-why-installed-heading">
         <IconRoute className="analysis-card__title-icon" />
         Why is this installed?
@@ -249,7 +249,7 @@ function DuplicateVersionsCard({
   if (ownVersions === null && introduced.length === 0) return null;
 
   return (
-    <section className="analysis-card" aria-labelledby="usage-duplicates-heading">
+    <section className="analysis-card usage-detail-card usage-detail-card--duplicates" aria-labelledby="usage-duplicates-heading">
       <h3 className="analysis-card__title" id="usage-duplicates-heading">
         Duplicate versions
       </h3>
@@ -351,9 +351,13 @@ function HygieneCard({
 }): ReactElement {
   const duplicateVersionCount = ownDuplicate?.evidence.kind === 'duplicate-version' ? ownDuplicate.evidence.versions.length : 0;
   const worst = row.worstSeverity;
+  const needsAttention = deprecated !== undefined || unusedFinding !== undefined || duplicateVersionCount > 0 || worst !== null;
 
   return (
-    <section className="analysis-card" aria-labelledby="usage-hygiene-heading">
+    <section
+      className={`analysis-card usage-detail-card usage-detail-card--hygiene${needsAttention ? ' usage-detail-card--warning' : ''}`}
+      aria-labelledby="usage-hygiene-heading"
+    >
       <h3 className="analysis-card__title" id="usage-hygiene-heading">
         <IconBroom className="analysis-card__title-icon" />
         Hygiene
@@ -433,7 +437,7 @@ export function UsageReferencesPanel({
   return (
     <div className="usage-tab">
       <div className="usage-tab__summary">
-        <section className="manage-summary-block" aria-labelledby="usage-summary-heading">
+        <section className="manage-summary-block usage-summary-card usage-summary-card--primary" aria-labelledby="usage-summary-heading">
           <h3 className="manage-section-heading" id="usage-summary-heading">
             Usage summary
           </h3>
@@ -447,7 +451,7 @@ export function UsageReferencesPanel({
           </dl>
         </section>
 
-        <section className="manage-summary-block" aria-labelledby="usage-at-a-glance-heading">
+        <section className="manage-summary-block usage-summary-card usage-summary-card--secondary" aria-labelledby="usage-at-a-glance-heading">
           <h3 className="manage-section-heading" id="usage-at-a-glance-heading">
             At a glance
           </h3>
@@ -476,7 +480,7 @@ export function UsageReferencesPanel({
           </dl>
         </section>
 
-        <section className="vuln-recommended" aria-labelledby="usage-why-it-matters-heading">
+        <section className="vuln-recommended usage-summary-card usage-summary-card--insight" aria-labelledby="usage-why-it-matters-heading">
           <h3 className="manage-section-heading" id="usage-why-it-matters-heading">
             Why it matters
           </h3>

@@ -32,9 +32,9 @@ export function applyUpgradeResultLocalFacts(
 
 /**
  * An analysis request may only start while no upgrade flow is active. Once an
- * analysis has been issued, the host owns a project-wide lock until that
- * analysis is confirmed, cancelled, or expires. Replacing the webview's
- * tracked analysis with a duplicate request would strand the original lock.
+ * analysis has been issued, the webview keeps that review as its current
+ * decision result until it is confirmed, cancelled, or refreshed. Replacing
+ * the tracked analysis with a duplicate request would orphan that result.
  */
 export function upgradeAnalysisRequestIsAllowed(activePackage: string | null): boolean {
   return activePackage === null;
@@ -66,33 +66,17 @@ export function targetChangeInvalidatesManageAnalysis(
   );
 }
 
-/**
- * Whether a removal decision targets the same active upgrade review opened
- * inside Manage. Once that review has produced an analysis id, the caller
- * posts its exact-id cancel before removal-impact analysis so the host
- * releases its retained preview lock first. Dashboard/bulk upgrades and
- * reviews for another package are never cancelled implicitly.
- */
-export function manageRemovalReplacesUpgradeReview(
+/** A completed read-only review for the same Manage dependency may stay cached
+ * while the other review starts. In-progress analysis and real mutation never
+ * yield this way. */
+export function completedManageReviewCanCoexist(
   packageName: string,
-  activeUpgrade: string | null,
-  upgradeOrigin: 'dashboard' | 'manage-dependency' | null
+  activePackage: string | null,
+  origin: 'dashboard' | 'manage-dependency' | null,
+  analysisReady: boolean,
+  mutationBusy: boolean
 ): boolean {
-  return upgradeOrigin === 'manage-dependency' && activeUpgrade === packageName;
-}
-
-/**
- * Symmetric handoff for the other direction: a completed removal review
- * opened inside Manage may yield its retained project lock when the user
- * deliberately starts an upgrade review for that same package. Dashboard
- * removals and reviews for another package are never cancelled implicitly.
- */
-export function manageUpgradeReplacesRemovalReview(
-  packageName: string,
-  activeRemove: string | null,
-  removeOrigin: 'dashboard' | 'manage-dependency' | null
-): boolean {
-  return removeOrigin === 'manage-dependency' && activeRemove === packageName;
+  return origin === 'manage-dependency' && activePackage === packageName && analysisReady && !mutationBusy;
 }
 
 /**

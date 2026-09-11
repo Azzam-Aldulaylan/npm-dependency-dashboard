@@ -105,7 +105,6 @@ async function fixture() {
     smartPlanProposal: null, proposal: { changes: [] }, requests: [], publishedTargetsByPackage: new Map(),
   };
   coordinator.analysis = stored;
-  assert.equal(coordinator.reserve('next'), true);
   return { coordinator, stored, snapshot, messages, lifecycle, setRead: value => { read = value; },
     switchProject: () => { currentProject = { ...selected, id: 'other' }; } };
 }
@@ -119,7 +118,7 @@ test('no-op source/dependency watcher bursts keep a completed review with pre-ex
   assert.deepEqual(f.messages, []);
   assert.deepEqual(f.lifecycle, []);
   assert.equal(f.coordinator.analysis, f.stored);
-  assert.equal(f.coordinator.isBusy(), true, 'keep the review reservation usable');
+  assert.equal(f.coordinator.isBusy(), false, 'cached review evidence does not own the mutation reservation');
   f.coordinator.handleCancelUpgrade({ analysisId: f.stored.id });
 });
 
@@ -142,7 +141,7 @@ for (const field of ['manifestText', 'lockfileText', 'registry', 'importerId']) 
     assert.deepEqual(f.messages, [{ status: 'upgrade-analysis-stale', analysisId: 'review-1' }]);
     assert.equal(f.coordinator.analysis, undefined);
     assert.equal(f.coordinator.isBusy(), false);
-    assert.deepEqual(f.lifecycle, ['flush']);
+    assert.deepEqual(f.lifecycle, []);
   });
 }
 

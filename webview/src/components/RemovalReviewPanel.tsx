@@ -6,6 +6,7 @@ import type {
   RemoveAnalysisPresentation,
   UpgradeAnalysisVerification,
 } from '../../../src/host/webviewProtocol.js';
+import { upgradeAnalysisFreshness } from '../../../src/host/upgradeReviewUiState.js';
 import { CLASSIFICATION_LABEL, classificationOf } from '../dependencyClassification.js';
 import {
   IconAlertTriangle,
@@ -136,7 +137,7 @@ function RemovalSummaryCard({
   const requiredBy = change?.stillRequiredBy.length ?? 0;
 
   return (
-    <section className="analysis-card" aria-labelledby="removal-summary-heading">
+    <section className={`analysis-card removal-summary-card removal-summary-card--${status.className}`} aria-labelledby="removal-summary-heading">
       <h3 className="manage-section-heading" id="removal-summary-heading">
         Removal summary
       </h3>
@@ -177,7 +178,7 @@ function AtAGlanceCard({
       : sourceEvidence?.summary ?? (assessment !== undefined && assessment.status !== 'unknown' ? '0 files' : 'Unknown');
 
   return (
-    <section className="analysis-card" aria-labelledby="removal-glance-heading">
+    <section className="analysis-card removal-card removal-card--glance" aria-labelledby="removal-glance-heading">
       <h3 className="manage-section-heading" id="removal-glance-heading">
         At a glance
       </h3>
@@ -276,7 +277,7 @@ function DependencyCheckCard({
       : sourceEvidence?.summary ?? (known ? 'No references found' : 'Not checked');
 
   return (
-    <section className="analysis-card" aria-labelledby="removal-dependency-check-heading">
+    <section className="analysis-card removal-card removal-card--checks" aria-labelledby="removal-dependency-check-heading">
       <h3 className="analysis-card__title" id="removal-dependency-check-heading">
         <IconRoute className="analysis-card__title-icon" />
         Dependency check
@@ -310,7 +311,7 @@ function DependencyCheckCard({
 function WhatWillBeRemovedCard({ row, analysis }: { row: PackageRow; analysis: RemoveAnalysisPresentation }): ReactElement {
   const change = analysis.changes.find((candidate) => candidate.packageName === row.name) ?? analysis.changes[0];
   return (
-    <section className="analysis-card" aria-labelledby="removal-selected-heading">
+    <section className="analysis-card removal-card removal-card--package" aria-labelledby="removal-selected-heading">
       <h3 className="analysis-card__title" id="removal-selected-heading">
         What will be removed
       </h3>
@@ -374,7 +375,7 @@ function ImpactAfterRemovalCard({
       : sourceEvidence?.summary ?? (known ? 'No references' : 'Unknown');
 
   return (
-    <section className="analysis-card" aria-labelledby="removal-impact-heading">
+    <section className="analysis-card removal-card removal-card--impact" aria-labelledby="removal-impact-heading">
       <h3 className="analysis-card__title" id="removal-impact-heading">
         Impact after removal
       </h3>
@@ -406,7 +407,7 @@ function ImpactAfterRemovalCard({
 
 function FilesModifiedCard({ files }: { files: RemoveAnalysisFiles }): ReactElement {
   return (
-    <section className="analysis-card" aria-labelledby="removal-files-heading">
+    <section className="analysis-card removal-card removal-card--files" aria-labelledby="removal-files-heading">
       <h3 className="analysis-card__title" id="removal-files-heading">
         <IconFile className="analysis-card__title-icon" />
         Files to be modified
@@ -433,7 +434,7 @@ function VerificationStepsCard({
   onConfigureVerification: () => void;
 }): ReactElement {
   return (
-    <section className="analysis-card" aria-labelledby="removal-verification-heading">
+    <section className="analysis-card removal-card removal-card--verification" aria-labelledby="removal-verification-heading">
       <h3 className="analysis-card__title" id="removal-verification-heading">
         <IconListChecks className="analysis-card__title-icon" />
         Verification steps
@@ -470,6 +471,41 @@ function VerificationStepsCard({
   );
 }
 
+function formatRemovalAnalysisAge(analyzedAt: string, now: number): string {
+  const timestamp = Date.parse(analyzedAt);
+  if (!Number.isFinite(timestamp)) return 'previously';
+  const minutes = Math.max(0, Math.floor((now - timestamp) / 60_000));
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours}h ${remainingMinutes}m ago`;
+}
+
+function RemovalFreshnessBar({
+  analysis,
+  now,
+  onRefresh,
+}: {
+  analysis: RemoveAnalysisPresentation;
+  now: number;
+  onRefresh: () => void;
+}): ReactElement | null {
+  const freshness = upgradeAnalysisFreshness(analysis.analyzedAt, analysis.expiresAt, now);
+  if (freshness === 'fresh') return null;
+  const expired = freshness === 'expired';
+  return (
+    <p className={`stale-status${expired ? ' stale-status--hard' : ''}`}>
+      <IconRefresh className="stale-status__icon stale-status__icon--static" aria-hidden="true" />
+      {expired
+        ? 'This removal review expired and can no longer authorize a change. Analyze again to continue.'
+        : `Removal review is more than one hour old. Refresh is recommended; project files have not been marked as changed. Last analyzed ${formatRemovalAnalysisAge(analysis.analyzedAt, now)}.`}
+      <button type="button" className="button button--subtle stale-status__action" onClick={onRefresh}>
+        {expired ? 'Analyze again' : 'Refresh'}
+      </button>
+    </p>
+  );
+}
+
 /** Composes existing host-owned preflight and impact results; it never re-derives transaction eligibility in the webview. */
 export function RemovalReviewPanel({
   row,
@@ -480,6 +516,7 @@ export function RemovalReviewPanel({
   removalImpact,
   usage,
   advisoriesAvailable,
+  now,
   onAnalyzeRemoval,
   onConfirm,
   onViewReferences,
@@ -493,6 +530,7 @@ export function RemovalReviewPanel({
   removalImpact: RemovalImpactState;
   usage: UsageRequestState | undefined;
   advisoriesAvailable: boolean;
+  now: number;
   onAnalyzeRemoval: () => void;
   onConfirm: () => void;
   onViewReferences: () => void;
@@ -536,7 +574,10 @@ export function RemovalReviewPanel({
           <IconTrash />
         </span>
         <h3 className="review-panel__empty-heading">Removal review</h3>
-        <p className="review-panel__empty-status">Not analyzed yet</p>
+        <p className="review-panel__empty-status review-panel__empty-status--explainer">
+          Checks source usage, configuration references, scripts, and dependency relationships. Nothing changes unless
+          you review and confirm the removal.
+        </p>
         <DirectionalButton
           direction="forward"
           className="button button--primary review-panel__empty-cta"
@@ -589,9 +630,11 @@ export function RemovalReviewPanel({
   const removalAllowed = assessment?.status === 'low-risk' || assessment?.status === 'review';
   const blocked = assessment?.status === 'blocked';
   const blockedStatus = blocked ? statusCopy(row.name, assessment) : null;
+  const expired = upgradeAnalysisFreshness(analysis.analyzedAt, analysis.expiresAt, now) === 'expired';
 
   return (
     <div className="review-panel removal-review">
+      <RemovalFreshnessBar analysis={analysis} now={now} onRefresh={onAnalyzeRemoval} />
       <div className="removal-tab">
         <div className="removal-tab__summary">
           <RemovalSummaryCard row={row} analysis={analysis} assessment={assessment} advisoriesAvailable={advisoriesAvailable} />
@@ -630,7 +673,7 @@ export function RemovalReviewPanel({
           type="button"
           className="button button--danger removal-review__footer-action"
           onClick={onConfirm}
-          disabled={busy || !removalAllowed}
+          disabled={busy || !removalAllowed || expired}
           title={blocked ? blockedStatus?.detail : !removalAllowed ? 'Removal impact must be known before proceeding.' : undefined}
         >
           <IconTrash aria-hidden="true" />

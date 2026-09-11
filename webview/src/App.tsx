@@ -19,8 +19,7 @@ import type { SortColumn, TableSortState } from '../../src/host/tableSort.js';
 import { nextColumnSortState, sortRows } from '../../src/host/tableSort.js';
 import {
   applyUpgradeResultLocalFacts,
-  manageRemovalReplacesUpgradeReview,
-  manageUpgradeReplacesRemovalReview,
+  completedManageReviewCanCoexist,
   targetChangeInvalidatesManageAnalysis,
   upgradeAnalysisMessageMatchesRequest,
   upgradeAnalysisRequestIsAllowed,
@@ -205,7 +204,8 @@ export function App(): ReactElement {
 
   // Same anchor/lock discipline as the upgrade state above, for a
   // coordinated removal — the two share one host-side panel-wide lock, so
-  // only one of activeUpgrade/activeRemove is ever non-null at a time.
+  // Completed Manage reviews may coexist; each active field still tracks only
+  // one package for its own review type.
   const [activeRemove, setActiveRemove] = useState<string | null>(null);
   const [activeRemoveChanges, setActiveRemoveChanges] = useState<readonly string[]>([]);
   // "Why matched" tags from the criteria picker's own selection at the
@@ -376,12 +376,15 @@ export function App(): ReactElement {
   // dedicated tick at that exact deadline so an open review cannot remain
   // visibly actionable for the remainder of an arbitrary minute interval.
   useEffect(() => {
-    if (analysis === null) return;
-    const expiresAt = Date.parse(analysis.expiresAt);
-    if (!Number.isFinite(expiresAt)) {
+    const expiries = [analysis?.expiresAt, removeAnalysis?.expiresAt]
+      .filter((value): value is string => value !== undefined)
+      .map((value) => Date.parse(value));
+    if (expiries.length === 0) return;
+    if (expiries.some((value) => !Number.isFinite(value))) {
       setMinuteClock(Date.now());
       return;
     }
+    const expiresAt = Math.min(...expiries);
     const remaining = expiresAt - Date.now();
     if (remaining <= 0) {
       setMinuteClock(Date.now());
@@ -389,7 +392,7 @@ export function App(): ReactElement {
     }
     const timer = window.setTimeout(() => setMinuteClock(Date.now()), remaining);
     return () => window.clearTimeout(timer);
-  }, [analysis]);
+  }, [analysis, removeAnalysis]);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent): void => {
@@ -486,6 +489,7 @@ export function App(): ReactElement {
       }
 
       if (incoming.status === 'upgrade-error') {
+        setConfirmBusy(false);
         // Never touches `message` — the rendered table/banners are exactly
         // what they were before this arrived.
         if (upgradeErrorClearsActiveState(incoming.error.code)) {
@@ -548,6 +552,7 @@ export function App(): ReactElement {
       }
 
       if (incoming.status === 'remove-error') {
+        setRemoveBusy(false);
         const smartCleanupRemoval = removeOriginRef.current === 'smart-cleanup';
         // Same shared-lock discipline as upgrade-error — reused directly
         // since UPGRADE_IN_PROGRESS is the one code both flows post when the
@@ -1307,9 +1312,9 @@ export function App(): ReactElement {
   // below for that path). Reviewed inline in Manage rather than opening a
   // second dialog — see the ManageDependencyModal render block's own doc.
   const requestUpgrade = useCallback((packageName: string, target: string) => {
-    // The host keeps an accepted analysis locked until confirm/cancel. Never
-    // replace the analysis id this client is tracking with a duplicate request
-    // that the host will reject as UPGRADE_IN_PROGRESS.
+    // Keep one cached upgrade review per webview flow. The host releases the
+    // read-only reservation after analysis, but replacing this tracked id with
+    // a duplicate would still orphan the result the user is reading.
     if (!upgradeAnalysisRequestIsAllowed(activeUpgradeRef.current)) return;
     const requestId = String(++nextRequestIdRef.current);
     activeUpgradeRef.current = packageName;
@@ -1373,8 +1378,8 @@ export function App(): ReactElement {
 
   // Closes the modal immediately, client-side, rather than waiting on a host
   // round trip — cancelling mutates nothing, so there's nothing to wait for.
-  // Still tells the host either way: a real analysisId releases its lock
-  // right away; `null` (still loading, no id issued yet) marks the in-flight
+  // Still tells the host either way: a real analysisId drops its cached
+  // review; `null` (still loading, no id issued yet) marks the in-flight
   // analyze request so the host drops its own result instead of storing it —
   // see webviewProtocol.ts's own doc on cancel-upgrade's nullable id.
   const requestCancelUpgrade = useCallback(() => {
@@ -1478,23 +1483,24 @@ export function App(): ReactElement {
     setRemoveOrigin(null);
   }, [removeAnalysis]);
 
-  // Upgrade and removal previews share one host-owned project lock. A
-  // completed embedded removal review is a decision screen, not ongoing
-  // work, so starting Upgrade review deliberately closes it first. Keep an
-  // in-progress removal analysis or file mutation protected from takeover.
+  // Completed read-only reviews can coexist in the Manage workspace. The
+  // host releases their analysis reservation after each result and reacquires
+  // it only when the user confirms a file mutation.
   const requestUpgradeFromManage = useCallback(
     (packageName: string, target: string) => {
-      if (manageUpgradeReplacesRemovalReview(
-        packageName,
-        activeRemove,
-        removeOrigin === 'smart-cleanup' ? null : removeOrigin
-      )) {
-        if (removeAnalysis === null || removeBusy) return;
-        requestCancelRemove();
-      }
+      if (
+        activeRemove !== null &&
+        !completedManageReviewCanCoexist(
+          packageName,
+          activeRemove,
+          removeOrigin === 'smart-cleanup' ? null : removeOrigin,
+          removeAnalysis !== null,
+          removeBusy
+        )
+      ) return;
       requestUpgrade(packageName, target);
     },
-    [activeRemove, removeAnalysis, removeBusy, removeOrigin, requestCancelRemove, requestUpgrade]
+    [activeRemove, removeAnalysis, removeBusy, removeOrigin, requestUpgrade]
   );
 
   // Selecting a card re-asserts that card's own intelligent default sort
@@ -1768,22 +1774,21 @@ export function App(): ReactElement {
   // inline, so there is no separate drawer to reveal Manage again from.
   const requestRemoveFromManage = useCallback(
     (packageName: string) => {
-      // A completed embedded upgrade preview deliberately retains the host's
-      // project lock until confirm/cancel. Replacing that decision with a
-      // removal must cancel it first; postMessage ordering makes the exact-id
-      // cancellation release the lock before removal-impact analysis starts.
-      if (manageRemovalReplacesUpgradeReview(packageName, activeUpgrade, upgradeOrigin)) {
-        // A still-running preflight has no exact analysis id to release yet.
-        // Keep its UI/state intact and wait for it to finish instead of
-        // immediately sending an impact request that the host must reject.
-        if (analysis === null) return;
-        requestCancelUpgrade();
-      }
+      if (
+        activeUpgrade !== null &&
+        !completedManageReviewCanCoexist(
+          packageName,
+          activeUpgrade,
+          upgradeOrigin,
+          analysis !== null,
+          confirmBusy
+        )
+      ) return;
       setPendingManageRemoval(packageName);
       setRemoveError(null);
       requestAnalyzeRemovalImpact([packageName]);
     },
-    [activeUpgrade, analysis, requestAnalyzeRemovalImpact, requestCancelUpgrade, upgradeOrigin]
+    [activeUpgrade, analysis, confirmBusy, requestAnalyzeRemovalImpact, upgradeOrigin]
   );
 
   useEffect(() => {
@@ -2310,18 +2315,19 @@ export function App(): ReactElement {
             const upgradeActive = upgradeOrigin === 'manage-dependency' && activeUpgrade === row.name;
             const removeActive =
               (removeOrigin === 'manage-dependency' && activeRemove === row.name) || pendingManageRemoval === row.name;
+            const embeddedUpgradeCanYield = upgradeActive && analysis !== null && !confirmBusy;
             // Once an embedded removal analysis has finished, Upgrade review
-            // becomes available again. Its Analyze action performs the lock
-            // handoff above; genuinely active work remains disabled.
+            // becomes available again while the cached removal result remains
+            // available on its own tab. Genuinely active work stays disabled.
             const embeddedRemovalCanYield = removeActive && removeAnalysis !== null && !removeBusy;
             // `actionsDisabled` treats every retained removal review as active
             // because it is also shared with dashboard-level controls. Inside
-            // this same Manage workspace, a completed read-only review may be
-            // replaced deliberately; preserve every other global blocker and
+            // this same Manage workspace, completed read-only reviews may
+            // coexist; preserve every other global blocker and
             // keep actual removal/remediation work protected.
             const manageActionsDisabled =
               loading ||
-              activeUpgrade !== null ||
+              (activeUpgrade !== null && !embeddedUpgradeCanYield) ||
               remediationBusy ||
               cleanupState.phase === 'analyzing' ||
               (activeRemove !== null && !embeddedRemovalCanYield);

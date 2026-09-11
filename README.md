@@ -18,9 +18,11 @@ Project Maintenance adds bulk review actions, while Smart Cleanup identifies rem
 
 ## Screenshots
 
-![Dependency Dashboard showing a disposable npm project's updates and vulnerabilities](media/screenshots/dashboard.png)
+![Dependency Dashboard showing a real-world project's updates, vulnerabilities, and maintenance signals](media/screenshots/dashboard.png)
 
-![Smart Cleanup review showing recommended and blocked dependency removals](media/screenshots/smart-cleanup.png)
+![Smart Cleanup completion report showing verified before-and-after dependency and vulnerability totals](media/screenshots/smart-cleanup.png)
+
+![Next.js Upgrade Review comparing the installed and latest versions with projected vulnerability remediation](media/screenshots/upgrade-review.png)
 
 ## Installation
 

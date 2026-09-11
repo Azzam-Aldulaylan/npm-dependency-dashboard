@@ -18,6 +18,7 @@ import {
 } from '../../../src/host/upgradeReviewUiState.js';
 import { IconAlertTriangle, IconCheck, IconExternalLink, IconGear, IconHelpCircle, IconListChecks, IconRoute, IconShield } from '../icons.js';
 import { DirectionalButton } from './DirectionalButton.js';
+import { CompatibilityFindings } from './CompatibilitySection.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { overallStatusDetail } from './UpgradeAnalysisModal.js';
 import { SeverityBadge } from './SeverityBadge.js';
@@ -76,9 +77,13 @@ const PEER_FINDING_KINDS: ReadonlySet<CompatibilityFindingKind> = new Set([
 export function CompatibilityCheckCard({
   compatibility,
   projectCompatibility,
+  context,
+  onViewProjectDetails,
 }: {
   compatibility: UpgradeAnalysisPresentation['compatibility'];
   projectCompatibility?: ProjectCompatibilityAnalysis | undefined;
+  context: { package: string; currentVersion: string };
+  onViewProjectDetails?: (() => void) | undefined;
 }): ReactElement {
   const summary = overallStatusDetail({ compatibility });
   const summaryTone = compatibilityOutcomeDisplay(compatibility.status).className;
@@ -152,12 +157,8 @@ export function CompatibilityCheckCard({
           <IconRoute className="analysis-card__title-icon" />
           Compatibility check
         </h3>
-        {projectCompatibility === undefined ? null : (
-          <DirectionalButton direction="forward" className="usage-show-all" onClick={() => {
-            const heading = document.getElementById('project-compat-heading');
-            heading?.scrollIntoView({ block: 'start' });
-            heading?.focus({ preventScroll: true });
-          }}>View check details</DirectionalButton>
+        {projectCompatibility === undefined || onViewProjectDetails === undefined ? null : (
+          <DirectionalButton direction="forward" className="usage-show-all" onClick={onViewProjectDetails}>View check details</DirectionalButton>
         )}
       </div>
       {summary !== undefined ? (
@@ -186,7 +187,9 @@ export function CompatibilityCheckCard({
               <p>The Node.js version actually used to run or deploy your app may still need verification. VS Code’s own Node version does not prove it.</p>
             </>
           )}
-          detail={runtimeReason?.includes('runtime-node-version-unknown') ? 'Active runtime not verified' : undefined} />
+          detail={runtimeReason?.includes('runtime-node-version-unknown')
+            ? 'Declared range checked; development, CI, and deployment runtimes still need verification.'
+            : undefined} />
         <CompatCheckItem tone={projectTone} label="Source & config" value={projectValue}
           help={(
             <>
@@ -195,6 +198,10 @@ export function CompatibilityCheckCard({
             </>
           )}
           detail={sourceFindings.length === 0 ? undefined : !hasImportAnalysis ? 'Import check pending' : sourceIncomplete.length > 0 ? 'Some checks incomplete' : undefined} />
+      </div>
+      <div className="upgrade-compatibility__findings" aria-label="Dependency compatibility findings">
+        <h4 className="upgrade-compatibility__findings-heading">Dependency findings</h4>
+        <CompatibilityFindings compatibility={compatibility} context={context} />
       </div>
     </section>
   );
@@ -216,10 +223,10 @@ export function SimpleUpgradePlanCard({
   return (
     <section className="analysis-card" aria-labelledby="upgrade-plan-heading">
       <h3 className="analysis-card__title" id="upgrade-plan-heading">
-        Upgrade plan
+        Planned change
       </h3>
       <p className="usage-card__subtitle">
-        Requested version change for {row.name}
+        This is the exact dependency change that will be applied after confirmation. Choosing another target above and analyzing again updates this plan.
       </p>
       <ol className="smart-plan__changes">
         {steps.map((change) => (

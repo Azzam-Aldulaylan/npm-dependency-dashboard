@@ -9,8 +9,7 @@ import assert from 'node:assert/strict';
 
 import {
   applyUpgradeResultLocalFacts,
-  manageRemovalReplacesUpgradeReview,
-  manageUpgradeReplacesRemovalReview,
+  completedManageReviewCanCoexist,
   targetChangeInvalidatesManageAnalysis,
   upgradeAnalysisMessageMatchesRequest,
   upgradeAnalysisRequestIsAllowed,
@@ -70,20 +69,13 @@ test('changing target invalidates only the same Manage analysis', () => {
   );
 });
 
-test('starting removal replaces only the same package embedded upgrade review', () => {
-  assert.equal(manageRemovalReplacesUpgradeReview('react', 'react', 'manage-dependency'), true);
-  assert.equal(manageRemovalReplacesUpgradeReview('react', null, 'manage-dependency'), false);
-  assert.equal(manageRemovalReplacesUpgradeReview('react', 'lodash', 'manage-dependency'), false);
-  assert.equal(manageRemovalReplacesUpgradeReview('react', 'react', 'dashboard'), false);
-  assert.equal(manageRemovalReplacesUpgradeReview('react', 'react', null), false);
-});
-
-test('starting an upgrade replaces only the same package embedded removal review', () => {
-  assert.equal(manageUpgradeReplacesRemovalReview('react', 'react', 'manage-dependency'), true);
-  assert.equal(manageUpgradeReplacesRemovalReview('react', null, 'manage-dependency'), false);
-  assert.equal(manageUpgradeReplacesRemovalReview('react', 'lodash', 'manage-dependency'), false);
-  assert.equal(manageUpgradeReplacesRemovalReview('react', 'react', 'dashboard'), false);
-  assert.equal(manageUpgradeReplacesRemovalReview('react', 'react', null), false);
+test('only a completed idle review for the same Manage dependency can coexist', () => {
+  assert.equal(completedManageReviewCanCoexist('react', 'react', 'manage-dependency', true, false), true);
+  assert.equal(completedManageReviewCanCoexist('react', 'react', 'manage-dependency', false, false), false);
+  assert.equal(completedManageReviewCanCoexist('react', 'react', 'manage-dependency', true, true), false);
+  assert.equal(completedManageReviewCanCoexist('react', 'lodash', 'manage-dependency', true, false), false);
+  assert.equal(completedManageReviewCanCoexist('react', 'react', 'dashboard', true, false), false);
+  assert.equal(completedManageReviewCanCoexist('react', 'react', null, true, false), false);
 });
 
 // ------------------------------------------------------- clearing active state

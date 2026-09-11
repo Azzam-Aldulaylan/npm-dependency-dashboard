@@ -22,11 +22,12 @@ test('the dependency table is a keyboard-accessible scroll region with sticky th
   assert.match(styles, /background: var\(--vscode-sideBar-background, var\(--vscode-editor-background\)\);/);
 });
 
-test('a completed embedded removal review can yield to Upgrade review without relaxing active-work gates', () => {
+test('completed embedded reviews can yield without relaxing active-work gates', () => {
+  assert.match(app, /const embeddedUpgradeCanYield = upgradeActive && analysis !== null && !confirmBusy;/);
   assert.match(app, /const embeddedRemovalCanYield = removeActive && removeAnalysis !== null && !removeBusy;/);
   assert.match(
     app,
-    /const manageActionsDisabled =[\s\S]*?loading \|\|[\s\S]*?activeUpgrade !== null \|\|[\s\S]*?remediationBusy \|\|[\s\S]*?cleanupState\.phase === 'analyzing' \|\|[\s\S]*?\(activeRemove !== null && !embeddedRemovalCanYield\);/
+    /const manageActionsDisabled =[\s\S]*?loading \|\|[\s\S]*?\(activeUpgrade !== null && !embeddedUpgradeCanYield\) \|\|[\s\S]*?remediationBusy \|\|[\s\S]*?cleanupState\.phase === 'analyzing' \|\|[\s\S]*?\(activeRemove !== null && !embeddedRemovalCanYield\);/
   );
   assert.match(
     app,

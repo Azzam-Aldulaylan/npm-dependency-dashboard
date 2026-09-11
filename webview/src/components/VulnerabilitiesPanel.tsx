@@ -85,7 +85,7 @@ function VulnerabilityDetailCard({
 }): ReactElement {
   const identifiers = vulnerabilityIdentifiers(context.advisory);
   return (
-    <li className="vuln-card">
+    <li className={`vuln-card vuln-card--${context.advisory.severity}`}>
       <div className="vuln-card__head">
         <SeverityBadge severity={context.advisory.severity} />
         <span className="vuln-card__title">{context.advisory.title}</span>
@@ -333,7 +333,7 @@ export function VulnerabilitiesPanel({
   return (
     <div className={`vuln-tab${remediationExpanded ? ' vuln-tab--remediation-review' : ''}`}>
       <div className="vuln-tab__summary">
-        <section className="vuln-summary-card" aria-labelledby="vuln-security-summary-heading">
+        <section className={`vuln-summary-card vuln-summary-card--${worstPresent}`} aria-labelledby="vuln-security-summary-heading">
           <h3 className="manage-section-heading" id="vuln-security-summary-heading">
             Security summary
           </h3>

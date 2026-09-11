@@ -38,7 +38,7 @@ function FindingItem({ finding, context }: { finding: CompatibilityFinding; cont
  * resolver evidence, when available, outranks the static peer-dependency
  * findings it's meant to corroborate.
  */
-export function CompatibilitySection({
+export function CompatibilityFindings({
   compatibility,
   context,
 }: {
@@ -59,12 +59,7 @@ export function CompatibilitySection({
   const hiddenCount = compatibility.findings.length - visible.length;
 
   return (
-    <section className="analysis-card analysis-card--full compatibility-card" aria-labelledby="analysis-compatibility-heading">
-      <h3 className="analysis-card__title" id="analysis-compatibility-heading">
-        <IconRoute className="analysis-card__title-icon" />
-        Compatibility
-      </h3>
-
+    <>
       {compatibility.resolverVerification !== undefined ? (
         <OutcomeStatus
           label={resolverOutcomeDisplay(compatibility.resolverVerification.status).label}
@@ -94,6 +89,24 @@ export function CompatibilitySection({
           Show {hiddenCount} more finding{hiddenCount === 1 ? '' : 's'}
         </button>
       ) : null}
+    </>
+  );
+}
+
+export function CompatibilitySection({
+  compatibility,
+  context,
+}: {
+  compatibility: UpgradeAnalysisCompatibility;
+  context: { package: string; currentVersion: string };
+}): ReactElement {
+  return (
+    <section className="analysis-card analysis-card--full compatibility-card" aria-labelledby="analysis-compatibility-heading">
+      <h3 className="analysis-card__title" id="analysis-compatibility-heading">
+        <IconRoute className="analysis-card__title-icon" />
+        Compatibility
+      </h3>
+      <CompatibilityFindings compatibility={compatibility} context={context} />
     </section>
   );
 }

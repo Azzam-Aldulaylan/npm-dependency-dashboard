@@ -267,8 +267,6 @@ export interface UpgradeAssistantCoordinatorOptions {
   ): SmartCleanupRemovalEvidence | null;
 }
 
-/** Removal review retention is unchanged; Upgrade Review has its own longer, soft-stale-aware retention. */
-const REMOVAL_ANALYSIS_TTL_MS = 10 * 60_000;
 const MAX_REMEDIATION_PRESENTED_ADVISORIES = 400;
 
 /** Production default for `UpgradeAssistantCoordinatorOptions.withCompatibilityProgress` — the exact `vscode.window.withProgress`/`AbortController` wiring `handleAnalyzeUpgradeRequests`'s compatibility preflight used inline before this seam existed. */
@@ -671,6 +669,35 @@ export class UpgradeAssistantCoordinator {
   }
 
   /**
+   * A webview remount loses its React-side analysis ids. Drop any read-only
+   * work it can no longer confirm or cancel, while allowing a real package-
+   * manager transaction to finish at its existing stable boundary.
+   */
+  async handleWebviewReady(): Promise<void> {
+    if (this.reservation.isMutationBusy) return;
+
+    if (this.pendingAnalyzePackage !== null) {
+      this.cancelRequestedFor = this.pendingAnalyzePackage;
+      this.activeUpgradeAnalysisAbort?.abort();
+    }
+
+    const pendingRemoval = this.pendingRemovalAnalysis;
+    if (pendingRemoval !== undefined) {
+      pendingRemoval.cancelled = true;
+      pendingRemoval.dedupeAbort?.abort();
+      if (pendingRemoval.reservationHeld) pendingRemoval.releaseStarted = true;
+      this.pendingRemovalAnalysis = undefined;
+    }
+
+    this.activeRemediationAbort?.abort();
+    this.analysis = undefined;
+    this.removal = undefined;
+    this.remediationPlans.clear();
+    this.remediationPlanByPackage.clear();
+    await this.reservation.releaseReadOnlyCurrent();
+  }
+
+  /**
    * Called synchronously for watched source/dependency changes and genuine
    * HEAD changes. Advance the execution race guard immediately, but a completed
    * upgrade review is revoked only after its consumed contents differ. Watchers
@@ -1030,10 +1057,8 @@ export class UpgradeAssistantCoordinator {
     this.activeUpgradeAnalysisAbort = analysisAbort;
     const pendingAnalysisWork: Promise<unknown>[] = [];
 
-    // Set true only on the success path, right before the final return —
-    // `finally` below releases the lock on every other exit (an early
-    // return, a thrown error) since only a stored, still-open analysis is
-    // allowed to keep holding it.
+    // Tracks whether the full review completed for performance reporting;
+    // the read-only reservation is released in `finally` on every path.
     let succeeded = false;
     const performance = createPerformanceSession(
       'Dependency Dashboard upgrade analysis',
@@ -1537,8 +1562,6 @@ export class UpgradeAssistantCoordinator {
           lockfilePath: expectedLockfilePath,
         }),
       });
-      // Lock intentionally NOT released here — held until confirm, cancel, or
-      // TTL reclaim. See handleConfirmUpgrade/handleUseSmartPlan/handleCancelUpgrade.
       succeeded = true;
       return;
     } catch (cause) {
@@ -1559,10 +1582,13 @@ export class UpgradeAssistantCoordinator {
       return;
     } finally {
       // Retain reservation until every launched stage (including child cleanup)
-      // settles. Failed/cancelled stages cannot post into the next review.
+      // settles. A completed review is cached data, not mutation ownership, so
+      // it releases here just like failed/cancelled analysis. Confirmation
+      // reacquires the project-wide lock immediately before authoritative
+      // revalidation and any package-manager work.
       if (!succeeded) analysisAbort.abort();
       await Promise.allSettled(pendingAnalysisWork);
-      if (!succeeded) await this.releaseReservation(eligibility.packageName);
+      await this.releaseReservation(eligibility.packageName);
       if (this.pendingAnalyzePackage === eligibility.packageName) this.pendingAnalyzePackage = null;
       if (this.cancelRequestedFor === eligibility.packageName) this.cancelRequestedFor = null;
       if (this.sourceInvalidatedAnalyzePackage === eligibility.packageName) {
@@ -1811,7 +1837,6 @@ export class UpgradeAssistantCoordinator {
     pending.reservationHeld = true;
     const analysisSourceGeneration = this.sourceGeneration.capture();
 
-    let succeeded = false;
     try {
       const selected = this.options.getSelectedProject();
       if (selected === undefined) return;
@@ -1948,6 +1973,8 @@ export class UpgradeAssistantCoordinator {
                   deprecationInstalledVersions: deprecationEvidence.installedVersions,
                 }),
           };
+      const analyzedAt = new Date().toISOString();
+      const expiresAt = Date.now() + UPGRADE_ANALYSIS_RETENTION_MS;
       const removal: StoredRemoval = {
         id: analysisId,
         requests: [...message.changes],
@@ -1962,7 +1989,7 @@ export class UpgradeAssistantCoordinator {
         ...(dedupeSelection === undefined ? {} : { smartCleanupDedupeSelection: dedupeSelection }),
         ...(smartCleanup === undefined ? {} : { smartCleanupRequestId: smartCleanup.requestId }),
         ...(smartCleanupBefore === undefined ? {} : { smartCleanupBefore }),
-        expiresAt: Date.now() + REMOVAL_ANALYSIS_TTL_MS,
+        expiresAt,
       };
       if (pending.cancelled || this.pendingRemovalAnalysis !== pending || this.options.isDisposed()) return;
       if (
@@ -1998,6 +2025,8 @@ export class UpgradeAssistantCoordinator {
         status: 'remove-analysis',
         analysis: buildRemoveAnalysisPresentation({
           analysisId,
+          analyzedAt,
+          expiresAt: new Date(expiresAt).toISOString(),
           packageName: reservationKey,
           changes,
           verificationScriptNames: verificationScripts.map((script) => script.scriptName),
@@ -2014,8 +2043,6 @@ export class UpgradeAssistantCoordinator {
               }),
         }),
       });
-      // Lock intentionally NOT released here — held until confirm, cancel, or TTL reclaim.
-      succeeded = true;
       return;
     } catch (cause) {
       if (!pending.cancelled && this.pendingRemovalAnalysis === pending && !this.options.isDisposed()) {
@@ -2024,7 +2051,7 @@ export class UpgradeAssistantCoordinator {
       return;
     } finally {
       if (this.pendingRemovalAnalysis === pending) this.pendingRemovalAnalysis = undefined;
-      if (!succeeded && pending.reservationHeld && !pending.releaseStarted) {
+      if (pending.reservationHeld && !pending.releaseStarted) {
         pending.releaseStarted = true;
         await this.releaseReservation(reservationKey);
       }
@@ -2891,6 +2918,17 @@ export class UpgradeAssistantCoordinator {
       }
       return;
     }
+    if (!this.reserve(stored.eligibility.packageName)) {
+      this.options.sink.postMessage({
+        status: 'upgrade-error',
+        package: stored.eligibility.packageName,
+        error: {
+          code: 'UPGRADE_IN_PROGRESS',
+          message: 'Another dependency change is already in progress for this project.',
+        },
+      });
+      return;
+    }
     // `wantsSmartPlan` guarantees `hasSmartPlan` was true for `lookup.ok` to
     // be true, so `smartPlanProposal` is never null here — the `??`
     // fallback below only exists to satisfy the type checker, not because
@@ -3201,6 +3239,17 @@ export class UpgradeAssistantCoordinator {
         this.removal = undefined;
         await this.releaseReservation(stored.reservationKey);
       }
+      return;
+    }
+    if (!this.reserve(stored.reservationKey)) {
+      this.options.sink.postMessage({
+        status: 'remove-error',
+        package: stored.reservationKey,
+        error: {
+          code: 'UPGRADE_IN_PROGRESS',
+          message: 'Another dependency change is already in progress for this project.',
+        },
+      });
       return;
     }
     const executionSourceGeneration = this.sourceGeneration.capture();

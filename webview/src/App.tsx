@@ -69,7 +69,7 @@ import { StatusBanner } from './components/StatusBanner.js';
 import { UpgradeAnalysisModal } from './components/UpgradeAnalysisModal.js';
 import type { UpgradeTargetLoadState } from './components/UpgradeTargetSelector.js';
 import type { UsageRequestState } from './components/UsageReferencesPanel.js';
-import { IconBroom, IconListChecks, IconRefresh } from './icons.js';
+import { IconBroom, IconListChecks, IconPackage, IconRefresh } from './icons.js';
 import type { RemovalImpactState } from './removalImpactState.js';
 import { remediationPlanFromState } from './transitiveRemediationState.js';
 import type { TransitiveFixUiState } from './transitiveRemediationState.js';
@@ -2202,9 +2202,17 @@ export function App(): ReactElement {
   return (
     <main className="dashboard">
       <header className="dashboard__header">
-        <div className="dashboard__header-titles">
-          <h1 className="dashboard__title">Dependency Dashboard</h1>
-          {data !== undefined ? <p className="dashboard__project">{data.project.label}</p> : null}
+        <div className="dashboard__identity">
+          <span className="dashboard__mark" aria-hidden="true"><IconPackage /></span>
+          <div className="dashboard__header-titles">
+            <h1 className="dashboard__title">Dependency Dashboard</h1>
+            {data !== undefined ? (
+              <p className="dashboard__project">
+                <strong>{data.project.label}</strong>
+                <span>Project dependencies, updates, and security</span>
+              </p>
+            ) : null}
+          </div>
         </div>
         {data !== undefined ? <DependencySearch value={search} onChange={handleSearchChange} /> : null}
       </header>
@@ -2654,104 +2662,126 @@ function Dashboard({
         />
       ) : (
         <>
-          <SummaryCards
-            metrics={metrics}
-            availability={data.availability}
-            selected={selectedFilter}
-            onSelect={onSelectFilter}
-          />
-
-          <DashboardToolbar
-            canChangeProject={canChangeProject}
-            onChangeProject={onChangeProject}
-            onRefresh={onRefresh}
-            disabled={actionsDisabled}
-            refreshing={status === 'stale'}
-            trailingActions={
-              <div className="toolbar__analysis-actions">
-                <button
-                  className="button button--primary"
-                  type="button"
-                  onClick={onOpenSmartCleanup}
-                  disabled={actionsDisabled || upgradesDisabled}
-                  title="Find evidence-backed cleanup opportunities and remove approved unused dependencies"
-                >
-                  <IconBroom />
-                  Smart Cleanup
-                </button>
-                <button
-                  className="button button--secondary"
-                  type="button"
-                  onClick={onOpenBulkActions}
-                  disabled={actionsDisabled || upgradesDisabled}
-                  title="Upgrade, remove, or check multiple dependencies at once"
-                >
-                  <IconListChecks />
-                  Manage dependencies
-                </button>
+          <section className="dashboard__overview" aria-labelledby="dashboard-overview-title">
+            <div className="dashboard__section-heading">
+              <div>
+                <h2 id="dashboard-overview-title">Project health</h2>
+                <p>Select a signal to focus the dependency inventory.</p>
               </div>
-            }
-          >
-            <DependencyTypeFilter value={dependencyType} counts={typeCounts} onChange={onDependencyTypeChange} />
-            <HygieneFilter
-              value={hygieneFilter}
-              likelyUnusedCount={findingCounts['likely-unused']}
-              duplicateCount={findingCounts['duplicate-version']}
-              onChange={onHygieneFilterChange}
+              <span className="dashboard__snapshot">Updated {formatTime(data.generatedAt)}</span>
+            </div>
+            <SummaryCards
+              metrics={metrics}
+              availability={data.availability}
+              selected={selectedFilter}
+              onSelect={onSelectFilter}
             />
-          </DashboardToolbar>
+          </section>
 
-          {filteredRows.length === data.rows.length ? null : (
-            <p className="dashboard__matching-results" aria-live="polite">
-              Current filters match {filteredRows.length} of {dependencyCountLabel(data.rows.length)}.
-            </p>
-          )}
+          <section className="dashboard__inventory" aria-labelledby="dashboard-inventory-title">
+            <div className="dashboard__inventory-heading">
+              <div>
+                <h2 id="dashboard-inventory-title">Dependency inventory</h2>
+                <p className="dashboard__matching-results" aria-live="polite">
+                  {filteredRows.length === data.rows.length
+                    ? dependencyCountLabel(data.rows.length)
+                    : `${filteredRows.length} of ${dependencyCountLabel(data.rows.length)} match the current filters`}
+                </p>
+              </div>
+            </div>
 
-          {filteredRows.length === 0 ? (
-            query !== '' ? (
-              <DependencyEmptyState
-                icon="search"
-                title={`No dependencies match "${search.trim()}"`}
-                detail="Try another package name, vulnerability ID, dependency path, or clear the search."
-                onClearSearch={() => {
-                  onSearchChange('');
-                }}
-              />
+            <DashboardToolbar
+              canChangeProject={canChangeProject}
+              onChangeProject={onChangeProject}
+              onRefresh={onRefresh}
+              disabled={actionsDisabled}
+              refreshing={status === 'stale'}
+              trailingActions={
+                <div className="toolbar__analysis-actions">
+                  <button
+                    className="button button--primary"
+                    type="button"
+                    onClick={onOpenSmartCleanup}
+                    disabled={actionsDisabled || upgradesDisabled}
+                    title="Find evidence-backed cleanup opportunities and remove approved unused dependencies"
+                  >
+                    <IconBroom />
+                    Smart Cleanup
+                  </button>
+                  <button
+                    className="button button--secondary"
+                    type="button"
+                    onClick={onOpenBulkActions}
+                    disabled={actionsDisabled || upgradesDisabled}
+                    title="Upgrade, remove, or check multiple dependencies at once"
+                  >
+                    <IconListChecks />
+                    Manage dependencies
+                  </button>
+                </div>
+              }
+            >
+              <div className="dashboard__filter">
+                <span>Dependency type</span>
+                <DependencyTypeFilter value={dependencyType} counts={typeCounts} onChange={onDependencyTypeChange} />
+              </div>
+              <div className="dashboard__filter">
+                <span>Findings</span>
+                <HygieneFilter
+                  value={hygieneFilter}
+                  likelyUnusedCount={findingCounts['likely-unused']}
+                  duplicateCount={findingCounts['duplicate-version']}
+                  onChange={onHygieneFilterChange}
+                />
+              </div>
+            </DashboardToolbar>
+
+            {filteredRows.length === 0 ? (
+              query !== '' ? (
+                <DependencyEmptyState
+                  icon="search"
+                  title={`No dependencies match "${search.trim()}"`}
+                  detail="Try another package name, vulnerability ID, dependency path, or clear the search."
+                  onClearSearch={() => {
+                    onSearchChange('');
+                  }}
+                />
+              ) : (
+                <DependencyEmptyState
+                  icon="filter"
+                  title={filterEmptyStateTitle(
+                    selectedFilter,
+                    dependencyType,
+                    hygieneFilter,
+                    cleanupAnalyzed
+                  )}
+                  detail="Nothing matches this filter."
+                />
+              )
             ) : (
-              <DependencyEmptyState
-                icon="filter"
-                title={filterEmptyStateTitle(
-                  selectedFilter,
-                  dependencyType,
-                  hygieneFilter,
-                  cleanupAnalyzed
-                )}
-                detail="Nothing matches this filter."
-              />
-            )
-          ) : (
-            <>
-              <PackageTable
-                rows={pageResult.pageRows}
-                unavailableUpdatePackages={unavailableUpdatePackages}
-                advisoriesAvailable={data.availability.advisories === 'complete'}
-                searchQuery={search}
-                onOpenAdvisory={onOpenAdvisory}
-                sortState={sortState}
-                onSort={onSort}
-                hygieneFindings={hygieneFindings}
-                onOpenManage={onOpenManage}
-              />
-              <Pagination
-                currentPage={pageResult.currentPage}
-                totalPages={pageResult.totalPages}
-                totalRows={pageResult.totalRows}
-                pageSize={pageSize}
-                onPageChange={onPageChange}
-                onPageSizeChange={onPageSizeChange}
-              />
-            </>
-          )}
+              <>
+                <PackageTable
+                  rows={pageResult.pageRows}
+                  unavailableUpdatePackages={unavailableUpdatePackages}
+                  advisoriesAvailable={data.availability.advisories === 'complete'}
+                  searchQuery={search}
+                  onOpenAdvisory={onOpenAdvisory}
+                  sortState={sortState}
+                  onSort={onSort}
+                  hygieneFindings={hygieneFindings}
+                  onOpenManage={onOpenManage}
+                />
+                <Pagination
+                  currentPage={pageResult.currentPage}
+                  totalPages={pageResult.totalPages}
+                  totalRows={pageResult.totalRows}
+                  pageSize={pageSize}
+                  onPageChange={onPageChange}
+                  onPageSizeChange={onPageSizeChange}
+                />
+              </>
+            )}
+          </section>
         </>
       )}
 

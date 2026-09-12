@@ -69,16 +69,20 @@ function SummaryCard({
       data-card={card.id}
       data-selected={selected ? 'true' : undefined}
       aria-pressed={selected}
+      aria-label={`${card.label}: ${card.count}. ${card.subtitle}`}
       onClick={() => {
         onSelect(card.id);
       }}
     >
-      <span className="summary-card__icon">{card.icon}</span>
       <span className="summary-card__body">
-        <span className="summary-card__label">{card.label}</span>
+        <span className="summary-card__heading">
+          <span className="summary-card__icon">{card.icon}</span>
+          <span className="summary-card__label">{card.label}</span>
+        </span>
         <span className="summary-card__count">{card.count}</span>
         <span className="summary-card__subtitle">{card.subtitle}</span>
       </span>
+      <span className="summary-card__selection" aria-hidden="true">Viewing</span>
     </button>
   );
 }

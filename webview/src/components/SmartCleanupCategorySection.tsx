@@ -7,6 +7,7 @@ export function SmartCleanupCategorySection({
   category,
   title,
   summary,
+  detail,
   count,
   expanded,
   onToggle,
@@ -15,6 +16,7 @@ export function SmartCleanupCategorySection({
   category: SmartCleanupCategory;
   title: string;
   summary: string;
+  detail: string;
   count: number;
   expanded: boolean;
   onToggle: () => void;
@@ -24,7 +26,11 @@ export function SmartCleanupCategorySection({
   const triggerId = `smart-cleanup-${category}-trigger`;
 
   return (
-    <section className="smart-cleanup-category" data-expanded={expanded ? 'true' : undefined}>
+    <section
+      className="smart-cleanup-category"
+      data-category={category}
+      data-expanded={expanded ? 'true' : undefined}
+    >
       <h3 className="smart-cleanup-category__heading">
         <button
           type="button"
@@ -35,15 +41,18 @@ export function SmartCleanupCategorySection({
           onClick={onToggle}
         >
           <IconChevronRight className="smart-cleanup-category__chevron" />
-          <span className="smart-cleanup-category__title">{title}</span>
-          <span className="smart-cleanup-category__summary">{summary}</span>
-          <span
-            className="smart-cleanup-category__count"
-            data-empty={count === 0 ? 'true' : undefined}
-            aria-label={`${count} ${count === 1 ? 'finding' : 'findings'}`}
-          >
-            {count}
+          <span className="smart-cleanup-category__identity">
+            <span className="smart-cleanup-category__title">{title}</span>
+            <span
+              className="smart-cleanup-category__count"
+              data-empty={count === 0 ? 'true' : undefined}
+              aria-label={`${count} ${count === 1 ? 'finding' : 'findings'}`}
+            >
+              {count}
+            </span>
+            <span className="smart-cleanup-category__summary">{summary}</span>
           </span>
+          <span className="smart-cleanup-category__detail">{detail}</span>
         </button>
       </h3>
       {expanded ? (

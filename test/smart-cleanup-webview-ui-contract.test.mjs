@@ -43,8 +43,15 @@ test('the cleanup plan owns the shrinking scroll region between its fixed header
   assert.match(styles, /\.smart-cleanup-body\s*\{[\s\S]*?min-height:\s*0/);
   assert.match(styles, /\.smart-cleanup-body\s*\{[\s\S]*?overflow-y:\s*auto/);
   assert.match(styles, /\.smart-cleanup-body\s*\{[\s\S]*?overscroll-behavior:\s*contain/);
+  assert.match(styles, /\.smart-cleanup-body > \*\s*\{[\s\S]*?flex:\s*0 0 auto/);
   assert.match(styles, /\.smart-cleanup-header\s*\{[\s\S]*?flex-shrink:\s*0/);
   assert.match(styles, /\.smart-cleanup-footer\s*\{[\s\S]*?flex-shrink:\s*0/);
+});
+
+test('the analyzing phase stays content-sized while the completed review owns the tall workspace', () => {
+  assert.match(styles, /\.smart-cleanup-workspace\[data-phase='analyzing'\]\s*\{[\s\S]*?max-width:\s*38rem/);
+  assert.match(styles, /\.smart-cleanup-workspace\[data-phase='analyzing'\]\s*\{[\s\S]*?height:\s*auto/);
+  assert.match(styles, /\.smart-cleanup-workspace\[data-phase='analyzing'\] \.smart-cleanup-analysis\s*\{[\s\S]*?grid-template-columns:\s*1fr/);
 });
 
 test('progress lists only checks that perform asynchronous analysis', () => {
@@ -62,13 +69,31 @@ test('progress lists only checks that perform asynchronous analysis', () => {
 
 test('the summary uses explicit units and large evidence lists share bounded searchable disclosure', () => {
   assert.doesNotMatch(workspace, /\{findingsCount\} findings/);
-  assert.match(workspace, /direct removals available/);
-  assert.match(workspace, /duplicate groups/);
-  assert.match(workspace, /advisory findings/);
+  assert.match(workspace, /`\$\{directRemovalCount\} candidates`/);
+  assert.match(workspace, /`\$\{plan\.duplicates\.length\} groups · \$\{duplicateExcessCount\} excess`/);
+  assert.match(workspace, /advisory \$\{plan\.security\.length === 1 \? 'finding' : 'findings'\}/);
   assert.match(workspace, /<SmartCleanupFindingList/);
   assert.match(findingList, /type="search"/);
   assert.match(findingList, /visibleItems = filteredItems\.slice/);
   assert.match(findingList, /Show \{Math\.min\(initialCount, remaining\)\} more/);
+});
+
+test('the review follows the Manage Dependency decision and disclosure vocabulary', () => {
+  assert.match(workspace, /aria-label="Cleanup recommendation summary"/);
+  assert.match(workspace, /className="smart-cleanup-outcome__lead"/);
+  assert.match(workspace, /className="smart-cleanup-outcome__signals"/);
+  assert.match(workspace, /aria-expanded=\{state\.expandedCategories\.has\(signal\.category\)\}/);
+  assert.match(workspace, /type: 'toggle-category', category: signal\.category/);
+  assert.match(workspace, /className="smart-cleanup-action-grid__header"/);
+  assert.match(category, /data-category=\{category\}/);
+  assert.match(category, /className="smart-cleanup-category__identity"/);
+  assert.match(styles, /\.smart-cleanup-category\[data-category='unused'\]/);
+  assert.match(styles, /\.smart-cleanup-confidence\[data-confidence='safe'\]/);
+  assert.match(workspace, /className="smart-cleanup-duplicate__stats"/);
+  assert.match(workspace, /data-outcome=\{finding\.outcome\}/);
+  assert.match(styles, /\.smart-cleanup-information-item--deprecated/);
+  assert.match(styles, /\.smart-cleanup-information-item--duplicate/);
+  assert.match(styles, /\.smart-cleanup-information-item--security/);
 });
 
 test('only direct removals render selectable controls and uncertain recommendations stay disabled', () => {
@@ -98,6 +123,13 @@ test('only direct removals render selectable controls and uncertain recommendati
   assert.doesNotMatch(workspace, /Consolidate selected|Remove deprecated/);
 });
 
+test('review controls and their evidence disclosure keep a readable vertical rhythm', () => {
+  assert.match(styles, /\.smart-cleanup-action__evidence\s*\{[\s\S]*?display:\s*flex;[\s\S]*?flex-direction:\s*column;[\s\S]*?gap:\s*0\.5rem;/);
+  assert.match(styles, /\.smart-cleanup-evidence\s*\{[\s\S]*?width:\s*100%;/);
+  assert.match(styles, /\.smart-cleanup-evidence ul\s*\{[\s\S]*?margin:\s*0\.5rem 0 0\.1rem;/);
+  assert.match(styles, /\.smart-cleanup-evidence li \+ li\s*\{[\s\S]*?margin-top:\s*0\.25rem;/);
+});
+
 test('execution cancellation is shown only when the host supplies a safe cancellation handler', () => {
   assert.match(workspace, /onCancelExecution\?: \(\) => void/);
   assert.match(workspace, /state\.phase === 'executing' && onCancelExecution !== undefined/);
@@ -109,34 +141,47 @@ test('returning from package review keeps the plan visible while removal evidenc
   assert.match(workspace, /disabled=\{state\.selectedActionIds\.size === 0 \|\| reviewEvidenceRefreshing\}/);
 });
 
-test('destructive confirmation requires a matching host-owned final plan and a second explicit action', () => {
+test('reviewing a selection starts one host-owned final check before the destructive action', () => {
   assert.match(workspace, /removalPreflight: RemoveAnalysisPresentation \| null/);
   assert.match(workspace, /preflightBusy: boolean/);
   assert.match(workspace, /onPrepareRemoval: \(actionIds: readonly string\[\]\) => void/);
   assert.match(workspace, /onConfirmRemoval: \(analysisId: string\) => void/);
   assert.match(workspace, /samePackageSet\(/);
-  assert.match(workspace, /Check final plan/);
-  assert.match(workspace, /Final plan checked/);
-  assert.match(workspace, /className="smart-cleanup-preflight__heading" role="status" aria-live="polite" aria-atomic="true"/);
+  assert.match(workspace, /dispatch\(\{ type: 'show-confirmation' \}\);\s*onPrepareRemoval\(actionIds\);/);
+  assert.match(workspace, /Final check complete/);
+  assert.doesNotMatch(workspace, />Check final plan</);
+  assert.equal((workspace.match(/className="smart-cleanup-confirmation__packages"/g) ?? []).length, 1);
+  assert.doesNotMatch(workspace, /smart-cleanup-preflight__changes/);
   assert.match(workspace, /onConfirmRemoval\(removalPreflight\.analysisId\)/);
   assert.match(workspace, /Confirm and clean/);
   assert.doesNotMatch(workspace, /onExecute/);
 });
 
-test('final review exposes fresh dependency warnings, verification, files, and selected evidence', () => {
-  assert.match(workspace, /change\.stillRequiredBy/);
+test('the single final list incorporates fresh warnings, verification, files, and selected evidence', () => {
+  assert.match(workspace, /checkedPreflight\?\.changes\.find/);
+  assert.match(workspace, /freshChange\.stillRequiredBy/);
   assert.match(workspace, /Still required transitively by/);
   assert.match(workspace, /Keep direct dependency/);
   assert.match(workspace, /onKeepDependency/);
+  assert.match(workspace, /onPrepareRemoval\(remainingActionIds\)/);
   assert.match(workspace, /checkedPreflight\.verification\.configured/);
   assert.match(workspace, /checkedPreflight\.verification\.scriptNames/);
   assert.match(workspace, /checkedPreflight\.files\.manifestPath/);
   assert.match(workspace, /checkedPreflight\.files\.lockfilePath/);
   assert.match(workspace, /checkedPreflight\?\.files\.rollbackAvailable/);
-  assert.match(workspace, /Dependency files/);
+  assert.match(workspace, />Files</);
   assert.match(workspace, /recommendation\.rationale/);
   assert.match(workspace, /recommendation\.evidence\.map/);
   assert.match(workspace, /onClick=\{onBackToReview\}/);
+});
+
+test('confirmation status, warnings, deduplication, and safety details use semantic color accents', () => {
+  assert.match(styles, /\.smart-cleanup-final-check\s*\{[\s\S]*?var\(--accent-total\)/);
+  assert.match(styles, /\.smart-cleanup-final-check\[data-status='ready'\][\s\S]*?var\(--vscode-charts-green/);
+  assert.match(styles, /\.smart-cleanup-confirmation__packages > li\[data-status='warning'\][\s\S]*?var\(--vscode-editorWarning-foreground/);
+  assert.match(styles, /\.smart-cleanup-confirmation__packages > li\.smart-cleanup-confirmation__dedupe\s*\{[\s\S]*?var\(--accent-updates\)/);
+  assert.match(styles, /\.smart-cleanup-preflight__facts > div:first-child dt\s*\{[\s\S]*?var\(--accent-total\)/);
+  assert.match(styles, /\.smart-cleanup-preflight__facts > div:last-child dt\s*\{[\s\S]*?var\(--vscode-charts-green/);
 });
 
 test('security and completion copy make no result claim before post-cleanup verification', () => {
@@ -160,11 +205,34 @@ test('security and completion copy make no result claim before post-cleanup veri
   assert.doesNotMatch(workspace, /expectedResolved/);
   assert.match(workspace, /const verified = phase === 'complete' && result\.verification === 'passed'/);
   assert.match(workspace, /Cleanup applied without verified checks/);
-  assert.match(styles, /data-verified='true'/);
+  assert.match(styles, /\.smart-cleanup-results__headline\[data-tone='verified'\]/);
   assert.match(workspace, /Removed dependencies/);
   assert.match(styles, /\.smart-cleanup-metric__bars/);
   assert.match(workspace, /Dependency files restored/);
   assert.match(workspace, /node_modules and script side effects were not restored/);
+});
+
+test('cleanup results use one outcome-led report with real changes and security evidence', () => {
+  assert.match(workspace, /const completedRemovals = result\.completedActionIds\.filter/);
+  assert.match(workspace, /const completedDedupe = result\.completedActionIds\.some/);
+  assert.match(workspace, /What changed/);
+  assert.match(workspace, /Project deduplication/);
+  assert.match(workspace, /Configured project checks passed after cleanup/);
+  assert.match(workspace, /className="smart-cleanup-result-security"/);
+  assert.match(workspace, /Security impact/);
+  assert.doesNotMatch(workspace, /smart-cleanup-result-details/);
+  assert.match(styles, /\.smart-cleanup-metric\[data-metric='duplicate-groups'\][\s\S]*?var\(--accent-updates\)/);
+  assert.match(styles, /\.smart-cleanup-result-row\[data-tone='verified'\][\s\S]*?var\(--vscode-charts-green/);
+  assert.match(styles, /\.smart-cleanup-result-security\s*\{[\s\S]*?var\(--accent-vulnerabilities\)/);
+});
+
+test('unchanged result metrics show one neutral current value and one neutral bar', () => {
+  assert.match(workspace, /const changed = change !== 0/);
+  assert.match(workspace, /\{changed \? <span>\{metric\.before\}<\/span> : null\}/);
+  assert.match(workspace, /\{changed \? <span aria-hidden="true">→<\/span> : null\}/);
+  assert.match(workspace, /\{changed \? <span style=\{\{ width:/);
+  assert.match(styles, /\.smart-cleanup-metric\[data-change='unchanged'\] dt,[\s\S]*?color:\s*var\(--smart-cleanup-muted\)/);
+  assert.match(styles, /\.smart-cleanup-metric\[data-change='unchanged'\] \.smart-cleanup-metric__bars strong[\s\S]*?var\(--vscode-descriptionForeground\)/);
 });
 
 test('mutation state visibly explains why the workspace cannot close', () => {
@@ -180,4 +248,5 @@ test('styles handle narrow workspaces and reduced motion', () => {
   assert.match(styles, /\.smart-cleanup-category__chevron\s*\{[\s\S]*?transition: none/);
   assert.match(styles, /\.smart-cleanup-analysis__steps li\[data-status='running'\][\s\S]*?animation: none/);
   assert.match(styles, /\.smart-cleanup-preflight__facts\s*\{[\s\S]*?grid-template-columns: 1fr/);
+  assert.match(styles, /\.smart-cleanup-result-packages,[\s\S]*?\.smart-cleanup-result-row\s*\{[\s\S]*?grid-template-columns: 1fr/);
 });

@@ -6,9 +6,11 @@ import {
   IconAlertTriangle,
   IconBroom,
   IconCheck,
+  IconChevronRight,
   IconHelpCircle,
   IconHistory,
   IconRefresh,
+  IconShield,
   IconTrash,
   IconX,
   IconXCircle,
@@ -130,19 +132,19 @@ function RecommendationItem({
           onChange={needsReview ? onToggleReviewed : onToggleSafe}
         />
       </div>
-      <div className="smart-cleanup-action__body">
-        <div className="smart-cleanup-action__topline">
-          <code className="smart-cleanup-action__package">{recommendation.packageName}</code>
-          <span className="smart-cleanup-confidence" data-confidence={recommendation.confidence}>
-            <StatusIcon confidence={recommendation.confidence} />
-            {CONFIDENCE_LABEL[recommendation.confidence]}
-          </span>
-          <span className="smart-cleanup-action__type">{recommendation.dependencyType}</span>
-        </div>
-        <p className="smart-cleanup-action__reason" id={reasonId}>
-          {recommendation.rationale}
-          {cannotSelect ? ' This item cannot be included in cleanup.' : ''}
-        </p>
+      <div className="smart-cleanup-action__identity">
+        <code className="smart-cleanup-action__package">{recommendation.packageName}</code>
+        <span className="smart-cleanup-confidence" data-confidence={recommendation.confidence}>
+          <StatusIcon confidence={recommendation.confidence} />
+          {CONFIDENCE_LABEL[recommendation.confidence]}
+        </span>
+      </div>
+      <span className="smart-cleanup-action__type">{recommendation.dependencyType}</span>
+      <p className="smart-cleanup-action__reason" id={reasonId}>
+        {recommendation.rationale}
+        {cannotSelect ? ' This item cannot be included in cleanup.' : ''}
+      </p>
+      <div className="smart-cleanup-action__evidence">
         {needsReview ? (
           reviewed ? (
             <p className="smart-cleanup-action__reviewed"><IconCheck />Evidence reviewed. Use the checkbox to include this removal.</p>
@@ -192,10 +194,13 @@ function DeprecatedItem({
       ? 'upgrade'
       : 'usage';
   return (
-    <li className="smart-cleanup-information-item">
-      <div>
+    <li className="smart-cleanup-information-item smart-cleanup-information-item--deprecated">
+      <div className="smart-cleanup-information-item__heading">
         <code>{finding.packageName}</code>
-        <span className="smart-cleanup-information-item__badge">
+        <span className="smart-cleanup-information-item__badge" data-tone="warning">
+          Deprecated
+        </span>
+        <span className="smart-cleanup-information-item__badge" data-tone="neutral">
           Installed {finding.installedVersion ?? 'version unknown'}
         </span>
       </div>
@@ -240,23 +245,37 @@ function DuplicateItem({
   finding: SmartCleanupDuplicateFinding;
   onOpenDependencyReview: (packageName: string, tab: ManageTabId) => void;
 }): ReactElement {
+  const outcomeTone = finding.outcome === 'safe-convergence'
+    ? 'success'
+    : finding.outcome === 'keep-both'
+      ? 'neutral'
+      : 'warning';
+  const outcomeLabel = finding.outcome === 'safe-convergence'
+    ? `Can consolidate${finding.targetVersion === undefined ? '' : ` to ${finding.targetVersion}`}`
+    : finding.outcome === 'keep-both'
+      ? 'Keep current versions'
+      : 'Not verified';
   return (
-    <li className="smart-cleanup-information-item smart-cleanup-duplicate">
-      <div>
-        <code>{finding.packageName}</code>
-        <span className="smart-cleanup-information-item__badge">
-          {finding.versions.length} installed {finding.versions.length === 1 ? 'version' : 'versions'}
-        </span>
-        <span className="smart-cleanup-information-item__badge">
-          {finding.excessVersionCount} additional {finding.excessVersionCount === 1 ? 'version' : 'versions'}
-        </span>
-        <span className="smart-cleanup-information-item__badge">
-          {finding.outcome === 'safe-convergence'
-            ? `Can consolidate${finding.targetVersion === undefined ? '' : ` to ${finding.targetVersion}`}`
-            : finding.outcome === 'keep-both' ? 'Keep current versions' : 'Not verified'}
-        </span>
+    <li className="smart-cleanup-information-item smart-cleanup-information-item--duplicate" data-outcome={finding.outcome}>
+      <div className="smart-cleanup-duplicate__heading">
+        <div className="smart-cleanup-duplicate__identity">
+          <code>{finding.packageName}</code>
+          <span className="smart-cleanup-information-item__badge" data-tone={outcomeTone}>
+            {outcomeLabel}
+          </span>
+        </div>
+        <dl className="smart-cleanup-duplicate__stats">
+          <div>
+            <dt>Installed</dt>
+            <dd>{finding.versions.length} {finding.versions.length === 1 ? 'version' : 'versions'}</dd>
+          </div>
+          <div>
+            <dt>Excess</dt>
+            <dd>{finding.excessVersionCount} {finding.excessVersionCount === 1 ? 'version' : 'versions'}</dd>
+          </div>
+        </dl>
       </div>
-      <p>{finding.reason}</p>
+      <p className="smart-cleanup-duplicate__reason">{finding.reason}</p>
       <ol className="smart-cleanup-duplicate__versions">
         {finding.versions.map((version) => {
           const primaryPath = version.paths[0];
@@ -322,7 +341,7 @@ function SecurityItem({
   const allRootsSelected = selectedRootCount === finding.directRootCount;
   const remainingRoots = finding.directRoots.filter((packageName) => !selectedRoots.includes(packageName));
   return (
-    <li className="smart-cleanup-information-item">
+    <li className="smart-cleanup-information-item smart-cleanup-information-item--security">
       <div className="smart-cleanup-security__heading">
         <strong>{finding.packageName}</strong>
         {finding.advisoryId === null ? null : <code>{finding.advisoryId}</code>}
@@ -389,7 +408,7 @@ function ReviewView({
   if (plan === null) return <EmptyCategory>No cleanup evidence is available.</EmptyCategory>;
 
   const safeRemovalCount = plan.recommendations.filter((recommendation) => recommendation.confidence === 'safe').length;
-  const safe = safeRemovalCount + (plan.dedupeAction === null ? 0 : 1);
+  const recommendedActionCount = safeRemovalCount + (plan.dedupeAction === null ? 0 : 1);
   const review = plan.recommendations.filter((recommendation) => recommendation.confidence === 'review').length;
   const blocked = plan.recommendations.filter(
     (recommendation) => recommendation.confidence === 'blocked' || recommendation.confidence === 'unknown'
@@ -402,7 +421,8 @@ function ReviewView({
   const safeSelected = safeRemovalsSelected && (
     plan.dedupeAction === null || state.selectedActionIds.has(plan.dedupeAction.id)
   );
-  const actionableCount = safe + review;
+  const directRemovalCount = safeRemovalCount + review;
+  const selectableActionCount = directRemovalCount + (plan.dedupeAction === null ? 0 : 1);
   const duplicateExcessCount = plan.duplicates.reduce((count, finding) => count + finding.excessVersionCount, 0);
   const selectedSecurity = plan.security.flatMap((finding) => {
     const selectedActionIds = new Set(
@@ -423,32 +443,86 @@ function ReviewView({
         </StatusBanner>
       ) : null}
 
-      <div className="smart-cleanup-outcome">
-        <div className="smart-cleanup-outcome__headline">
-          <strong>{safe} recommended cleanup {safe === 1 ? 'action' : 'actions'}</strong>
-          <span>{review} need review</span>
+      <section className="smart-cleanup-outcome" aria-label="Cleanup recommendation summary">
+        <div className="smart-cleanup-outcome__lead">
+          <div className="smart-cleanup-outcome__title">
+            <span aria-hidden="true"><IconBroom /></span>
+            <div>
+              <h3>
+                {state.phase === 'partial'
+                  ? 'Review the available cleanup evidence'
+                  : review > 0 ? 'Cleanup plan needs your review' : 'Recommended cleanup is ready'}
+              </h3>
+              <p>
+                {recommendedActionCount} recommended {recommendedActionCount === 1 ? 'action' : 'actions'}
+                {review > 0 ? ` · ${review} ${review === 1 ? 'needs' : 'need'} review` : ''}
+                {blocked > 0 ? ` · ${blocked} unavailable` : ''}
+              </p>
+            </div>
+          </div>
+          {safeRemovalCount > 0 ? (
+            <p className="smart-cleanup-outcome__guidance">
+              A recommended removal means the supported source, script, configuration, and dependency checks found no
+              known blocker. Static analysis cannot guarantee runtime safety, so review the evidence and run your build
+              and tests after cleanup.
+            </p>
+          ) : null}
         </div>
-        <p>
-          {actionableCount} direct removals available
-          {plan.deprecated.length > 0 ? ` · ${plan.deprecated.length} deprecated` : ''}
-          {plan.duplicates.length > 0 ? ` · ${plan.duplicates.length} duplicate groups` : ''}
-          {plan.security.length > 0 ? ` · ${plan.security.length} advisory findings` : ''}
-          {blocked > 0 ? ` · ${blocked} unavailable removals` : ''}
-        </p>
-        {safeRemovalCount > 0 ? (
-          <p>
-            A recommended removal means the supported source, script, configuration, and dependency checks found no
-            known blocker. Static analysis cannot guarantee runtime safety, so review the evidence and run your build
-            and tests after cleanup.
-          </p>
-        ) : null}
-      </div>
+        <ul className="smart-cleanup-outcome__signals">
+          {([
+            {
+              category: 'unused' as const,
+              icon: <IconTrash />,
+              label: 'Unused dependencies',
+              value: `${directRemovalCount} candidates`,
+              tone: review > 0 ? 'warning' : 'ok',
+            },
+            {
+              category: 'deprecated' as const,
+              icon: <IconAlertTriangle />,
+              label: 'Deprecated packages',
+              value: `${plan.deprecated.length} ${plan.deprecated.length === 1 ? 'finding' : 'findings'}`,
+              tone: plan.deprecated.length > 0 ? 'warning' : 'neutral',
+            },
+            {
+              category: 'duplicates' as const,
+              icon: <IconBroom />,
+              label: 'Duplicate versions',
+              value: plan.duplicates.length === 0 ? 'No findings' : `${plan.duplicates.length} groups · ${duplicateExcessCount} excess`,
+              tone: plan.duplicates.length > 0 ? 'update' : 'neutral',
+            },
+            {
+              category: 'security' as const,
+              icon: <IconShield />,
+              label: 'Security impact',
+              value: `${plan.security.length} advisory ${plan.security.length === 1 ? 'finding' : 'findings'}`,
+              tone: plan.security.length > 0 ? 'security' : 'neutral',
+            },
+          ]).map((signal) => (
+            <li key={signal.category} className="smart-cleanup-outcome__signal" data-tone={signal.tone}>
+              <button
+                type="button"
+                aria-expanded={state.expandedCategories.has(signal.category)}
+                onClick={() => dispatch({ type: 'toggle-category', category: signal.category })}
+              >
+                <span className="smart-cleanup-outcome__signal-icon" aria-hidden="true">{signal.icon}</span>
+                <span className="smart-cleanup-outcome__signal-label">{signal.label}</span>
+                <span className="smart-cleanup-outcome__signal-value">{signal.value}</span>
+                <IconChevronRight className="smart-cleanup-outcome__signal-arrow" aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
 
       <div className="smart-cleanup-selection-bar">
-        <p>
-          <strong>{selectedCount}</strong> selected
-          {actionableCount > SMART_CLEANUP_MAX_ACTIONS ? ` · first batch is limited to ${SMART_CLEANUP_MAX_ACTIONS}` : ''}
-        </p>
+        <div className="smart-cleanup-selection-bar__status">
+          <span aria-hidden="true"><IconCheck /></span>
+          <p>
+            <strong>{selectedCount}</strong> selected
+            {selectableActionCount > SMART_CLEANUP_MAX_ACTIONS ? ` · first batch is limited to ${SMART_CLEANUP_MAX_ACTIONS}` : ''}
+          </p>
+        </div>
         <div>
           <button
             type="button"
@@ -465,6 +539,7 @@ function ReviewView({
           category="unused"
           title="Unused"
           summary={`${plan.recommendations.length} assessed`}
+          detail="Supported code and configuration checks"
           count={plan.recommendations.length}
           expanded={state.expandedCategories.has('unused')}
           onToggle={() => dispatch({ type: 'toggle-category', category: 'unused' })}
@@ -472,20 +547,29 @@ function ReviewView({
           {plan.recommendations.length === 0 ? (
             <EmptyCategory>No unused direct dependencies were found.</EmptyCategory>
           ) : (
-            <ul className="smart-cleanup-actions">
-              {plan.recommendations.map((recommendation) => (
-                <RecommendationItem
-                  key={recommendation.id}
-                  recommendation={recommendation}
-                  selected={state.selectedActionIds.has(recommendation.id)}
-                  reviewed={state.reviewedActionIds.has(recommendation.id)}
-                  selectionFull={selectedCount >= SMART_CLEANUP_MAX_ACTIONS}
-                  onToggleSafe={() => dispatch({ type: 'toggle-safe-action', actionId: recommendation.id })}
-                  onReview={() => dispatch({ type: 'review-action', actionId: recommendation.id })}
-                  onToggleReviewed={() => dispatch({ type: 'toggle-reviewed-action', actionId: recommendation.id })}
-                />
-              ))}
-            </ul>
+            <div className="smart-cleanup-action-grid">
+              <div className="smart-cleanup-action-grid__header" aria-hidden="true">
+                <span />
+                <span>Package</span>
+                <span>Dependency type</span>
+                <span>Reason</span>
+                <span>Evidence</span>
+              </div>
+              <ul className="smart-cleanup-actions">
+                {plan.recommendations.map((recommendation) => (
+                  <RecommendationItem
+                    key={recommendation.id}
+                    recommendation={recommendation}
+                    selected={state.selectedActionIds.has(recommendation.id)}
+                    reviewed={state.reviewedActionIds.has(recommendation.id)}
+                    selectionFull={selectedCount >= SMART_CLEANUP_MAX_ACTIONS}
+                    onToggleSafe={() => dispatch({ type: 'toggle-safe-action', actionId: recommendation.id })}
+                    onReview={() => dispatch({ type: 'review-action', actionId: recommendation.id })}
+                    onToggleReviewed={() => dispatch({ type: 'toggle-reviewed-action', actionId: recommendation.id })}
+                  />
+                ))}
+              </ul>
+            </div>
           )}
         </SmartCleanupCategorySection>
 
@@ -493,6 +577,7 @@ function ReviewView({
           category="deprecated"
           title="Deprecated"
           summary="Publisher status and next steps"
+          detail="Maintainer guidance"
           count={plan.deprecated.length}
           expanded={state.expandedCategories.has('deprecated')}
           onToggle={() => dispatch({ type: 'toggle-category', category: 'deprecated' })}
@@ -515,6 +600,7 @@ function ReviewView({
           category="duplicates"
           title="Duplicate versions"
           summary={`${duplicateExcessCount} additional resolved versions`}
+          detail="Resolved graph consolidation"
           count={plan.duplicates.length}
           expanded={state.expandedCategories.has('duplicates')}
           onToggle={() => dispatch({ type: 'toggle-category', category: 'duplicates' })}
@@ -566,6 +652,7 @@ function ReviewView({
           category="security"
           title="Security impact of selection"
           summary={selectedCount === 0 ? 'Select removals to preview' : 'Current graph estimate; verified afterward'}
+          detail="Refreshed after cleanup"
           count={selectedSecurity.length}
           expanded={state.expandedCategories.has('security')}
           onToggle={() => dispatch({ type: 'toggle-category', category: 'security' })}
@@ -608,11 +695,13 @@ function preflightMatchesSelection(
 function ConfirmationView({
   state,
   onKeepDependency,
+  onPrepareRemoval,
   removalPreflight,
   preflightBusy,
 }: {
   state: SmartCleanupState;
   onKeepDependency: (actionId: string) => void;
+  onPrepareRemoval: (actionIds: readonly string[]) => void;
   removalPreflight: RemoveAnalysisPresentation | null;
   preflightBusy: boolean;
 }): ReactElement {
@@ -623,122 +712,116 @@ function ConfirmationView({
   const warningCount = checkedPreflight?.changes.filter((change) => change.stillRequiredBy.length > 0).length ?? 0;
   const actionCount = selected.length + (dedupeAction === null ? 0 : 1);
   const dedupePreview = checkedPreflight?.dedupe ?? dedupeAction;
+  const checkState = checkedPreflight === null ? 'checking' : warningCount > 0 ? 'warning' : 'ready';
 
   return (
     <div className="smart-cleanup-confirmation">
-      <div className="smart-cleanup-confirmation__summary">
-        {dedupeAction === null ? <IconTrash /> : <IconBroom />}
+      <section
+        className="smart-cleanup-final-check"
+        data-status={checkState}
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {checkedPreflight === null
+          ? <IconRefresh className={preflightBusy ? 'banner__icon--spin' : undefined} />
+          : warningCount > 0 ? <IconAlertTriangle /> : <IconCheck />}
         <div>
-          <strong>Apply {actionCount} reviewed cleanup {actionCount === 1 ? 'action' : 'actions'}</strong>
-          <p>Dependency removals and project deduplication run inside one restore boundary. The installed graph is checked before changes are kept.</p>
+          <h3>
+            {checkedPreflight === null
+              ? preflightBusy ? 'Checking the final cleanup plan…' : 'Starting the final cleanup check…'
+              : warningCount === 0 ? 'Final check complete' : 'Final check needs your attention'}
+          </h3>
+          <p>
+            {checkedPreflight === null
+              ? 'Rereading the current dependency tree, simulating the selected actions together, and verifying project files.'
+              : warningCount === 0
+                ? `${actionCount} cleanup ${actionCount === 1 ? 'action is' : 'actions are'} ready to confirm.`
+                : `${warningCount} ${warningCount === 1 ? 'dependency has' : 'dependencies have'} a fresh reference warning. Review the highlighted ${warningCount === 1 ? 'item' : 'items'} below.`}
+          </p>
         </div>
-      </div>
-      <ul className="smart-cleanup-confirmation__packages">
-        {selected.map((recommendation) => {
-          const freshChange = checkedPreflight?.changes.find((change) => change.packageName === recommendation.packageName);
-          const retainedTransitively = freshChange !== undefined && freshChange.stillRequiredBy.length > 0;
-          return (
-            <li key={recommendation.id} data-recheck={retainedTransitively ? 'required-transitively' : 'clear'}>
-              <div>
-                <code>{recommendation.packageName}</code>
-                <p>{recommendation.rationale}</p>
-                {retainedTransitively ? (
-                  <p className="smart-cleanup-confirmation__fresh-warning">
-                    The final check found that {freshChange.stillRequiredBy.join(', ')} still require this package transitively.
-                    Cleanup would remove only its direct declaration; the package may remain installed.
-                  </p>
-                ) : null}
-                {recommendation.evidence.length > 0 ? (
-                  <ul className="smart-cleanup-confirmation__evidence">
-                    {recommendation.evidence.map((evidence, index) => (
-                      <li key={`${index}:${evidence}`}>{evidence}</li>
-                    ))}
-                  </ul>
-                ) : null}
-              </div>
-              <span>{retainedTransitively ? 'Still needed transitively' : CONFIDENCE_LABEL[recommendation.confidence]}</span>
-            </li>
-          );
-        })}
-      </ul>
-      {dedupePreview === null || dedupePreview === undefined ? null : (
-        <div className="smart-cleanup-confirmation__dedupe">
-          <IconBroom />
-          <div>
-            <strong>Deduplicate the project</strong>
-            <p>
-              {checkedPreflight === null ? 'The initial review' : 'The final combined check'} covers {dedupePreview.affectedPackages.length} duplicate {dedupePreview.affectedPackages.length === 1 ? 'group' : 'groups'} and expects {dedupePreview.expectedRemovedVersions} excess {dedupePreview.expectedRemovedVersions === 1 ? 'version' : 'versions'} to be removed.
-            </p>
-          </div>
-        </div>
-      )}
+      </section>
 
-      {checkedPreflight === null ? (
-        <div className="smart-cleanup-final-check" role={preflightBusy ? 'status' : undefined} aria-live="polite">
-          <IconRefresh />
-          <div>
-            <strong>{preflightBusy ? 'Checking the final cleanup plan…' : 'A final project check is required'}</strong>
-            <p>
-              {removalPreflight !== null && !preflightMatches
-                ? 'The checked plan no longer matches this selection. Check the final plan again.'
-                : 'This rereads the current dependency tree, simulates the selected actions together, and verifies project files before cleanup.'}
-            </p>
-          </div>
+      <section className="smart-cleanup-confirmation__selection" aria-labelledby="smart-cleanup-selection-title">
+        <div className="smart-cleanup-confirmation__selection-heading">
+          <h3 id="smart-cleanup-selection-title">Selected cleanup</h3>
+          <span>{actionCount} {actionCount === 1 ? 'action' : 'actions'}</span>
         </div>
-      ) : (
-        <section className="smart-cleanup-preflight" aria-labelledby="smart-cleanup-preflight-title">
-          <div className="smart-cleanup-preflight__heading" role="status" aria-live="polite" aria-atomic="true">
-            <IconCheck />
-            <div>
-              <h3 id="smart-cleanup-preflight-title">Final plan checked</h3>
-              <p>
-                {warningCount === 0
-                  ? 'Nothing else in the current dependency tree references these packages.'
-                  : `${warningCount} ${warningCount === 1 ? 'dependency has' : 'dependencies have'} fresh reference warnings. Review them before confirming.`}
-              </p>
-            </div>
-          </div>
-          <ul className="smart-cleanup-preflight__changes">
-            {checkedPreflight.changes.map((change) => (
-              <li key={change.packageName}>
-                <div>
-                  <code>{change.packageName}</code>
-                  <span>{change.classification}</span>
-                </div>
-                {change.stillRequiredBy.length === 0 ? (
-                  <p>No remaining direct dependency path references this package.</p>
-                ) : (
-                  <div className="smart-cleanup-preflight__decision">
-                    <p className="smart-cleanup-preflight__warning">
-                      <IconAlertTriangle /> Still required transitively by {change.stillRequiredBy.join(', ')}
-                    </p>
-                    <p>Removing this direct declaration will not necessarily remove the package from the installed graph.</p>
-                    <button
-                      type="button"
-                      className="button button--small button--secondary"
-                      onClick={() => {
-                        const recommendation = selected.find((item) => item.packageName === change.packageName);
-                        if (recommendation !== undefined) onKeepDependency(recommendation.id);
-                      }}
-                    >
-                      Keep direct dependency
-                    </button>
+        <ul className="smart-cleanup-confirmation__packages">
+          {selected.map((recommendation) => {
+            const freshChange = checkedPreflight?.changes.find((change) => change.packageName === recommendation.packageName);
+            const retainedTransitively = freshChange !== undefined && freshChange.stillRequiredBy.length > 0;
+            const status = checkedPreflight === null ? 'checking' : retainedTransitively ? 'warning' : 'ready';
+            return (
+              <li key={recommendation.id} data-status={status}>
+                <div className="smart-cleanup-confirmation__package-copy">
+                  <div className="smart-cleanup-confirmation__package-heading">
+                    <code>{recommendation.packageName}</code>
+                    {freshChange === undefined ? null : <span>{freshChange.classification}</span>}
                   </div>
-                )}
+                  <p>{recommendation.rationale}</p>
+                  {retainedTransitively ? (
+                    <div className="smart-cleanup-preflight__decision">
+                      <p className="smart-cleanup-preflight__warning">
+                        <IconAlertTriangle /> Still required transitively by {freshChange.stillRequiredBy.join(', ')}
+                      </p>
+                      <p>Removing this direct declaration will not necessarily remove the package from the installed graph.</p>
+                      <button
+                        type="button"
+                        className="button button--small button--secondary"
+                        onClick={() => {
+                          const remainingActionIds = [...state.selectedActionIds]
+                            .filter((actionId) => actionId !== recommendation.id)
+                            .sort((left, right) => left.localeCompare(right));
+                          onKeepDependency(recommendation.id);
+                          if (remainingActionIds.length > 0) onPrepareRemoval(remainingActionIds);
+                        }}
+                      >
+                        Keep direct dependency
+                      </button>
+                    </div>
+                  ) : null}
+                  {recommendation.evidence.length > 0 ? (
+                    <details className="smart-cleanup-confirmation__evidence">
+                      <summary>Reviewed evidence</summary>
+                      <ul>
+                        {recommendation.evidence.map((evidence, index) => (
+                          <li key={`${index}:${evidence}`}>{evidence}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  ) : null}
+                </div>
+                <span className="smart-cleanup-confirmation__status" data-status={status}>
+                  {status === 'checking' ? 'Checking' : status === 'warning' ? 'Needs attention' : 'Ready'}
+                </span>
               </li>
-            ))}
-          </ul>
-          {checkedPreflight.dedupe === undefined ? null : (
-            <div className="smart-cleanup-preflight__dedupe">
-              <IconCheck />
-              <p>
-                Project dedupe verified for {checkedPreflight.dedupe.affectedPackages.length} {checkedPreflight.dedupe.affectedPackages.length === 1 ? 'group' : 'groups'}, with {checkedPreflight.dedupe.expectedRemovedVersions} excess {checkedPreflight.dedupe.expectedRemovedVersions === 1 ? 'version' : 'versions'} expected to be removed.
-              </p>
-            </div>
+            );
+          })}
+          {dedupePreview === null || dedupePreview === undefined ? null : (
+            <li className="smart-cleanup-confirmation__dedupe" data-status={checkedPreflight === null ? 'checking' : 'ready'}>
+              <div className="smart-cleanup-confirmation__package-copy">
+                <div className="smart-cleanup-confirmation__package-heading">
+                  <strong>Deduplicate the project</strong>
+                  <span>Project-wide</span>
+                </div>
+                <p>
+                  {checkedPreflight === null ? 'The final check is reviewing' : 'The final check verified'} {dedupePreview.affectedPackages.length} duplicate {dedupePreview.affectedPackages.length === 1 ? 'group' : 'groups'} and {dedupePreview.expectedRemovedVersions} excess {dedupePreview.expectedRemovedVersions === 1 ? 'version' : 'versions'}.
+                </p>
+              </div>
+              <span className="smart-cleanup-confirmation__status" data-status={checkedPreflight === null ? 'checking' : 'ready'}>
+                {checkedPreflight === null ? 'Checking' : 'Ready'}
+              </span>
+            </li>
           )}
+        </ul>
+      </section>
+
+      {checkedPreflight === null ? null : (
+        <section className="smart-cleanup-preflight" aria-label="Cleanup safety details">
           <dl className="smart-cleanup-preflight__facts">
             <div className="smart-cleanup-preflight__files">
-              <dt>Dependency files</dt>
+              <dt>Files</dt>
               <dd>
                 <span><strong>Manifest</strong><code>{checkedPreflight.files.manifestPath}</code></span>
                 <span><strong>Lockfile</strong><code>{checkedPreflight.files.lockfilePath}</code></span>
@@ -760,7 +843,7 @@ function ConfirmationView({
         <p>
           {checkedPreflight?.files.rollbackAvailable === false
             ? 'No automatic restore point is available. Review source control before continuing.'
-            : 'If cleanup fails, restoration of the project manifest and active lockfile is attempted automatically.'}
+            : 'Dependency removals and project deduplication run inside one restore boundary. If cleanup fails, restoration of the project manifest and active lockfile is attempted automatically.'}
         </p>
       </div>
     </div>
@@ -790,18 +873,23 @@ function resultPackageName(actionId: string): string {
 function ResultMetric({ metric }: { metric: SmartCleanupResult['metrics'][number] }): ReactElement {
   const maximum = Math.max(metric.before, metric.after, 1);
   const change = metric.before - metric.after;
+  const changed = change !== 0;
   const changeLabel = change > 0 ? `${change} fewer` : change < 0 ? `${Math.abs(change)} more` : 'No change';
   return (
-    <div className="smart-cleanup-metric" data-change={change > 0 ? 'improved' : change < 0 ? 'increased' : 'unchanged'}>
+    <div
+      className="smart-cleanup-metric"
+      data-change={change > 0 ? 'improved' : change < 0 ? 'increased' : 'unchanged'}
+      data-metric={metric.id}
+    >
       <dt>{metric.label}</dt>
       <dd>
-        <span>{metric.before}</span>
-        <span aria-hidden="true">→</span>
+        {changed ? <span>{metric.before}</span> : null}
+        {changed ? <span aria-hidden="true">→</span> : null}
         <strong>{metric.after}</strong>
         <em>{changeLabel}</em>
       </dd>
       <div className="smart-cleanup-metric__bars" aria-hidden="true">
-        <span style={{ width: `${Math.max(4, (metric.before / maximum) * 100)}%` }} />
+        {changed ? <span style={{ width: `${Math.max(4, (metric.before / maximum) * 100)}%` }} /> : null}
         <strong style={{ width: `${Math.max(4, (metric.after / maximum) * 100)}%` }} />
       </div>
       <small>{metric.detail}</small>
@@ -813,15 +901,23 @@ function ResultPackages({
   title,
   actionIds,
   tone,
+  detail,
 }: {
   title: string;
   actionIds: readonly string[];
   tone: 'completed' | 'skipped' | 'failed';
+  detail: string;
 }): ReactElement | null {
   if (actionIds.length === 0) return null;
   return (
     <section className="smart-cleanup-result-packages" data-tone={tone}>
-      <h3>{title}</h3>
+      <div className="smart-cleanup-result-row__heading">
+        {tone === 'completed' ? <IconCheck /> : tone === 'failed' ? <IconXCircle /> : <IconAlertTriangle />}
+        <div>
+          <h4>{title}</h4>
+          <p>{detail}</p>
+        </div>
+      </div>
       <ul>
         {actionIds.map((actionId) => <li key={actionId}><code>{resultPackageName(actionId)}</code></li>)}
       </ul>
@@ -845,11 +941,9 @@ function ResultAdvisoryItem({ advisory, outcome }: { advisory: SmartCleanupResul
 
 function ResultView({ result, phase }: { result: SmartCleanupResult; phase: SmartCleanupState['phase'] }): ReactElement {
   const verified = phase === 'complete' && result.verification === 'passed';
-  const rollbackLabel = result.rollback === 'restored'
-    ? 'Project dependency files restored'
-    : result.rollback === 'incomplete'
-      ? 'Restoration needs attention'
-      : 'Automatic restoration was not needed';
+  const completedRemovals = result.completedActionIds.filter((actionId) => actionId.startsWith('remove-direct:'));
+  const completedDedupe = result.completedActionIds.some((actionId) => actionId.startsWith('dedupe:'));
+  const completedCount = result.completedActionIds.length;
   const headline = verified
     ? 'Verified cleanup results'
     : phase === 'complete'
@@ -857,58 +951,115 @@ function ResultView({ result, phase }: { result: SmartCleanupResult; phase: Smar
     : phase === 'cancelled-rolled-back'
       ? 'Dependency files restored'
       : 'Review the incomplete cleanup';
+  const headlineDetail = verified
+    ? `${completedCount} cleanup ${completedCount === 1 ? 'action completed' : 'actions completed'} and project verification passed.`
+    : phase === 'complete'
+      ? `${completedCount} cleanup ${completedCount === 1 ? 'action completed' : 'actions completed'}, but configured verification did not pass.`
+      : phase === 'cancelled-rolled-back'
+        ? 'Cleanup stopped and the saved dependency files were restored.'
+        : `${result.failedActionIds.length} ${result.failedActionIds.length === 1 ? 'action needs' : 'actions need'} attention before the result can be trusted.`;
+  const resultTone = verified ? 'verified' : phase === 'cancelled-rolled-back' ? 'restored' : 'attention';
+  const verificationDetail = result.verification === 'passed'
+    ? 'Configured project checks passed after cleanup.'
+    : result.verification === 'failed'
+      ? 'Configured project checks failed after cleanup.'
+      : 'No post-cleanup project verification was run.';
   return (
     <div className="smart-cleanup-results">
-      <div className="smart-cleanup-results__headline" data-verified={verified ? 'true' : undefined}>
-        {verified ? <IconCheck /> : <IconAlertTriangle />}
-        <strong>{headline}</strong>
-      </div>
+      <section className="smart-cleanup-results__headline" data-tone={resultTone} data-verified={verified ? 'true' : undefined}>
+        {verified ? <IconCheck /> : phase === 'cancelled-rolled-back' ? <IconHistory /> : <IconAlertTriangle />}
+        <div>
+          <h3>{headline}</h3>
+          <p>{headlineDetail}</p>
+        </div>
+      </section>
       <dl className="smart-cleanup-metrics">
         {result.metrics.map((metric) => <ResultMetric key={metric.id} metric={metric} />)}
       </dl>
-      <div className="smart-cleanup-result-package-groups">
-        <ResultPackages title="Removed dependencies" actionIds={result.completedActionIds} tone="completed" />
-        <ResultPackages title="Skipped dependencies" actionIds={result.skippedActionIds} tone="skipped" />
-        <ResultPackages title="Failed dependencies" actionIds={result.failedActionIds} tone="failed" />
-      </div>
-      {result.resolvedAdvisories.length > 0 ? (
-        <section className="smart-cleanup-result-advisories" aria-labelledby="smart-cleanup-resolved-advisories">
-          <h3 id="smart-cleanup-resolved-advisories">Resolved advisory findings</h3>
-          <SmartCleanupFindingList
-            items={result.resolvedAdvisories}
-            getKey={(advisory) => `${advisory.sourceId}:${advisory.flaggedPackage}`}
-            getSearchText={(advisory) => `${advisory.identifiers.join(' ')} ${advisory.flaggedPackage} ${advisory.title}`}
-            renderItem={(advisory) => <ResultAdvisoryItem advisory={advisory} outcome="resolved" />}
-            searchLabel="Search resolved advisories"
-            emptyMessage="No resolved advisory matches this search."
-            initialCount={6}
-            searchThreshold={6}
+      <section className="smart-cleanup-result-changes" aria-labelledby="smart-cleanup-result-changes-title">
+        <h3 id="smart-cleanup-result-changes-title">What changed</h3>
+        <div className="smart-cleanup-result-change-list">
+          <ResultPackages
+            title="Removed dependencies"
+            actionIds={completedRemovals}
+            tone="completed"
+            detail={`${completedRemovals.length} direct ${completedRemovals.length === 1 ? 'dependency was' : 'dependencies were'} removed.`}
           />
+          {completedDedupe ? (
+            <section className="smart-cleanup-result-row" data-tone="deduplicated">
+              <div className="smart-cleanup-result-row__heading">
+                <IconBroom />
+                <div>
+                  <h4>Project deduplication</h4>
+                  <p>Compatible duplicate versions were consolidated across the dependency tree.</p>
+                </div>
+              </div>
+              <span>Completed</span>
+            </section>
+          ) : null}
+          <ResultPackages
+            title="Skipped actions"
+            actionIds={result.skippedActionIds}
+            tone="skipped"
+            detail={`${result.skippedActionIds.length} selected ${result.skippedActionIds.length === 1 ? 'action was' : 'actions were'} not applied.`}
+          />
+          <ResultPackages
+            title="Failed actions"
+            actionIds={result.failedActionIds}
+            tone="failed"
+            detail={`${result.failedActionIds.length} ${result.failedActionIds.length === 1 ? 'action requires' : 'actions require'} manual review.`}
+          />
+          <section className="smart-cleanup-result-row" data-tone={result.verification === 'passed' ? 'verified' : 'attention'}>
+            <div className="smart-cleanup-result-row__heading">
+              {result.verification === 'passed' ? <IconCheck /> : <IconAlertTriangle />}
+              <div>
+                <h4>Verification</h4>
+                <p>{verificationDetail}</p>
+              </div>
+            </div>
+            <span>{result.verification === 'passed' ? 'Passed' : result.verification === 'failed' ? 'Failed' : 'Not run'}</span>
+          </section>
+        </div>
+      </section>
+      {result.resolvedAdvisories.length > 0 || result.introducedAdvisories.length > 0 ? (
+        <section className="smart-cleanup-result-security" aria-labelledby="smart-cleanup-result-security-title">
+          <div className="smart-cleanup-result-security__heading">
+            <h3 id="smart-cleanup-result-security-title">Security impact</h3>
+            <p>{result.resolvedAdvisories.length} resolved · {result.introducedAdvisories.length} new</p>
+          </div>
+          {result.resolvedAdvisories.length > 0 ? (
+            <section className="smart-cleanup-result-advisories" aria-labelledby="smart-cleanup-resolved-advisories">
+              <h4 id="smart-cleanup-resolved-advisories">Resolved advisory findings</h4>
+              <SmartCleanupFindingList
+                items={result.resolvedAdvisories}
+                getKey={(advisory) => `${advisory.sourceId}:${advisory.flaggedPackage}`}
+                getSearchText={(advisory) => `${advisory.identifiers.join(' ')} ${advisory.flaggedPackage} ${advisory.title}`}
+                renderItem={(advisory) => <ResultAdvisoryItem advisory={advisory} outcome="resolved" />}
+                searchLabel="Search resolved advisories"
+                emptyMessage="No resolved advisory matches this search."
+                initialCount={6}
+                searchThreshold={6}
+              />
+            </section>
+          ) : null}
+          {result.introducedAdvisories.length > 0 ? (
+            <section className="smart-cleanup-result-advisories" aria-labelledby="smart-cleanup-introduced-advisories">
+              <h4 id="smart-cleanup-introduced-advisories">New advisory findings requiring attention</h4>
+              <SmartCleanupFindingList
+                items={result.introducedAdvisories}
+                getKey={(advisory) => `${advisory.sourceId}:${advisory.flaggedPackage}`}
+                getSearchText={(advisory) => `${advisory.identifiers.join(' ')} ${advisory.flaggedPackage} ${advisory.title}`}
+                renderItem={(advisory) => <ResultAdvisoryItem advisory={advisory} outcome="introduced" />}
+                searchLabel="Search new advisories"
+                emptyMessage="No new advisory matches this search."
+                initialCount={6}
+                searchThreshold={6}
+              />
+            </section>
+          ) : null}
         </section>
       ) : null}
-      {result.introducedAdvisories.length > 0 ? (
-        <section className="smart-cleanup-result-advisories" aria-labelledby="smart-cleanup-introduced-advisories">
-          <h3 id="smart-cleanup-introduced-advisories">New advisory findings requiring attention</h3>
-          <SmartCleanupFindingList
-            items={result.introducedAdvisories}
-            getKey={(advisory) => `${advisory.sourceId}:${advisory.flaggedPackage}`}
-            getSearchText={(advisory) => `${advisory.identifiers.join(' ')} ${advisory.flaggedPackage} ${advisory.title}`}
-            renderItem={(advisory) => <ResultAdvisoryItem advisory={advisory} outcome="introduced" />}
-            searchLabel="Search new advisories"
-            emptyMessage="No new advisory matches this search."
-            initialCount={6}
-            searchThreshold={6}
-          />
-        </section>
-      ) : null}
-      <dl className="smart-cleanup-result-details">
-        <div><dt>Completed</dt><dd>{result.completedActionIds.length}</dd></div>
-        <div><dt>Skipped</dt><dd>{result.skippedActionIds.length}</dd></div>
-        <div><dt>Failed</dt><dd>{result.failedActionIds.length}</dd></div>
-        <div><dt>Verification</dt><dd>{result.verification}</dd></div>
-        <div><dt>Restoration</dt><dd>{rollbackLabel}</dd></div>
-      </dl>
-      <div className="smart-cleanup-results__recovery">
+      <div className="smart-cleanup-results__recovery" data-tone={result.rollback === 'incomplete' ? 'attention' : 'info'}>
         <IconHistory />
         <p>
           {result.rollback === 'restored'
@@ -1073,6 +1224,7 @@ export function SmartCleanupWorkspace({
             <ConfirmationView
               state={state}
               onKeepDependency={onKeepDependency}
+              onPrepareRemoval={onPrepareRemoval}
               removalPreflight={removalPreflight}
               preflightBusy={preflightBusy}
             />
@@ -1095,7 +1247,11 @@ export function SmartCleanupWorkspace({
                 type="button"
                 className="button button--primary"
                 disabled={state.selectedActionIds.size === 0 || reviewEvidenceRefreshing}
-                onClick={() => dispatch({ type: 'show-confirmation' })}
+                onClick={() => {
+                  const actionIds = [...state.selectedActionIds].sort((left, right) => left.localeCompare(right));
+                  dispatch({ type: 'show-confirmation' });
+                  onPrepareRemoval(actionIds);
+                }}
               >
                 Review {state.selectedActionIds.size} selected
               </button>
@@ -1117,10 +1273,9 @@ export function SmartCleanupWorkspace({
                 <button
                   type="button"
                   className="button button--primary"
-                  disabled={preflightBusy}
-                  onClick={() => onPrepareRemoval([...state.selectedActionIds].sort((left, right) => left.localeCompare(right)))}
+                  disabled
                 >
-                  {preflightBusy ? 'Checking final plan…' : 'Check final plan'}
+                  {preflightBusy ? 'Checking final plan…' : 'Preparing final check…'}
                 </button>
               )}
             </>

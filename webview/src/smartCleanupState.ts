@@ -220,7 +220,7 @@ export type SmartCleanupAction =
   | { type: 'execution-cancelled-and-restored'; result: SmartCleanupResult }
   | { type: 'reset' };
 
-const DEFAULT_EXPANDED_CATEGORIES: ReadonlySet<SmartCleanupCategory> = new Set(['unused']);
+const DEFAULT_EXPANDED_CATEGORIES: ReadonlySet<SmartCleanupCategory> = new Set();
 
 export function createSmartCleanupState(projectName: string): SmartCleanupState {
   return {

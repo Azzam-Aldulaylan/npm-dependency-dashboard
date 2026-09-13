@@ -18,11 +18,11 @@ Project Maintenance adds bulk review actions, while Smart Cleanup identifies rem
 
 ## Screenshots
 
-![Dependency Dashboard showing a real-world project's updates, vulnerabilities, and maintenance signals](media/screenshots/dashboard.png)
+![Dependency Dashboard showing a real-world project's updates, vulnerabilities, and maintenance signals](media/screenshots/store/dashboard.png)
 
-![Smart Cleanup completion report showing verified before-and-after dependency and vulnerability totals](media/screenshots/smart-cleanup.png)
+![Smart Cleanup plan summarizing recommended actions and evidence categories](media/screenshots/store/cleanup-plan.png)
 
-![Next.js Upgrade Review comparing the installed and latest versions with projected vulnerability remediation](media/screenshots/upgrade-review.png)
+![Sentry Upgrade Review showing compatibility checks and projected vulnerability remediation](media/screenshots/store/upgrade-review.png)
 
 ## Installation
 

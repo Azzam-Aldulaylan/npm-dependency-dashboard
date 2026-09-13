@@ -1546,8 +1546,8 @@ button {
 }
 
 /*
- * The skeleton reuses the real grid/flex shapes (.summary-cards' 4-column
- * grid, the toolbar's two-ended row, the table's column proportions) so the
+ * The skeleton follows the grouped health signals, inventory toolbar,
+ * and five-column table proportions so the
  * page's layout is already correct before any real content exists — the
  * genuine cards/toolbar/table that replace it land in the same place at the
  * same size, instead of the whole page jumping once data arrives.
@@ -1556,31 +1556,46 @@ button {
   display: block;
   height: 0.65rem;
   border-radius: 3px;
-  background: linear-gradient(
-    100deg,
-    var(--vscode-panel-border, rgba(128, 128, 128, 0.25)) 30%,
-    var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.4)) 50%,
-    var(--vscode-panel-border, rgba(128, 128, 128, 0.25)) 70%
-  );
-  background-size: 200% 100%;
-  animation: dashboard-shimmer 1.6s ease-in-out infinite;
+  background: color-mix(in srgb, var(--vscode-foreground) 10%, var(--dashboard-surface-raised));
+  animation: dashboard-shimmer 2.4s ease-in-out infinite;
 }
 
 .loading-skeleton__cards {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 0.6rem;
-  margin-bottom: 1rem;
+  gap: 0;
+  border: 1px solid var(--dashboard-line);
+  border-radius: 10px;
+  overflow: hidden;
 }
+
+.loading-skeleton__health,
+.loading-skeleton__inventory {
+  margin-top: 1rem;
+  border: 1px solid var(--dashboard-line);
+  border-radius: 12px;
+  background: var(--dashboard-surface);
+  overflow: hidden;
+}
+
+.loading-skeleton__health { padding: 1rem; }
+.loading-skeleton__health .loading-state__intro { margin-bottom: 1rem; }
+.loading-skeleton__inventory-title { display: grid; gap: 0.6rem; padding: 1rem; }
+.loading-skeleton__inventory-title .loading-skeleton__bar--subtitle { width: 9rem; height: 0.5rem; }
+.loading-skeleton__filters { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.loading-skeleton__bar--filter { width: 10rem; height: 1.9rem; border-radius: 5px; }
+.loading-skeleton__bar--action { width: 4.5rem; height: 1.9rem; border-radius: 7px; }
 
 .loading-skeleton__card {
   display: flex;
   align-items: flex-start;
   gap: 0.65rem;
-  padding: 0.7rem 0.8rem;
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
-  border-radius: 6px;
+  padding: 1rem;
+  min-height: 7rem;
+  border-right: 1px solid var(--dashboard-line);
+  background: var(--dashboard-surface-raised);
 }
+.loading-skeleton__card:last-child { border-right: 0; }
 
 .loading-skeleton__card-body {
   display: flex;
@@ -1614,9 +1629,11 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 0.6rem;
-  padding-bottom: 0.6rem;
-  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--dashboard-line);
+  border-bottom: 1px solid var(--dashboard-line);
 }
 
 .loading-skeleton__bar--toolbar-count {
@@ -1628,13 +1645,13 @@ button {
 }
 
 .loading-skeleton__table {
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
-  border-radius: 5px;
-  overflow: hidden;
+  overflow-x: auto;
 }
 
 .loading-skeleton__table-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: 2.5fr 1fr 1.5fr 1.3fr 1fr;
+  min-width: 560px;
   gap: 1rem;
   padding: 0.6rem 0.9rem;
   background: var(--vscode-sideBar-background, transparent);
@@ -1644,26 +1661,19 @@ button {
   height: 0.5rem;
 }
 
-.loading-skeleton__table-header .loading-skeleton__bar:nth-child(1) {
-  width: 25%;
-}
-.loading-skeleton__table-header .loading-skeleton__bar:nth-child(2) {
-  width: 15%;
-}
-.loading-skeleton__table-header .loading-skeleton__bar:nth-child(3) {
-  width: 20%;
-}
-.loading-skeleton__table-header .loading-skeleton__bar:nth-child(4) {
-  width: 14%;
-}
-
 .loading-skeleton__row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 2.5fr 1fr 1.5fr 1.3fr 1fr;
+  min-width: 560px;
   align-items: center;
   gap: 1rem;
-  padding: 0.6rem 0.9rem;
+  padding: 0.85rem 1rem;
   border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
 }
+
+.loading-skeleton__table-header .loading-skeleton__bar { width: 60%; }
+.loading-skeleton__row .loading-skeleton__bar--cell { width: 55%; }
+.loading-skeleton__row .loading-skeleton__bar--badge { width: 4rem; }
 
 .loading-skeleton__bar--name {
   flex: 0 0 25%;
@@ -1680,11 +1690,12 @@ button {
 
 @keyframes dashboard-shimmer {
   0% {
-    background-position: 200% 0;
+    opacity: 0.65;
   }
   100% {
-    background-position: -200% 0;
+    opacity: 0.65;
   }
+  50% { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1781,6 +1792,8 @@ button {
 /* -------------------------------------------------------------- responsive */
 
 @media (max-width: 680px) {
+  .loading-skeleton__card:nth-child(2) { border-right: 0; }
+  .loading-skeleton__card:nth-child(-n + 2) { border-bottom: 1px solid var(--dashboard-line); }
   .summary-cards,
   .loading-skeleton__cards {
     grid-template-columns: repeat(2, 1fr);
@@ -1809,6 +1822,8 @@ button {
 }
 
 @media (max-width: 420px) {
+  .loading-skeleton__card { border-right: 0; border-bottom: 1px solid var(--dashboard-line); }
+  .loading-skeleton__card:last-child { border-bottom: 0; }
   .summary-cards,
   .loading-skeleton__cards {
     grid-template-columns: 1fr;

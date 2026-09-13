@@ -62,6 +62,12 @@ export class OperationReservation {
     return this.heldPackage === undefined ? false : this.release(this.heldPackage);
   }
 
+  /** A remounted webview may abandon a review, but must never interrupt file mutation. */
+  async releaseReadOnlyCurrent(): Promise<boolean> {
+    if (this.mutating) return false;
+    return this.releaseCurrent();
+  }
+
   disposeIfIdle(): void {
     if (this.heldPackage === undefined) this.options.dispose();
   }

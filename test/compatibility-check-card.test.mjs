@@ -22,7 +22,14 @@ const { CompatibilityCheckCard, ProjectCompatibilitySection } = await import(`da
 const identity = { packageName: 'next', currentVersion: '15.5.0', targetVersion: '16.0.0', requestId: 'ui', sourceFingerprint: 'ui-source' };
 const compatibility = { status: 'compatible', completeness: 'complete', findings: [] };
 function analysis(analyzers) { return { identity, analyzers, findings: analyzers.flatMap(entry => entry.findings), completedAt: new Date().toISOString() }; }
-function renderSummary(projectCompatibility) { return renderToStaticMarkup(createElement(CompatibilityCheckCard, { compatibility, projectCompatibility })); }
+function renderSummary(projectCompatibility, value = compatibility) {
+  return renderToStaticMarkup(createElement(CompatibilityCheckCard, {
+    compatibility: value,
+    projectCompatibility,
+    context: { package: identity.packageName, currentVersion: identity.currentVersion },
+    onViewProjectDetails: () => {},
+  }));
+}
 function renderDetails(value) { return renderToStaticMarkup(createElement(ProjectCompatibilitySection, { analysis: value })); }
 
 test('every compatibility tile reuses accessible help and puts the status icon on the result row', () => {
@@ -55,7 +62,7 @@ test('summary separates declared Node range from active runtime and links to one
   ]);
   const summary = renderSummary(value);
   assert.match(summary, /Declared range checked/);
-  assert.match(summary, /Active runtime not verified/);
+  assert.match(summary, /development, CI, and deployment runtimes still need verification/);
   assert.match(summary, /Source &amp; config/);
   assert.match(summary, /View check details/);
   assert.doesNotMatch(summary, />Project compatibility</);
@@ -68,6 +75,31 @@ test('summary separates declared Node range from active runtime and links to one
   assert.match(details, /Node version used to run or deploy/);
   assert.match(details, /Next step:/);
   assert.doesNotMatch(details, /project-compat__empty--complete/);
+});
+
+test('dependency warning counts include inspectable host findings', () => {
+  const warning = {
+    status: 'warning',
+    completeness: 'complete',
+    findings: [{
+      id: 'peer-react',
+      kind: 'peer-incompatible',
+      status: 'warning',
+      source: 'static',
+      subject: { name: 'eslint-plugin-example', version: '10.8.1', nodeId: 'node-1' },
+      requirement: { name: 'eslint', range: '^9.0.0', optional: false },
+      observedVersion: '8.57.0',
+      relation: { kind: 'peer', nodeIds: ['node-1'], packageNames: ['eslint-plugin-example', 'eslint'] },
+      explanation: 'eslint-plugin-example requires eslint ^9.0.0, but 8.57.0 is installed.',
+    }],
+  };
+  const html = renderSummary(undefined, warning);
+  assert.match(html, /Dependency findings/);
+  assert.match(html, /Peer conflict/);
+  assert.match(html, /Required: eslint/);
+  assert.match(html, /Proposed: eslint/);
+  assert.match(html, /8\.57\.0/);
+  assert.match(html, /9\.0\.0/);
 });
 
 test('unsupported API scope is explained as a coverage limit, never a successful check', () => {

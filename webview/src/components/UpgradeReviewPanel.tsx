@@ -1,7 +1,7 @@
-import { memo } from 'react';
-import type { ReactElement } from 'react';
+import { memo, useRef } from 'react';
+import type { ReactElement, RefObject } from 'react';
 
-import type { PackageRow, Severity } from '../../../src/core/types.js';
+import type { PackageRow } from '../../../src/core/types.js';
 import { semanticButtonClassName, upgradeConfirmationAction } from '../../../src/host/actionButtonSemantics.js';
 import type { UpgradeAnalysisPresentation } from '../../../src/host/webviewProtocol.js';
 import type { UpgradeAnalysisSections as UpgradeAnalysisSectionsState } from '../../../src/host/upgradeAnalysisSections.js';
@@ -9,9 +9,20 @@ import { hasPlannerAddedCoordination, upgradeAnalysisFreshness } from '../../../
 import { deriveUpgradeReviewDecision } from '../../../src/host/upgradeReviewDecision.js';
 import { summarizeProjectCompatibility } from '../../../src/host/projectCompatibilityUiState.js';
 import { classifyUpdate } from '../../../src/host/updateClassification.js';
-import { severityDisplay } from '../../../src/host/severityDisplay.js';
 import { summarizeUpgradeSecurity } from '../../../src/host/upgradeSecuritySummary.js';
-import { IconFile, IconRefresh, IconTrendUp } from '../icons.js';
+import {
+  IconAlertTriangle,
+  IconCheck,
+  IconChevronRight,
+  IconFile,
+  IconHelpCircle,
+  IconListChecks,
+  IconRefresh,
+  IconRoute,
+  IconShield,
+  IconTrendUp,
+  IconXCircle,
+} from '../icons.js';
 import { DirectionalButton } from './DirectionalButton.js';
 import type { ManageTabId } from './ManageDependencyModal.js';
 import { OutcomeStatus } from './OutcomeStatus.js';
@@ -23,7 +34,8 @@ import {
   SimpleUpgradePlanCard,
   VerificationStepsCard,
 } from './UpgradeAnalysisCards.js';
-import { UpgradeAnalysisSections } from './UpgradeAnalysisSections.js';
+import { buildUpgradeReviewSignals, UpgradeAnalysisSections, UpgradeReviewDisclosure } from './UpgradeAnalysisSections.js';
+import type { UpgradeReviewArea, UpgradeReviewSignal, UpgradeReviewTone as ReviewTone } from './UpgradeAnalysisSections.js';
 import { ProjectCompatibilitySection } from './ProjectCompatibilitySection.js';
 import { StatusBanner } from './StatusBanner.js';
 import { UpgradeTargetSelector } from './UpgradeTargetSelector.js';
@@ -36,26 +48,6 @@ const UPDATE_KIND_LABEL: Record<'major' | 'minor' | 'patch', string> = {
   minor: 'Minor',
   patch: 'Patch',
 };
-
-const SEVERITY_ORDER: readonly Severity[] = ['critical', 'high', 'moderate', 'low', 'info'];
-
-/** Worst-first pick among a set of severities — same rank as severityDisplay.ts's own, kept local since the inputs here (a mix of resolved advisories and still-remaining ones) don't share one common type to sort with sortAdvisoriesBySeverity directly. */
-function worstOf(severities: readonly Severity[]): Severity | null {
-  for (const severity of SEVERITY_ORDER) {
-    if (severities.includes(severity)) return severity;
-  }
-  return null;
-}
-
-/** A compact "label / value" row — same shape used across every tab in this workspace. */
-function GlanceRow({ label, children }: { label: string; children: ReactElement | string }): ReactElement {
-  return (
-    <div className="manage-glance__row">
-      <dt>{label}</dt>
-      <dd>{children}</dd>
-    </div>
-  );
-}
 
 function usageAnalysisLabel(usage: UsageRequestState | undefined): string {
   if (usage === undefined || usage.phase === 'analyzing') return 'Checking usage…';
@@ -75,7 +67,7 @@ function upgradeReviewAreas(analysis: UpgradeAnalysisPresentation, coordinated: 
   if (analysis.compatibility.status === 'conflict') {
     areas.push(coordinated ? 'the coordinated dependency changes' : 'the unresolved dependency conflict');
   } else if (analysis.compatibility.status === 'warning') {
-    const count = analysis.compatibility.findings.length;
+    const count = analysis.compatibility.findings.filter((finding) => finding.status !== 'compatible').length;
     areas.push(count > 0 ? `${count} dependency compatibility ${count === 1 ? 'warning' : 'warnings'}` : 'the dependency compatibility warnings');
   }
   if (analysis.compatibility.status === 'unknown' || analysis.compatibility.completeness !== 'complete') {
@@ -107,121 +99,95 @@ function upgradeReviewAreas(analysis: UpgradeAnalysisPresentation, coordinated: 
   return areas;
 }
 
-/**
- * One scoped headline derived from dependency and project evidence, shared
- * with the recommendation and confirmation action.
- */
-function UpgradeSummaryCard({ analysis }: { analysis: UpgradeAnalysisPresentation }): ReactElement {
-  const { headline } = deriveUpgradeReviewDecision(analysis);
-  const updateKind = classifyUpdate(analysis.currentVersion, analysis.targetVersion);
-  const security = analysis.security;
-  const securitySummary = security === null ? null : summarizeUpgradeSecurity(security);
-  const remainingAfter = security === null ? [] : security.remaining.filter((entry) => entry.status === 'remains');
-  const beforeWorst =
-    security === null
-      ? null
-      : worstOf([...security.resolvedAdvisories.map((entry) => entry.advisory.severity), ...security.remaining.map((entry) => entry.advisory.severity)]);
-  // Do not attach a severity from only the proven-remains subset when another
-  // unresolved advisory is undetermined (and might be more severe).
-  const afterWorst = securitySummary !== null && securitySummary.unknownCount === 0 ? worstOf(remainingAfter.map((entry) => entry.advisory.severity)) : null;
-
-  return (
-    <section className="analysis-card" aria-labelledby="upgrade-summary-heading">
-      <h3 className="manage-section-heading" id="upgrade-summary-heading">
-        Upgrade summary
-      </h3>
-      <OutcomeStatus label={headline.label} className={headline.className} />
-      <dl className="manage-glance">
-        <GlanceRow label="Current version">{analysis.currentVersion}</GlanceRow>
-        <GlanceRow label="Target version">{analysis.targetVersion}</GlanceRow>
-        <GlanceRow label="Update type">
-          <span className="status-badge status-badge--neutral">{updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Unknown'}</span>
-        </GlanceRow>
-        {securitySummary !== null ? (
-          <GlanceRow label="Vulnerabilities">
-            <span className="upgrade-summary__before-after">
-              {securitySummary.beforeCount} {beforeWorst !== null ? severityDisplay(beforeWorst).label : ''} <span aria-hidden="true">→</span>{' '}
-              {securitySummary.afterLabel}
-              {afterWorst !== null ? ` ${severityDisplay(afterWorst).label}` : ''}
-            </span>
-          </GlanceRow>
-        ) : null}
-      </dl>
-    </section>
-  );
-}
-
-function AtAGlanceCard({
-  row,
-  analysis,
-  usage,
-  advisoriesAvailable,
-}: {
-  row: PackageRow;
-  analysis: UpgradeAnalysisPresentation;
-  usage: UsageRequestState | undefined;
-  advisoriesAvailable: boolean;
-}): ReactElement {
-  const needsAttention = row.worstSeverity === 'critical' || row.worstSeverity === 'high';
-
-  return (
-    <section className="analysis-card upgrade-at-a-glance" aria-labelledby="upgrade-at-a-glance-heading">
-      <h3 className="manage-section-heading" id="upgrade-at-a-glance-heading">
-        At a glance
-      </h3>
-      <dl className="manage-glance">
-        <GlanceRow label="Vulnerabilities">
-          {!advisoriesAvailable ? (
-            'Unavailable'
-          ) : row.advisories.length === 0 ? (
-            'None'
-          ) : (
-            <span className={`status-badge status-badge--${needsAttention ? 'warning' : 'neutral'}`}>
-              {row.advisories.length} {severityDisplay(row.worstSeverity).label}
-            </span>
-          )}
-        </GlanceRow>
-        <GlanceRow label="Usage">{usageAnalysisLabel(usage)}</GlanceRow>
-        <GlanceRow label="Status">
-          <span className={`status-badge status-badge--${needsAttention || !advisoriesAvailable ? 'warning' : 'neutral'}`}>
-            {!advisoriesAvailable ? 'Data incomplete' : needsAttention ? 'Needs attention' : 'Looks fine'}
-          </span>
-        </GlanceRow>
-      </dl>
-    </section>
-  );
-}
-
 function baseName(path: string): string {
   const parts = path.split(/[\\/]/);
   return parts.at(-1) ?? path;
 }
 
-function UpgradePreviewCard({ analysis }: { analysis: UpgradeAnalysisPresentation }): ReactElement {
+function iconForReviewSignal(area: UpgradeReviewSignal['area'], tone: ReviewTone): ReactElement {
+  if (area === 'security') return <IconShield />;
+  if (area === 'verification') return <IconListChecks />;
+  if (tone === 'error') return <IconXCircle />;
+  if (tone === 'warning') return <IconAlertTriangle />;
+  if (tone === 'unknown') return <IconHelpCircle />;
+  return area === 'dependency' ? <IconRoute /> : <IconCheck />;
+}
+
+function UpgradeReviewSignalRow({ signal, onOpen }: {
+  signal: UpgradeReviewSignal;
+  onOpen: (area: UpgradeReviewArea) => void;
+}): ReactElement {
+  const content = (
+    <>
+      <span className="upgrade-decision__signal-icon" aria-hidden="true">{iconForReviewSignal(signal.area, signal.tone)}</span>
+      <span className="upgrade-decision__signal-label">{signal.label}</span>
+      <span className="upgrade-decision__signal-value">{signal.value}</span>
+      <IconChevronRight className="upgrade-decision__signal-arrow" />
+    </>
+  );
+  return (
+    <li className={`upgrade-decision__signal upgrade-decision__signal--${signal.tone}`}>
+      <button type="button" onClick={() => onOpen(signal.area)} aria-label={`${signal.label}: ${signal.value}. View details`}>
+        {content}
+      </button>
+    </li>
+  );
+}
+
+function UpgradeDecisionBrief({
+  row,
+  analysis,
+  coordinated,
+  signals,
+  usage,
+  onOpenArea,
+}: {
+  row: PackageRow;
+  analysis: UpgradeAnalysisPresentation;
+  coordinated: boolean;
+  signals: readonly UpgradeReviewSignal[];
+  usage: UsageRequestState | undefined;
+  onOpenArea: (area: UpgradeReviewArea) => void;
+}): ReactElement {
+  const decision = deriveUpgradeReviewDecision(analysis, coordinated);
   const updateKind = classifyUpdate(analysis.currentVersion, analysis.targetVersion);
+  const reviewAreas = upgradeReviewAreas(analysis, coordinated);
+  const signalsNeedingReview = signals.filter((signal) => signal.needsReview);
+  const firstReviewSignal = signalsNeedingReview[0];
 
   return (
-    <section className="analysis-card" aria-labelledby="upgrade-preview-heading">
-      <div className="usage-card__head">
-        <h3 className="analysis-card__title" id="upgrade-preview-heading">
-          Upgrade preview
-        </h3>
+    <section className={`upgrade-decision upgrade-decision--${decision.headline.className}`} aria-labelledby="upgrade-decision-heading">
+      <div className="upgrade-decision__lead">
+        <OutcomeStatus label={decision.headline.label} className={decision.headline.className} size="large" />
+        <h3 id="upgrade-decision-heading">Upgrade {row.name}</h3>
+        <div className="upgrade-decision__versions">
+          <code>{analysis.currentVersion}</code>
+          <span aria-hidden="true">→</span>
+          <code>{analysis.targetVersion}</code>
+          <span className="status-badge status-badge--neutral">{updateKind !== null ? UPDATE_KIND_LABEL[updateKind] : 'Unknown'} update</span>
+        </div>
+        <p className="upgrade-decision__reason">
+          {decision.caution
+            ? `Review ${joinedReviewAreas(reviewAreas)} before upgrading.`
+            : 'No issues were found in completed checks. Run verification after upgrading.'}
+        </p>
+        {decision.caution && firstReviewSignal !== undefined ? (
+          <button type="button" className="button button--secondary upgrade-decision__review" onClick={() => onOpenArea(firstReviewSignal.area)}>
+            Start with {firstReviewSignal.label}
+            <IconChevronRight />
+          </button>
+        ) : null}
+        <div className="upgrade-decision__context">
+          <span><IconFile /> {usageAnalysisLabel(usage)}</span>
+          <span>
+            Will update <code>{baseName(analysis.files.manifestPath)}</code> and <code>{baseName(analysis.files.lockfilePath)}</code>
+            {analysis.files.rollbackAvailable ? ' · Restore point included' : ''}
+          </span>
+        </div>
       </div>
-      <div className="manage-action-card__versions upgrade-preview__versions">
-        <span className="manage-action-card__version">{analysis.currentVersion}</span>
-        <span className="manage-action-card__version-arrow" aria-hidden="true">
-          →
-        </span>
-        <span className="manage-action-card__version manage-action-card__version--target">{analysis.targetVersion}</span>
-        {updateKind !== null ? <span className="status-badge status-badge--neutral">{UPDATE_KIND_LABEL[updateKind]} update</span> : null}
-      </div>
-      <p className="upgrade-preview__files">
-        <IconFile aria-hidden="true" />
-        <span>
-          Will update <code>{baseName(analysis.files.manifestPath)}</code> and <code>{baseName(analysis.files.lockfilePath)}</code>
-          {analysis.files.rollbackAvailable ? ' · Restore point included' : ''}
-        </span>
-      </p>
+      <ul className="upgrade-decision__signals" aria-label="Upgrade review status">
+        {signals.map((signal) => <UpgradeReviewSignalRow signal={signal} onOpen={onOpenArea} key={signal.area} />)}
+      </ul>
     </section>
   );
 }
@@ -236,6 +202,8 @@ const UpgradeReviewDetails = memo(function UpgradeReviewDetails({
   row,
   analysis,
   coordinated,
+  signals,
+  sectionRefs,
   onChangeTab,
   onOpenAdvisory,
   onOpenUsageReference,
@@ -244,29 +212,103 @@ const UpgradeReviewDetails = memo(function UpgradeReviewDetails({
   row: PackageRow;
   analysis: UpgradeAnalysisPresentation;
   coordinated: boolean;
+  signals: readonly UpgradeReviewSignal[];
+  sectionRefs: Readonly<Record<UpgradeReviewArea, RefObject<HTMLDetailsElement | null>>>;
   onChangeTab: (tab: ManageTabId) => void;
   onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[], reference?: string) => void) | undefined;
   onOpenUsageReference?: ((usageId: string, referenceIndex: number) => void) | undefined;
   onConfigureVerification: () => void;
 }): ReactElement {
+  const signal = (area: UpgradeReviewSignal['area']): UpgradeReviewSignal => {
+    const match = signals.find((entry) => entry.area === area);
+    if (match === undefined) throw new Error(`Missing upgrade review signal for ${area}`);
+    return match;
+  };
+  const openProjectDetails = (): void => {
+    const section = sectionRefs.project.current;
+    if (section === null) return;
+    section.open = true;
+    requestAnimationFrame(() => {
+      section.scrollIntoView({ block: 'start' });
+      section.querySelector<HTMLElement>('summary')?.focus({ preventScroll: true });
+    });
+  };
+  const dependency = signal('dependency');
+  const project = signal('project');
+  const security = signal('security');
+  const verification = signal('verification');
+  const planTone: ReviewTone = analysis.compatibility.status === 'conflict' && !coordinated
+    ? 'error'
+    : coordinated
+      ? 'warning'
+      : 'neutral';
+  const planValue = coordinated
+    ? `${analysis.smartPlan?.changes.length ?? analysis.changes.length} coordinated ${analysis.smartPlan?.changes.length === 1 ? 'change' : 'changes'}`
+    : analysis.compatibility.status === 'conflict'
+      ? 'No coordinated resolution'
+      : `${analysis.changes.length} selected ${analysis.changes.length === 1 ? 'change' : 'changes'}`;
+
   return (
     <div className="upgrade-tab__details">
-      <UpgradePreviewCard analysis={analysis} />
-      <CompatibilityCheckCard compatibility={analysis.compatibility} projectCompatibility={analysis.projectCompatibility} />
-      <ProjectCompatibilitySection analysis={analysis.projectCompatibility} onOpenUsageReference={onOpenUsageReference} />
-      {analysis.smartPlan !== null && coordinated ? (
-        <CoordinatedUpgradePlanCard
-          requestedChanges={analysis.changes}
-          smartPlan={analysis.smartPlan}
+      <UpgradeReviewDisclosure
+        sectionRef={sectionRefs.dependency}
+        label={dependency.label}
+        value={dependency.value}
+        tone={dependency.tone}
+      >
+        <CompatibilityCheckCard
           compatibility={analysis.compatibility}
+          projectCompatibility={analysis.projectCompatibility}
+          context={{ package: row.name, currentVersion: analysis.currentVersion }}
+          onViewProjectDetails={openProjectDetails}
         />
-      ) : analysis.compatibility.status === 'conflict' ? (
-        <CoordinationUnavailableCard row={row} changes={analysis.changes} />
-      ) : (
-        <SimpleUpgradePlanCard row={row} changes={analysis.changes} />
-      )}
-      <SecurityOutcomeCard row={row} security={analysis.security} onChangeTab={onChangeTab} onOpenAdvisory={onOpenAdvisory} />
-      <VerificationStepsCard verification={analysis.verification} onConfigureVerification={onConfigureVerification} />
+      </UpgradeReviewDisclosure>
+      <UpgradeReviewDisclosure
+        sectionRef={sectionRefs.project}
+        label={project.label}
+        value={project.value}
+        tone={project.tone}
+      >
+        <ProjectCompatibilitySection analysis={analysis.projectCompatibility} onOpenUsageReference={onOpenUsageReference} />
+      </UpgradeReviewDisclosure>
+      <UpgradeReviewDisclosure
+        sectionRef={sectionRefs.security}
+        label={security.label}
+        value={security.value}
+        tone={security.tone}
+      >
+        {analysis.security !== null ? (
+          <SecurityOutcomeCard row={row} security={analysis.security} onChangeTab={onChangeTab} onOpenAdvisory={onOpenAdvisory} />
+        ) : (
+          <p className="usage-card__subtitle">Security impact was not assessed for this review. Check the Vulnerabilities tab before upgrading.</p>
+        )}
+      </UpgradeReviewDisclosure>
+      <UpgradeReviewDisclosure
+        sectionRef={sectionRefs.plan}
+        label="Planned dependency changes"
+        value={planValue}
+        tone={planTone}
+      >
+        {analysis.smartPlan !== null && coordinated ? (
+          <CoordinatedUpgradePlanCard
+            requestedChanges={analysis.changes}
+            smartPlan={analysis.smartPlan}
+            compatibility={analysis.compatibility}
+          />
+        ) : analysis.compatibility.status === 'conflict' ? (
+          <CoordinationUnavailableCard row={row} changes={analysis.changes} />
+        ) : (
+          <SimpleUpgradePlanCard row={row} changes={analysis.changes} />
+        )}
+      </UpgradeReviewDisclosure>
+      <UpgradeReviewDisclosure
+        sectionRef={sectionRefs.verification}
+        label={verification.label}
+        value={verification.value}
+        tone={verification.tone}
+      >
+        <VerificationStepsCard verification={analysis.verification} onConfigureVerification={onConfigureVerification} />
+      </UpgradeReviewDisclosure>
     </div>
   );
 });
@@ -325,12 +367,10 @@ function UpgradeFreshnessBar({
 }
 
 /**
- * The Upgrade review tab — the exact same review/confirm experience
- * UpgradeAnalysisModal renders for a bulk upgrade, but laid out as this
- * workspace's own Upgrade Summary / At a glance / Recommended action rail
- * beside a full preview on the right, instead of reusing that modal's own
- * card grid verbatim (see UpgradeAnalysisBody for the shared body still used
- * by the bulk-upgrade modal — deliberately untouched by this redesign).
+ * The Upgrade review tab — the same host-owned review/confirm experience
+ * UpgradeAnalysisModal renders for a bulk upgrade, presented here as a
+ * decision brief followed by prioritized evidence and recommendation guidance.
+ * UpgradeAnalysisBody remains the shared body used by the bulk-upgrade modal.
  * `active` is true exactly when this row's own upgrade is the one App.tsx
  * currently has loaded (`upgradeOrigin === 'manage-dependency' &&
  * activeUpgrade === row.name`) — false means either nothing has been
@@ -391,6 +431,27 @@ export function UpgradeReviewPanel({
   onOpenAdvisory?: ((packageName: string, advisoryId: string | number, path: string[], reference?: string) => void) | undefined;
   onOpenUsageReference?: ((usageId: string, referenceIndex: number) => void) | undefined;
 }): ReactElement {
+  const dependencyRef = useRef<HTMLDetailsElement>(null);
+  const projectRef = useRef<HTMLDetailsElement>(null);
+  const securityRef = useRef<HTMLDetailsElement>(null);
+  const planRef = useRef<HTMLDetailsElement>(null);
+  const verificationRef = useRef<HTMLDetailsElement>(null);
+  const sectionRefs: Readonly<Record<UpgradeReviewArea, RefObject<HTMLDetailsElement | null>>> = {
+    dependency: dependencyRef,
+    project: projectRef,
+    security: securityRef,
+    plan: planRef,
+    verification: verificationRef,
+  };
+  const openReviewArea = (area: UpgradeReviewArea): void => {
+    const section = sectionRefs[area].current;
+    if (section === null) return;
+    section.open = true;
+    requestAnimationFrame(() => {
+      section.scrollIntoView({ block: 'start' });
+      section.querySelector<HTMLElement>('summary')?.focus({ preventScroll: true });
+    });
+  };
   const targetSelector = row.upgradeTo === null ? null : (
     <UpgradeTargetSelector
       state={targetState}
@@ -478,11 +539,12 @@ export function UpgradeReviewPanel({
   if (analysis === null) {
     return withTargetSelector(
       <div className="review-panel">
-        <UpgradeAnalysisSections
-          row={row}
-          targetVersion={targetVersion}
-          sections={sections}
-          onChangeTab={onChangeTab}
+            <UpgradeAnalysisSections
+              row={row}
+              targetVersion={targetVersion}
+              sections={sections}
+              advisoriesAvailable={advisoriesAvailable}
+              onChangeTab={onChangeTab}
           onConfigureVerification={onConfigureVerification}
           onOpenAdvisory={onOpenAdvisory}
           onOpenUsageReference={onOpenUsageReference}
@@ -496,8 +558,7 @@ export function UpgradeReviewPanel({
   const expired = upgradeAnalysisFreshness(analysis.analyzedAt, analysis.expiresAt, now) === 'expired';
   const executionBlocked = hardStale || expired;
   const action = upgradeConfirmationAction(coordinated ? analysis : { ...analysis, smartPlan: null });
-  const decision = deriveUpgradeReviewDecision(analysis, coordinated);
-  const reviewAreas = upgradeReviewAreas(analysis, coordinated);
+  const signals = buildUpgradeReviewSignals(analysis, advisoriesAvailable);
 
   return withTargetSelector(
     <div className="review-panel">
@@ -508,33 +569,32 @@ export function UpgradeReviewPanel({
         now={now}
         onRefresh={onRefresh}
       />
-      {decision.caution ? (
-        <StatusBanner tone="warning" className="upgrade-review__summary-banner">
-          <strong>{decision.headline.label}.</strong> Review {joinedReviewAreas(reviewAreas)} before upgrading.
-        </StatusBanner>
-      ) : null}
+      <UpgradeDecisionBrief
+        row={row}
+        analysis={analysis}
+        coordinated={coordinated}
+        signals={signals}
+        usage={usage}
+        onOpenArea={openReviewArea}
+      />
       <div className="upgrade-tab">
-        <div className="upgrade-tab__summary">
-          <UpgradeSummaryCard analysis={analysis} />
-          <AtAGlanceCard row={row} analysis={analysis} usage={usage} advisoriesAvailable={advisoriesAvailable} />
-          <UpgradeRecommendationCard
-            analysis={analysis}
-            coordinated={coordinated}
-            executionBlocked={executionBlocked}
-            busy={busy}
-            onConfirm={onConfirm}
-            onUseSmartPlan={onUseSmartPlan}
-          />
-        </div>
         <UpgradeReviewDetails
           row={row}
           analysis={analysis}
           coordinated={coordinated}
+          signals={signals}
+          sectionRefs={sectionRefs}
           onChangeTab={onChangeTab}
           onOpenAdvisory={onOpenAdvisory}
           onOpenUsageReference={onOpenUsageReference}
           onConfigureVerification={onConfigureVerification}
         />
+        <div className="upgrade-tab__recommendation">
+          <UpgradeRecommendationCard
+            analysis={analysis}
+            coordinated={coordinated}
+          />
+        </div>
       </div>
 
       <div className="review-panel__footer">

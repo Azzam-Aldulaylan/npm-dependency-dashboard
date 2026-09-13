@@ -1804,6 +1804,8 @@ test('confirm-remove and cancel-remove mirror confirm-upgrade / cancel-upgrade\'
 
 const MINIMAL_REMOVE_ANALYSIS = {
   analysisId: 'abc123',
+  analyzedAt: '2026-08-01T09:00:00.000Z',
+  expiresAt: '2026-08-01T11:00:00.000Z',
   package: 'left-pad',
   changes: [{ packageName: 'left-pad', classification: 'prod', stillRequiredBy: [] }],
   verification: { configured: false },
@@ -1818,6 +1820,19 @@ test('remove-analyzing is accepted with just a package name, and rejects a missi
 
 test('a well-formed remove-analysis is accepted', () => {
   assert.equal(isHostToWebviewMessage({ status: 'remove-analysis', analysis: MINIMAL_REMOVE_ANALYSIS }), true);
+});
+
+test('remove-analysis requires canonical freshness timestamps and an expiry after analysis', () => {
+  assert.equal(isHostToWebviewMessage({
+    status: 'remove-analysis',
+    analysis: { ...MINIMAL_REMOVE_ANALYSIS, analyzedAt: 'not-a-date' },
+  }), false);
+  assert.equal(isHostToWebviewMessage({
+    status: 'remove-analysis',
+    analysis: { ...MINIMAL_REMOVE_ANALYSIS, expiresAt: MINIMAL_REMOVE_ANALYSIS.analyzedAt },
+  }), false);
+  const { expiresAt: _expiresAt, ...withoutExpiry } = MINIMAL_REMOVE_ANALYSIS;
+  assert.equal(isHostToWebviewMessage({ status: 'remove-analysis', analysis: withoutExpiry }), false);
 });
 
 test('a stable coordinated removal result is accepted and malformed results are rejected', () => {

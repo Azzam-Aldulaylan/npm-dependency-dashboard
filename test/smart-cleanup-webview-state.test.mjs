@@ -47,6 +47,11 @@ function analyzing(requestId = 'request-1') {
   });
 }
 
+test('Smart Cleanup starts with every evidence category collapsed', () => {
+  const initial = state.createSmartCleanupState('fixture');
+  assert.equal(initial.expandedCategories.size, 0);
+});
+
 test('ready plans select only the first 150 safe direct-removal actions', () => {
   const recommendations = [
     ...Array.from({ length: 151 }, (_, index) => recommendation(index, 'safe')),

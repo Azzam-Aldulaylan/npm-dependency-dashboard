@@ -10,6 +10,8 @@ import type { RemoveAnalysisPresentation } from './webviewProtocol.js';
 
 export interface BuildRemoveAnalysisPresentationOptions {
   analysisId: string;
+  analyzedAt: string;
+  expiresAt: string;
   /** The first, host-validated package in the requested removal — see BulkUpgradeMessage's own anchor-package convention. */
   packageName: string;
   changes: readonly {
@@ -28,6 +30,8 @@ export function buildRemoveAnalysisPresentation(
 ): RemoveAnalysisPresentation {
   return {
     analysisId: options.analysisId,
+    analyzedAt: options.analyzedAt,
+    expiresAt: options.expiresAt,
     package: options.packageName,
     changes: options.changes.map((change) => ({
       packageName: change.packageName,

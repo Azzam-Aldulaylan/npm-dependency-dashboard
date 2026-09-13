@@ -76,6 +76,19 @@ test('read-only review ownership is not mutation ownership', () => {
   assert.equal(lifecycle.isMutationBusy, true);
 });
 
+test('a remounted webview releases abandoned read-only ownership but never a mutation', async () => {
+  const readOnly = fixture();
+  readOnly.lifecycle.reserve('review');
+  assert.equal(await readOnly.lifecycle.releaseReadOnlyCurrent(), true);
+  assert.deepEqual(readOnly.calls, ['release:review', 'flush', 'resume']);
+
+  const mutation = fixture();
+  mutation.lifecycle.reserve('install');
+  mutation.lifecycle.beginMutation('install');
+  assert.equal(await mutation.lifecycle.releaseReadOnlyCurrent(), false);
+  assert.deepEqual(mutation.calls, []);
+});
+
 test('a flush failure is contained and later release cycles still run', async () => {
   const { lifecycle, calls } = fixture({ flushFails: true });
   lifecycle.reserve('one');
@@ -171,6 +184,54 @@ test('a host source change terminates a real in-flight Upgrade analysis exactly 
   }]);
   assert.deepEqual(lifecycle, ['flush', 'resume']);
   assert.equal(coordinator.isBusy(), false);
+});
+
+test('a webview remount abandons an in-flight read-only review without publishing into the new view', async () => {
+  const { UpgradeAssistantCoordinator } = await import('../out/host/upgradeAssistantCoordinator.js');
+  const messages = [];
+  const lifecycle = [];
+  let rejectProjectLoad;
+  let markProjectLoadStarted;
+  const projectLoadStarted = new Promise((resolve) => {
+    markProjectLoadStarted = resolve;
+  });
+  const coordinator = new UpgradeAssistantCoordinator({
+    sink: { postMessage: (message) => messages.push(message) },
+    httpClient: {},
+    etagStore: {},
+    ensureController: async () => ({
+      validateBulkUpgradeRequest: () => ({
+        ok: true,
+        upgrades: [{ packageName: 'dep', currentVersion: '1.0.0', target: '2.0.0', classification: 'major' }],
+      }),
+    }),
+    getSelectedProject: () => ({ id: 'project', dir: '', folder: {} }),
+    isDisposed: () => false,
+    reloadFinalState: async () => {},
+    flushDeferredChanges: async () => lifecycle.push('flush'),
+    onMutationLockReleased: () => lifecycle.push('resume'),
+    loadProject: async () => {
+      markProjectLoadStarted();
+      return await new Promise((_, reject) => {
+        rejectProjectLoad = reject;
+      });
+    },
+  });
+
+  const analysis = coordinator.handleAnalyzeUpgrade({
+    type: 'upgrade',
+    requestId: 'orphaned-request',
+    package: 'dep',
+    target: '2.0.0',
+  });
+  await projectLoadStarted;
+  await coordinator.handleWebviewReady();
+
+  assert.equal(coordinator.isBusy(), false);
+  assert.deepEqual(lifecycle, ['flush', 'resume']);
+  rejectProjectLoad(new Error('abandoned by webview remount'));
+  await analysis;
+  assert.deepEqual(messages, []);
 });
 
 test('bulk upgrade review prefers a publisher-declared LTS target over the dashboard latest target', async () => {
@@ -435,7 +496,11 @@ test('Smart Cleanup removal is capability-gated and rechecks host usage evidence
     removalRequestId: 'impact-cancelled-before-delivery',
     packages: ['react'],
   });
-  assert.equal(cancelledBeforeDelivery.coordinator.isBusy(), true);
+  assert.equal(
+    cancelledBeforeDelivery.coordinator.isBusy(),
+    false,
+    'a completed read-only removal review does not retain the mutation reservation'
+  );
   cancelledBeforeDelivery.coordinator.handleCancelRemove({
     analysisId: null,
     requestId: 'cleanup-cancelled-before-delivery',
@@ -443,7 +508,7 @@ test('Smart Cleanup removal is capability-gated and rechecks host usage evidence
   assert.equal(
     cancelledBeforeDelivery.coordinator.isBusy(),
     false,
-    'request-correlated cancellation releases a review stored just before its analysisId reaches the webview'
+    'request-correlated cancellation clears the stored review without re-locking the project'
   );
 });
 

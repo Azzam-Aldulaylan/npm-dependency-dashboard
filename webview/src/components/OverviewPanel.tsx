@@ -487,7 +487,7 @@ export function OverviewPanel({
   return (
     <div className="overview-panel">
       <div className="overview-panel__summary">
-        <section className="manage-summary-block" aria-labelledby="manage-package-overview-heading">
+        <section className="manage-summary-block overview-summary-card overview-summary-card--identity" aria-labelledby="manage-package-overview-heading">
           <h3 className="manage-section-heading" id="manage-package-overview-heading">
             Package overview
           </h3>
@@ -501,7 +501,7 @@ export function OverviewPanel({
           </dl>
         </section>
 
-        <section className="manage-summary-block" aria-labelledby="manage-at-a-glance-heading">
+        <section className="manage-summary-block overview-summary-card overview-summary-card--health" aria-labelledby="manage-at-a-glance-heading">
           <h3 className="manage-section-heading" id="manage-at-a-glance-heading">
             At a glance
           </h3>

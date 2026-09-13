@@ -60,9 +60,8 @@ export function LoadingRing({ progress }: { progress: LoadingProgress | undefine
 const ROW_NAME_WIDTHS = ['62%', '84%', '48%', '70%', '56%', '90%'];
 
 /**
- * A skeleton that approximates the *finished* layout — four card-shaped
- * blocks, a toolbar bar, and a table with the same four data columns real
- * rows use — rather than a handful of generic horizontal bars. The goal is
+ * A skeleton that follows the finished grouped health panel and five-column
+ * inventory. The goal is
  * that swapping in real content causes as little layout shift as possible,
  * and that the shape on screen already looks like "a dependency dashboard is
  * forming", not an unrelated loading spinner.
@@ -83,16 +82,15 @@ export function DependencyLoadingState({
 
   return (
     <div className="loading-state" role="status" aria-live="polite">
-      <div className="loading-state__intro">
-        <LoadingRing progress={progress} />
-        <div>
-          <p className="loading-state__title">Checking dependencies</p>
-          <p className="loading-state__detail">{detail}</p>
+      <section className="loading-skeleton__health">
+        <div className="loading-state__intro">
+          <LoadingRing progress={progress} />
+          <div>
+            <p className="loading-state__title">Checking dependencies</p>
+            <p className="loading-state__detail">{detail}</p>
+          </div>
         </div>
-      </div>
-
-      <div className="loading-skeleton" aria-hidden="true">
-        <div className="loading-skeleton__cards">
+        <div className="loading-skeleton__cards" aria-hidden="true">
           {[0, 1, 2, 3].map((index) => (
             <div className="loading-skeleton__card" key={index}>
               <span className="loading-skeleton__bar loading-skeleton__bar--icon" />
@@ -104,9 +102,18 @@ export function DependencyLoadingState({
             </div>
           ))}
         </div>
+      </section>
 
-        <div className="loading-skeleton__toolbar">
+      <div className="loading-skeleton loading-skeleton__inventory" aria-hidden="true">
+        <div className="loading-skeleton__inventory-title">
           <span className="loading-skeleton__bar loading-skeleton__bar--toolbar-count" />
+          <span className="loading-skeleton__bar loading-skeleton__bar--subtitle" />
+        </div>
+        <div className="loading-skeleton__toolbar">
+          <div className="loading-skeleton__filters">
+            <span className="loading-skeleton__bar loading-skeleton__bar--filter" />
+            <span className="loading-skeleton__bar loading-skeleton__bar--filter" />
+          </div>
           <span className="loading-skeleton__bar loading-skeleton__bar--toolbar-action" />
         </div>
 
@@ -116,13 +123,15 @@ export function DependencyLoadingState({
             <span className="loading-skeleton__bar loading-skeleton__bar--col-header" />
             <span className="loading-skeleton__bar loading-skeleton__bar--col-header" />
             <span className="loading-skeleton__bar loading-skeleton__bar--col-header" />
+            <span className="loading-skeleton__bar loading-skeleton__bar--col-header" />
           </div>
           {ROW_NAME_WIDTHS.map((width, index) => (
             <div className="loading-skeleton__row" key={index}>
-              <span className="loading-skeleton__bar loading-skeleton__bar--name" style={{ width }} />
+              <div><span className="loading-skeleton__bar loading-skeleton__bar--name" style={{ width }} /></div>
               <span className="loading-skeleton__bar loading-skeleton__bar--cell" />
               <span className="loading-skeleton__bar loading-skeleton__bar--cell" />
               <span className="loading-skeleton__bar loading-skeleton__bar--badge" />
+              <span className="loading-skeleton__bar loading-skeleton__bar--action" />
             </div>
           ))}
         </div>

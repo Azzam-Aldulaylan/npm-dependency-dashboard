@@ -19,8 +19,7 @@ import type { SortColumn, TableSortState } from '../../src/host/tableSort.js';
 import { nextColumnSortState, sortRows } from '../../src/host/tableSort.js';
 import {
   applyUpgradeResultLocalFacts,
-  manageRemovalReplacesUpgradeReview,
-  manageUpgradeReplacesRemovalReview,
+  completedManageReviewCanCoexist,
   targetChangeInvalidatesManageAnalysis,
   upgradeAnalysisMessageMatchesRequest,
   upgradeAnalysisRequestIsAllowed,
@@ -70,7 +69,7 @@ import { StatusBanner } from './components/StatusBanner.js';
 import { UpgradeAnalysisModal } from './components/UpgradeAnalysisModal.js';
 import type { UpgradeTargetLoadState } from './components/UpgradeTargetSelector.js';
 import type { UsageRequestState } from './components/UsageReferencesPanel.js';
-import { IconBroom, IconListChecks, IconRefresh } from './icons.js';
+import { IconBroom, IconListChecks, IconPackage, IconRefresh } from './icons.js';
 import type { RemovalImpactState } from './removalImpactState.js';
 import { remediationPlanFromState } from './transitiveRemediationState.js';
 import type { TransitiveFixUiState } from './transitiveRemediationState.js';
@@ -205,7 +204,8 @@ export function App(): ReactElement {
 
   // Same anchor/lock discipline as the upgrade state above, for a
   // coordinated removal — the two share one host-side panel-wide lock, so
-  // only one of activeUpgrade/activeRemove is ever non-null at a time.
+  // Completed Manage reviews may coexist; each active field still tracks only
+  // one package for its own review type.
   const [activeRemove, setActiveRemove] = useState<string | null>(null);
   const [activeRemoveChanges, setActiveRemoveChanges] = useState<readonly string[]>([]);
   // "Why matched" tags from the criteria picker's own selection at the
@@ -376,12 +376,15 @@ export function App(): ReactElement {
   // dedicated tick at that exact deadline so an open review cannot remain
   // visibly actionable for the remainder of an arbitrary minute interval.
   useEffect(() => {
-    if (analysis === null) return;
-    const expiresAt = Date.parse(analysis.expiresAt);
-    if (!Number.isFinite(expiresAt)) {
+    const expiries = [analysis?.expiresAt, removeAnalysis?.expiresAt]
+      .filter((value): value is string => value !== undefined)
+      .map((value) => Date.parse(value));
+    if (expiries.length === 0) return;
+    if (expiries.some((value) => !Number.isFinite(value))) {
       setMinuteClock(Date.now());
       return;
     }
+    const expiresAt = Math.min(...expiries);
     const remaining = expiresAt - Date.now();
     if (remaining <= 0) {
       setMinuteClock(Date.now());
@@ -389,7 +392,7 @@ export function App(): ReactElement {
     }
     const timer = window.setTimeout(() => setMinuteClock(Date.now()), remaining);
     return () => window.clearTimeout(timer);
-  }, [analysis]);
+  }, [analysis, removeAnalysis]);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent): void => {
@@ -486,6 +489,7 @@ export function App(): ReactElement {
       }
 
       if (incoming.status === 'upgrade-error') {
+        setConfirmBusy(false);
         // Never touches `message` — the rendered table/banners are exactly
         // what they were before this arrived.
         if (upgradeErrorClearsActiveState(incoming.error.code)) {
@@ -548,6 +552,7 @@ export function App(): ReactElement {
       }
 
       if (incoming.status === 'remove-error') {
+        setRemoveBusy(false);
         const smartCleanupRemoval = removeOriginRef.current === 'smart-cleanup';
         // Same shared-lock discipline as upgrade-error — reused directly
         // since UPGRADE_IN_PROGRESS is the one code both flows post when the
@@ -1307,9 +1312,9 @@ export function App(): ReactElement {
   // below for that path). Reviewed inline in Manage rather than opening a
   // second dialog — see the ManageDependencyModal render block's own doc.
   const requestUpgrade = useCallback((packageName: string, target: string) => {
-    // The host keeps an accepted analysis locked until confirm/cancel. Never
-    // replace the analysis id this client is tracking with a duplicate request
-    // that the host will reject as UPGRADE_IN_PROGRESS.
+    // Keep one cached upgrade review per webview flow. The host releases the
+    // read-only reservation after analysis, but replacing this tracked id with
+    // a duplicate would still orphan the result the user is reading.
     if (!upgradeAnalysisRequestIsAllowed(activeUpgradeRef.current)) return;
     const requestId = String(++nextRequestIdRef.current);
     activeUpgradeRef.current = packageName;
@@ -1373,8 +1378,8 @@ export function App(): ReactElement {
 
   // Closes the modal immediately, client-side, rather than waiting on a host
   // round trip — cancelling mutates nothing, so there's nothing to wait for.
-  // Still tells the host either way: a real analysisId releases its lock
-  // right away; `null` (still loading, no id issued yet) marks the in-flight
+  // Still tells the host either way: a real analysisId drops its cached
+  // review; `null` (still loading, no id issued yet) marks the in-flight
   // analyze request so the host drops its own result instead of storing it —
   // see webviewProtocol.ts's own doc on cancel-upgrade's nullable id.
   const requestCancelUpgrade = useCallback(() => {
@@ -1478,23 +1483,24 @@ export function App(): ReactElement {
     setRemoveOrigin(null);
   }, [removeAnalysis]);
 
-  // Upgrade and removal previews share one host-owned project lock. A
-  // completed embedded removal review is a decision screen, not ongoing
-  // work, so starting Upgrade review deliberately closes it first. Keep an
-  // in-progress removal analysis or file mutation protected from takeover.
+  // Completed read-only reviews can coexist in the Manage workspace. The
+  // host releases their analysis reservation after each result and reacquires
+  // it only when the user confirms a file mutation.
   const requestUpgradeFromManage = useCallback(
     (packageName: string, target: string) => {
-      if (manageUpgradeReplacesRemovalReview(
-        packageName,
-        activeRemove,
-        removeOrigin === 'smart-cleanup' ? null : removeOrigin
-      )) {
-        if (removeAnalysis === null || removeBusy) return;
-        requestCancelRemove();
-      }
+      if (
+        activeRemove !== null &&
+        !completedManageReviewCanCoexist(
+          packageName,
+          activeRemove,
+          removeOrigin === 'smart-cleanup' ? null : removeOrigin,
+          removeAnalysis !== null,
+          removeBusy
+        )
+      ) return;
       requestUpgrade(packageName, target);
     },
-    [activeRemove, removeAnalysis, removeBusy, removeOrigin, requestCancelRemove, requestUpgrade]
+    [activeRemove, removeAnalysis, removeBusy, removeOrigin, requestUpgrade]
   );
 
   // Selecting a card re-asserts that card's own intelligent default sort
@@ -1768,22 +1774,21 @@ export function App(): ReactElement {
   // inline, so there is no separate drawer to reveal Manage again from.
   const requestRemoveFromManage = useCallback(
     (packageName: string) => {
-      // A completed embedded upgrade preview deliberately retains the host's
-      // project lock until confirm/cancel. Replacing that decision with a
-      // removal must cancel it first; postMessage ordering makes the exact-id
-      // cancellation release the lock before removal-impact analysis starts.
-      if (manageRemovalReplacesUpgradeReview(packageName, activeUpgrade, upgradeOrigin)) {
-        // A still-running preflight has no exact analysis id to release yet.
-        // Keep its UI/state intact and wait for it to finish instead of
-        // immediately sending an impact request that the host must reject.
-        if (analysis === null) return;
-        requestCancelUpgrade();
-      }
+      if (
+        activeUpgrade !== null &&
+        !completedManageReviewCanCoexist(
+          packageName,
+          activeUpgrade,
+          upgradeOrigin,
+          analysis !== null,
+          confirmBusy
+        )
+      ) return;
       setPendingManageRemoval(packageName);
       setRemoveError(null);
       requestAnalyzeRemovalImpact([packageName]);
     },
-    [activeUpgrade, analysis, requestAnalyzeRemovalImpact, requestCancelUpgrade, upgradeOrigin]
+    [activeUpgrade, analysis, confirmBusy, requestAnalyzeRemovalImpact, upgradeOrigin]
   );
 
   useEffect(() => {
@@ -2197,9 +2202,17 @@ export function App(): ReactElement {
   return (
     <main className="dashboard">
       <header className="dashboard__header">
-        <div className="dashboard__header-titles">
-          <h1 className="dashboard__title">Dependency Dashboard</h1>
-          {data !== undefined ? <p className="dashboard__project">{data.project.label}</p> : null}
+        <div className="dashboard__identity">
+          <span className="dashboard__mark" aria-hidden="true"><IconPackage /></span>
+          <div className="dashboard__header-titles">
+            <h1 className="dashboard__title">Dependency Dashboard</h1>
+            {data !== undefined ? (
+              <p className="dashboard__project">
+                <strong>{data.project.label}</strong>
+                <span>Project dependencies, updates, and security</span>
+              </p>
+            ) : null}
+          </div>
         </div>
         {data !== undefined ? <DependencySearch value={search} onChange={handleSearchChange} /> : null}
       </header>
@@ -2310,18 +2323,19 @@ export function App(): ReactElement {
             const upgradeActive = upgradeOrigin === 'manage-dependency' && activeUpgrade === row.name;
             const removeActive =
               (removeOrigin === 'manage-dependency' && activeRemove === row.name) || pendingManageRemoval === row.name;
+            const embeddedUpgradeCanYield = upgradeActive && analysis !== null && !confirmBusy;
             // Once an embedded removal analysis has finished, Upgrade review
-            // becomes available again. Its Analyze action performs the lock
-            // handoff above; genuinely active work remains disabled.
+            // becomes available again while the cached removal result remains
+            // available on its own tab. Genuinely active work stays disabled.
             const embeddedRemovalCanYield = removeActive && removeAnalysis !== null && !removeBusy;
             // `actionsDisabled` treats every retained removal review as active
             // because it is also shared with dashboard-level controls. Inside
-            // this same Manage workspace, a completed read-only review may be
-            // replaced deliberately; preserve every other global blocker and
+            // this same Manage workspace, completed read-only reviews may
+            // coexist; preserve every other global blocker and
             // keep actual removal/remediation work protected.
             const manageActionsDisabled =
               loading ||
-              activeUpgrade !== null ||
+              (activeUpgrade !== null && !embeddedUpgradeCanYield) ||
               remediationBusy ||
               cleanupState.phase === 'analyzing' ||
               (activeRemove !== null && !embeddedRemovalCanYield);
@@ -2648,104 +2662,126 @@ function Dashboard({
         />
       ) : (
         <>
-          <SummaryCards
-            metrics={metrics}
-            availability={data.availability}
-            selected={selectedFilter}
-            onSelect={onSelectFilter}
-          />
-
-          <DashboardToolbar
-            canChangeProject={canChangeProject}
-            onChangeProject={onChangeProject}
-            onRefresh={onRefresh}
-            disabled={actionsDisabled}
-            refreshing={status === 'stale'}
-            trailingActions={
-              <div className="toolbar__analysis-actions">
-                <button
-                  className="button button--primary"
-                  type="button"
-                  onClick={onOpenSmartCleanup}
-                  disabled={actionsDisabled || upgradesDisabled}
-                  title="Find evidence-backed cleanup opportunities and remove approved unused dependencies"
-                >
-                  <IconBroom />
-                  Smart Cleanup
-                </button>
-                <button
-                  className="button button--secondary"
-                  type="button"
-                  onClick={onOpenBulkActions}
-                  disabled={actionsDisabled || upgradesDisabled}
-                  title="Upgrade, remove, or check multiple dependencies at once"
-                >
-                  <IconListChecks />
-                  Manage dependencies
-                </button>
+          <section className="dashboard__overview" aria-labelledby="dashboard-overview-title">
+            <div className="dashboard__section-heading">
+              <div>
+                <h2 id="dashboard-overview-title">Project health</h2>
+                <p>Select a signal to focus the dependency inventory.</p>
               </div>
-            }
-          >
-            <DependencyTypeFilter value={dependencyType} counts={typeCounts} onChange={onDependencyTypeChange} />
-            <HygieneFilter
-              value={hygieneFilter}
-              likelyUnusedCount={findingCounts['likely-unused']}
-              duplicateCount={findingCounts['duplicate-version']}
-              onChange={onHygieneFilterChange}
+              <span className="dashboard__snapshot">Updated {formatTime(data.generatedAt)}</span>
+            </div>
+            <SummaryCards
+              metrics={metrics}
+              availability={data.availability}
+              selected={selectedFilter}
+              onSelect={onSelectFilter}
             />
-          </DashboardToolbar>
+          </section>
 
-          {filteredRows.length === data.rows.length ? null : (
-            <p className="dashboard__matching-results" aria-live="polite">
-              Current filters match {filteredRows.length} of {dependencyCountLabel(data.rows.length)}.
-            </p>
-          )}
+          <section className="dashboard__inventory" aria-labelledby="dashboard-inventory-title">
+            <div className="dashboard__inventory-heading">
+              <div>
+                <h2 id="dashboard-inventory-title">Dependency inventory</h2>
+                <p className="dashboard__matching-results" aria-live="polite">
+                  {filteredRows.length === data.rows.length
+                    ? dependencyCountLabel(data.rows.length)
+                    : `${filteredRows.length} of ${dependencyCountLabel(data.rows.length)} match the current filters`}
+                </p>
+              </div>
+            </div>
 
-          {filteredRows.length === 0 ? (
-            query !== '' ? (
-              <DependencyEmptyState
-                icon="search"
-                title={`No dependencies match "${search.trim()}"`}
-                detail="Try another package name, vulnerability ID, dependency path, or clear the search."
-                onClearSearch={() => {
-                  onSearchChange('');
-                }}
-              />
+            <DashboardToolbar
+              canChangeProject={canChangeProject}
+              onChangeProject={onChangeProject}
+              onRefresh={onRefresh}
+              disabled={actionsDisabled}
+              refreshing={status === 'stale'}
+              trailingActions={
+                <div className="toolbar__analysis-actions">
+                  <button
+                    className="button button--primary"
+                    type="button"
+                    onClick={onOpenSmartCleanup}
+                    disabled={actionsDisabled || upgradesDisabled}
+                    title="Find evidence-backed cleanup opportunities and remove approved unused dependencies"
+                  >
+                    <IconBroom />
+                    Smart Cleanup
+                  </button>
+                  <button
+                    className="button button--secondary"
+                    type="button"
+                    onClick={onOpenBulkActions}
+                    disabled={actionsDisabled || upgradesDisabled}
+                    title="Upgrade, remove, or check multiple dependencies at once"
+                  >
+                    <IconListChecks />
+                    Manage dependencies
+                  </button>
+                </div>
+              }
+            >
+              <div className="dashboard__filter">
+                <span>Dependency type</span>
+                <DependencyTypeFilter value={dependencyType} counts={typeCounts} onChange={onDependencyTypeChange} />
+              </div>
+              <div className="dashboard__filter">
+                <span>Findings</span>
+                <HygieneFilter
+                  value={hygieneFilter}
+                  likelyUnusedCount={findingCounts['likely-unused']}
+                  duplicateCount={findingCounts['duplicate-version']}
+                  onChange={onHygieneFilterChange}
+                />
+              </div>
+            </DashboardToolbar>
+
+            {filteredRows.length === 0 ? (
+              query !== '' ? (
+                <DependencyEmptyState
+                  icon="search"
+                  title={`No dependencies match "${search.trim()}"`}
+                  detail="Try another package name, vulnerability ID, dependency path, or clear the search."
+                  onClearSearch={() => {
+                    onSearchChange('');
+                  }}
+                />
+              ) : (
+                <DependencyEmptyState
+                  icon="filter"
+                  title={filterEmptyStateTitle(
+                    selectedFilter,
+                    dependencyType,
+                    hygieneFilter,
+                    cleanupAnalyzed
+                  )}
+                  detail="Nothing matches this filter."
+                />
+              )
             ) : (
-              <DependencyEmptyState
-                icon="filter"
-                title={filterEmptyStateTitle(
-                  selectedFilter,
-                  dependencyType,
-                  hygieneFilter,
-                  cleanupAnalyzed
-                )}
-                detail="Nothing matches this filter."
-              />
-            )
-          ) : (
-            <>
-              <PackageTable
-                rows={pageResult.pageRows}
-                unavailableUpdatePackages={unavailableUpdatePackages}
-                advisoriesAvailable={data.availability.advisories === 'complete'}
-                searchQuery={search}
-                onOpenAdvisory={onOpenAdvisory}
-                sortState={sortState}
-                onSort={onSort}
-                hygieneFindings={hygieneFindings}
-                onOpenManage={onOpenManage}
-              />
-              <Pagination
-                currentPage={pageResult.currentPage}
-                totalPages={pageResult.totalPages}
-                totalRows={pageResult.totalRows}
-                pageSize={pageSize}
-                onPageChange={onPageChange}
-                onPageSizeChange={onPageSizeChange}
-              />
-            </>
-          )}
+              <>
+                <PackageTable
+                  rows={pageResult.pageRows}
+                  unavailableUpdatePackages={unavailableUpdatePackages}
+                  advisoriesAvailable={data.availability.advisories === 'complete'}
+                  searchQuery={search}
+                  onOpenAdvisory={onOpenAdvisory}
+                  sortState={sortState}
+                  onSort={onSort}
+                  hygieneFindings={hygieneFindings}
+                  onOpenManage={onOpenManage}
+                />
+                <Pagination
+                  currentPage={pageResult.currentPage}
+                  totalPages={pageResult.totalPages}
+                  totalRows={pageResult.totalRows}
+                  pageSize={pageSize}
+                  onPageChange={onPageChange}
+                  onPageSizeChange={onPageSizeChange}
+                />
+              </>
+            )}
+          </section>
         </>
       )}
 

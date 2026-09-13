@@ -502,6 +502,10 @@ export interface RemovalImpactAssessment {
 
 export interface RemoveAnalysisPresentation {
   analysisId: string;
+  /** Host-minted analysis completion time, used only for freshness messaging. */
+  analyzedAt: string;
+  /** Hard authorization expiry. Confirmation still performs authoritative source revalidation. */
+  expiresAt: string;
   package: string;
   /** Every host-validated package in the requested coordinated removal. */
   changes: RemoveAnalysisChange[];
@@ -1632,8 +1636,11 @@ function isVerification(value: unknown): value is UpgradeAnalysisVerification {
 
 function isRemoveAnalysisPresentation(value: unknown): value is RemoveAnalysisPresentation {
   if (!isRecord(value)) return false;
-  if (!hasOnlyKeys(value, ['analysisId', 'package', 'changes', 'verification', 'files', 'dedupe'])) return false;
+  if (!hasOnlyKeys(value, ['analysisId', 'analyzedAt', 'expiresAt', 'package', 'changes', 'verification', 'files', 'dedupe'])) return false;
   if (!isVerification(value['verification'])) return false;
+
+  if (!isCanonicalIsoDate(value['analyzedAt']) || !isCanonicalIsoDate(value['expiresAt'])) return false;
+  if (Date.parse(value['expiresAt']) <= Date.parse(value['analyzedAt'])) return false;
 
   const changes = value['changes'];
   if (!Array.isArray(changes) || changes.length > MAX_BULK_REMOVE_CHANGES) return false;

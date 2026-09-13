@@ -221,7 +221,7 @@ function TabButton({
     <button
       id={`manage-tab-${id}`}
       type="button"
-      className={`manage-tabs__tab${active ? ' manage-tabs__tab--active' : ''}`}
+      className={`manage-tabs__tab manage-tabs__tab--${id}${active ? ' manage-tabs__tab--active' : ''}`}
       role="tab"
       aria-controls="manage-panel"
       aria-selected={active}
@@ -524,6 +524,7 @@ export function ManageDependencyModal({
         removalImpact={removalImpact}
         usage={usage}
         advisoriesAvailable={quarantineDerivedData ? false : advisoriesAvailable}
+        now={now}
         onAnalyzeRemoval={removal.onAnalyze}
         onConfirm={removal.onConfirm}
         onViewReferences={() => onChangeTab('usage')}
